@@ -1,0 +1,36 @@
+# cathedral-eval — the attested evaluation image, to the sat-king contract.
+#
+# The quote binds sha256(image_digest || sha256hex(stdout)), so this image's one
+# job is: read inputs from fixed mount paths, run the eval, and print exactly
+# the canonical pre-attestation receipt to stdout. All diagnostics go to stderr;
+# per-item outcomes land in /cathedral/artifacts for later Merkle openings.
+#
+# Pull by digest, never :latest — Cathedral admission resolves no tags.
+#
+# Mode A, self-contained: the platform mounts /input and runs the image.
+#   /input/identity.json   validator-authorised identity fields
+#   /input/model.json      model_id / weights_digest / tokenizer_digest
+#   /input/runtime.json    image_digest / runner_digest
+#   /input/evalset.json    the receipt's evalset block
+#   /input/items.json      opened items (decrypted inside the enclave)
+#   /input/backend.cmd     one line: the inference command template
+FROM python:3.12-slim@sha256:47b3c7d4b2bbeedcc7477cf9e2f26e69b8f4c9dc23f5d09d769cbde6bb524cd7
+
+RUN pip install --no-cache-dir cryptography==43.0.3 && \
+    useradd --no-create-home --shell /usr/sbin/nologin evalrunner && \
+    mkdir -p /cathedral/artifacts && chown evalrunner /cathedral/artifacts
+
+COPY cathedral_distill /opt/cathedral/cathedral_distill
+ENV PYTHONPATH=/opt/cathedral PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+USER evalrunner
+
+# Shell entrypoint (never the bare interpreter), single-threaded, deterministic
+# stdout: the receipt bytes and nothing else.
+ENTRYPOINT ["sh", "-c", "exec python3 -m cathedral_distill.runner \
+  --identity /input/identity.json \
+  --model /input/model.json \
+  --runtime /input/runtime.json \
+  --evalset-meta /input/evalset.json \
+  --items /input/items.json \
+  --backend-command \"$(cat /input/backend.cmd)\" \
+  --outcomes /cathedral/artifacts/outcomes.jsonl"]

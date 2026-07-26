@@ -165,6 +165,10 @@ ran" refutable — while revealing nothing about its contents.
 | [`roles.py`](cathedral_distill/roles.py) | Role separation and independent reward accounting |
 | [`polaris_attest.py`](cathedral_distill/polaris_attest.py) | Binds a receipt to a TDX quote |
 | [`teacher_registry.py`](cathedral_distill/teacher_registry.py) | Reviewed teacher allowlist |
+| [`challenge.py`](cathedral_distill/challenge.py) | Validator spot-checks: Merkle openings, chain-derived challenges, detection budgeting |
+| [`evalset.py`](cathedral_distill/evalset.py) | `hermes-extract-v0`: deterministic extraction set with minted canaries |
+| [`runner.py`](cathedral_distill/runner.py) | The enclave eval runner; stdout carries exactly the receipt bytes |
+| [`teacher.py`](cathedral_distill/teacher.py) | Provider-agnostic teacher client; licence-gated corpus with logprobs from row one |
 
 ### Receipts
 `cathedral_ml_eval_receipt_v1` is a deliberate sibling of
@@ -209,7 +213,10 @@ one version says nothing about the next.
 
 ## What is proven today
 
-- All modules pass **150 local tests**, hardware-free.
+- All modules pass **205 local tests**, hardware-free, including one end-to-end
+  test that walks the entire path: build set → seal → open → run → grade →
+  receipt → attestation binding → validation → validator spot-check → registry
+  line → frontier crown → emission share.
 - Receipt validation, sealing, quote binding, deterministic grading, teacher
   allowlisting, bundle registration, submission intake, gate evaluation and
   frontier judging are implemented and covered.
@@ -243,7 +250,7 @@ pip install -e '.[dev]'
 pytest
 ```
 
-Expected: `150 passed`.
+Expected: `205 passed`.
 
 | Test file | Tests |
 |---|---:|
@@ -269,14 +276,32 @@ The evaluation runner follows the `sat-king` shape, because the attestation bind
 
 ---
 
+## Verifying a score without re-running the evaluation
+
+A validator cannot re-run every evaluation, must not hold the sealed set, and
+cannot take the miner's word. Verification is therefore layered, cheapest first:
+
+1. **Structural** — the score must equal the receipt's own item counts.
+2. **Attestation** — the quote verifies, `report_data` reconstructs from the
+   receipt, the eval image is allowlisted.
+3. **Merkle spot-check** (`challenge.py`) — challenge indices derive from a block
+   hash that did not exist when the receipt was committed, so a miner cannot
+   know in advance which items will be opened. The miner reveals those items
+   with openings against `items_root`; the validator re-grades exactly those
+   locally. Declining to open an item is a failure, not an omission.
+4. **Independent re-run** — occasional full re-evaluation on other attested
+   hardware (the `reproduced` gate).
+
+Cheating on `m` of `n` items survives a `k`-item challenge with hypergeometric
+probability; `detection_probability` makes the budget explicit, and
+`leakage_after` bounds how much of a shard spot-checks may burn before rotation.
+
 ## Roadmap
 
-- Evaluation sets with machine-checkable ground truth per track
-- Runner and digest-pinned evaluation image
-- Provider-agnostic teacher client
 - Two-enclave split on attested hardware
 - Frontier score class wired to weights
 - Serving-miner routing and per-track leaderboards
+- Retired-shard publication, making sealed sets retroactively auditable
 
 ## Licence
 
