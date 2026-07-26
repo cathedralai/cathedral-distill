@@ -100,7 +100,7 @@ _RECEIPT_KEYS = frozenset(
 # checkpoint identified in an eval receipt is byte-identical to the same
 # checkpoint identified in an inference receipt.
 _MODEL_KEYS = frozenset({"model_id", "weights_digest", "tokenizer_digest"})
-_RUNTIME_KEYS = frozenset({"image_digest", "runner_digest"})
+_RUNTIME_KEYS = frozenset({"image_digest", "runner_digest", "decode_digest"})
 
 # `sealed_digest` is the digest of the ciphertext the miner actually holds.
 # `plaintext_digest` is the digest of the decrypted set: the validator knows it,
@@ -269,6 +269,10 @@ def validate_runtime(value: Any) -> Mapping[str, Any]:
     runtime = _exact_keys(value, _RUNTIME_KEYS, "runtime")
     _digest(runtime["image_digest"], "image_digest")
     _digest(runtime["runner_digest"], "runner_digest")
+    # Sampling parameters are execution identity: the same checkpoint under a
+    # different temperature or seed is a different measurement. Pinning their
+    # digest here puts them inside the report_data binding automatically.
+    _digest(runtime["decode_digest"], "decode_digest")
     return runtime
 
 

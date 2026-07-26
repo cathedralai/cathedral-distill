@@ -48,6 +48,7 @@ def _receipt(**overrides):
         "runtime": {
             "image_digest": _digest("image"),
             "runner_digest": _digest("runner"),
+            "decode_digest": _digest("decode"),
         },
         "evalset": {
             "evalset_id": "frontend_v0",

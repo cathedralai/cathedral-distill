@@ -64,6 +64,9 @@ def load_teachers(path: Path) -> tr.TeacherRegistry:
                 permitted_purposes=frozenset(row["permitted_purposes"]),
                 commercial_use=bool(row.get("commercial_use")),
                 competing_model_training=bool(row.get("competing_model_training")),
+                attribution_required=bool(row.get("attribution_required")),
+                attribution_threshold=row.get("attribution_threshold", ""),
+                attribution_text=row.get("attribution_text", ""),
                 notes=row.get("notes", ""),
             )
         )

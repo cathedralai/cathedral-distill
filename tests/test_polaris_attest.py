@@ -51,6 +51,7 @@ def _pre_attestation():
         "runtime": {
             "image_digest": IMAGE,
             "runner_digest": _digest("runner"),
+            "decode_digest": _digest("decode"),
         },
         "evalset": {
             "evalset_id": "frontend_v0",

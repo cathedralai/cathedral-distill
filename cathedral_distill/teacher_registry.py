@@ -62,6 +62,14 @@ class TeacherRecord:
     permitted_purposes: frozenset[str] = field(default_factory=frozenset)
     commercial_use: bool = False
     competing_model_training: bool = False
+    # Structured attribution terms, so a miner learns them from the registry
+    # rather than discovering them after training. `attribution_threshold` is
+    # the licence's own wording for when the requirement bites (e.g.
+    # ">100M MAU or >$20M/month revenue"); empty means it always applies when
+    # `attribution_required` is true.
+    attribution_required: bool = False
+    attribution_threshold: str = ""
+    attribution_text: str = ""
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -160,6 +168,9 @@ class TeacherRegistry:
                     "permitted_purposes": sorted(r.permitted_purposes),
                     "commercial_use": r.commercial_use,
                     "competing_model_training": r.competing_model_training,
+                    "attribution_required": r.attribution_required,
+                    "attribution_threshold": r.attribution_threshold,
+                    "attribution_text": r.attribution_text,
                     "notes": r.notes,
                 }
                 for r in sorted(self._records.values(), key=lambda r: r.teacher_id)

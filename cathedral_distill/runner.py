@@ -45,6 +45,19 @@ from cathedral_distill.sealed_set import EvalItem
 
 _QUANT = Decimal("0.000000000001")
 
+# The decode contract the backend is expected to honour. Digested into
+# `runtime.decode_digest`, so a score is only comparable to another score
+# produced under the same sampling identity.
+DEFAULT_DECODE = {"temperature": 0, "seed": 39, "max_tokens": 1024, "top_p": 1.0}
+
+
+def decode_digest(params: dict) -> str:
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(
+        json.dumps(params, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
 
 class RunnerError(RuntimeError):
     """Raised when the run cannot produce a valid receipt."""
@@ -119,6 +132,7 @@ def run_eval(
     model: dict,
     runtime: dict,
     evalset: dict,
+    decode: dict | None = None,
 ) -> RunResult:
     """Run every item, grade deterministically, build the pre-attestation receipt.
 
@@ -128,6 +142,9 @@ def run_eval(
     """
     if not items:
         raise RunnerError("no items to evaluate")
+
+    runtime = dict(runtime)
+    runtime.setdefault("decode_digest", decode_digest(decode or DEFAULT_DECODE))
 
     outcomes: list[ItemOutcome] = []
     leaves: list[bytes] = []
@@ -238,6 +255,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="JSON file of eval items (opened inside the enclave)")
     parser.add_argument("--backend-command", required=True,
                         help="command template; prompt arrives on stdin")
+    parser.add_argument("--decode-params",
+                        help="JSON file of sampling params; defaults to the "
+                             "canonical DEFAULT_DECODE contract")
     parser.add_argument("--outcomes", default="/cathedral/artifacts/outcomes.jsonl")
     args = parser.parse_args(argv)
 
@@ -264,6 +284,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             model=load(args.model),
             runtime=load(args.runtime),
             evalset=load(args.evalset_meta),
+            decode=load(args.decode_params) if args.decode_params else None,
         )
         write_outcomes(result.outcomes, Path(args.outcomes))
 
