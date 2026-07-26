@@ -1,0 +1,20 @@
+{
+  "schema": "cathedral_teacher_registry_v1",
+  "teachers": [
+    {
+      "teacher_id": "yunwu/kimi-k2.6/relay-2026-07",
+      "licence_digest": "sha256:b280da6f496d75e0c5beb79b03520d190fce67dfe12f75cf3aadad8670839d93",
+      "licence_uri": "https://huggingface.co/moonshotai/Kimi-K2-Instruct/raw/main/LICENSE",
+      "reviewed_at": "2026-07-26T21:34:42.535968+00:00",
+      "review_expires_at": "2026-08-25T21:34:42.535968+00:00",
+      "reviewer": "jared@fastcrest.com (provisional test-run review)",
+      "permitted_purposes": [
+        "distillation_training_data",
+        "inference"
+      ],
+      "commercial_use": true,
+      "competing_model_training": true,
+      "notes": "Modified MIT (Kimi K2). Full MIT rights incl. derivatives/commercial; sole modification: prominent 'Kimi K2' attribution required for products >100M MAU or >$20M/mo revenue. PROVISIONAL: k2.6-via-relay assumed same licence family as K2-Instruct; replace with a Cathedral-policy review and the exact k2.6 licence before any production corpus."
+    }
+  ]
+}
