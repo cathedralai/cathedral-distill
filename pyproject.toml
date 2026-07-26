@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cathedral-distill"
+version = "0.1.0"
+description = "Sealed evaluation and frontier scoring for the Cathedral SN39 distillation track"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["cryptography>=42"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["cathedral_distill"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
