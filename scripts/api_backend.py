@@ -32,7 +32,7 @@ def main() -> int:
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
             "seed": 39,
-            "max_tokens": 1024,
+            "max_tokens": int(os.environ.get("BACKEND_MAX_TOKENS", "1024")),
         }).encode(),
         headers={"Authorization": f"Bearer {key}",
                  "Content-Type": "application/json"},

@@ -38,11 +38,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cathedral_distill import evalset  # noqa: E402
+from cathedral_distill import evalset_v1  # noqa: E402
 from cathedral_distill import teacher as tc  # noqa: E402
 from cathedral_distill import teacher_registry as tr  # noqa: E402
-from cathedral_distill.grader import parse_model_json  # noqa: E402
+from cathedral_distill.grader import grade_item, parse_model_json  # noqa: E402
 
-EVAL_SEED = 39  # the sealed set's seed — training must never reuse it
+TRACKS = {
+    # track -> (generator module, sealed eval seed, default training seed)
+    "v0": (evalset, 39, 1039),
+    "v1": (evalset_v1, 41, 2041),
+}
 _HASH_LINE = re.compile(r"^content_hash: ([0-9a-f]{64})$", re.MULTILINE)
 
 
@@ -73,21 +78,26 @@ def load_teachers(path: Path) -> tr.TeacherRegistry:
     return registry
 
 
-def training_items(rows: int, seed: int):
+def training_items(rows: int, seed: int, track: str = "v0"):
     """Training prompts, verified disjoint from the sealed eval set."""
-    if seed == EVAL_SEED:
+    builder, eval_seed, _default = TRACKS[track]
+    if seed == eval_seed:
         raise SystemExit("training seed must differ from the eval seed")
-    eval_items = evalset.build(seed=EVAL_SEED)
+    eval_items = builder.build(seed=eval_seed)
     forbidden = {
         (i.checks["expected"]["reference"], i.checks["expected"]["title"])
         for i in eval_items
     }
+    # v1 bundles contain several documents; also refuse any training prompt
+    # that mentions a sealed-set reference anywhere in its text.
+    eval_refs = tuple(r for r, _t in forbidden if not r.startswith("CANARY/"))
     # Over-generate, then drop collisions. No canaries in training, ever.
-    candidates = evalset.build(seed=seed, items=rows + 16, canaries=0)
+    candidates = builder.build(seed=seed, items=rows + 24, canaries=0)
     kept = [
         item for item in candidates
         if (item.checks["expected"]["reference"],
             item.checks["expected"]["title"]) not in forbidden
+        and not any(ref in item.prompt for ref in eval_refs)
     ][:rows]
     if len(kept) < rows:
         raise SystemExit(f"only {len(kept)} disjoint items available; lower --rows")
@@ -109,8 +119,10 @@ def keep_extraction(record: tc.DistillRecord) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--track", choices=sorted(TRACKS), default="v0")
     parser.add_argument("--rows", type=int, default=200)
-    parser.add_argument("--seed", type=int, default=1039)
+    parser.add_argument("--seed", type=int, default=0,
+                        help="training seed; 0 means the track default")
     parser.add_argument("--out", type=Path, default=Path("corpus.jsonl"))
     parser.add_argument("--teachers", type=Path,
                         help="reviewed-teacher policy JSON (required unless --transport-test)")
@@ -123,8 +135,11 @@ def main() -> int:
     client = tc.TeacherClient(config)
     print(f"teacher: {config.teacher_id} via {config.base_url}", file=sys.stderr)
 
+    if not args.seed:
+        args.seed = TRACKS[args.track][2]
+
     if args.transport_test:
-        items = training_items(3, args.seed)
+        items = training_items(3, args.seed, args.track)
         records = [client.generate(i.prompt, seed=n) for n, i in enumerate(items)]
         for record in records:
             row = record.as_dict()
@@ -140,12 +155,23 @@ def main() -> int:
         raise SystemExit("--teachers is required: no registry entry, no corpus")
     registry = load_teachers(args.teachers)
 
-    items = training_items(args.rows, args.seed)
+    items = training_items(args.rows, args.seed, args.track)
     records = tc.build_corpus(
         client, [i.prompt for i in items],
         registry=registry, at=datetime.now(UTC),
     )
-    kept = tc.filter_corpus(records, keep=keep_extraction)
+    if args.track == "v1":
+        # v1 keeps only rows the teacher got FULLY right: the corpus becomes
+        # verified-correct demonstrations of source ranking, not merely
+        # well-formed JSON. Yield tracks the teacher's true accuracy.
+        by_prompt = {i.prompt: i for i in items}
+        def keep(record):
+            item = by_prompt.get(record.prompt)
+            return item is not None and grade_item(
+                item.item_id, record.completion, item.checks).passed
+        kept = tc.filter_corpus(records, keep=keep)
+    else:
+        kept = tc.filter_corpus(records, keep=keep_extraction)
     with args.out.open("w") as handle:
         for record in kept:
             handle.write(json.dumps(record.as_dict(), sort_keys=True) + "\n")
@@ -153,8 +179,10 @@ def main() -> int:
     manifest = tc.corpus_manifest(kept)
     manifest["generated_rows"] = len(records)
     manifest["kept_rows"] = len(kept)
+    manifest["track"] = args.track
     manifest["training_seed"] = args.seed
-    manifest["disjoint_from_eval_seed"] = EVAL_SEED
+    manifest["disjoint_from_eval_seed"] = TRACKS[args.track][1]
+    manifest["with_reasoning"] = sum(r.reasoning is not None for r in kept)
     manifest_path = args.out.with_suffix(".manifest.json")
     manifest_path.write_text(json.dumps(manifest, indent=2))
     print(f"kept {len(kept)}/{len(records)} rows -> {args.out}", file=sys.stderr)

@@ -154,6 +154,11 @@ class DistillRecord:
     seed: int
     top_k_logprobs: Sequence[Mapping[str, Any]] | None
     record_hash: str
+    # The teacher's chain-of-thought, when the provider exposes it
+    # (reasoning models return it separately from the answer). Often the most
+    # valuable training signal in the row: it shows *how* sources were ranked,
+    # not just which one won.
+    reasoning: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -168,6 +173,7 @@ class DistillRecord:
                 if self.top_k_logprobs is not None
                 else None
             ),
+            "reasoning": self.reasoning,
             "record_hash": self.record_hash,
         }
 
@@ -212,6 +218,7 @@ class TeacherClient:
             raise TeacherError("teacher response missing choices[0].message.content") from exc
 
         logprobs = _trim_logprobs(choice.get("logprobs"), config.top_logprobs)
+        reasoning = choice["message"].get("reasoning_content") or None
         body = {
             "prompt": prompt,
             "completion": completion,
@@ -219,6 +226,7 @@ class TeacherClient:
             "sampling": sampling,
             "seed": seed,
             "top_k_logprobs": logprobs,
+            "reasoning": reasoning,
         }
         return DistillRecord(
             prompt=prompt,
@@ -227,6 +235,7 @@ class TeacherClient:
             sampling=sampling,
             seed=seed,
             top_k_logprobs=logprobs,
+            reasoning=reasoning,
             record_hash=_record_hash(body),
         )
 
