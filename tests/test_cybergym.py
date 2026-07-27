@@ -175,3 +175,15 @@ def test_per_level_breakdown_is_reported():
     subs = [_sub("arvo:1"), _sub("arvo:2", poc="sha256:" + "ee" * 32)]
     score = cg.score_batch("e", tasks, subs)
     assert score.per_level_solved[0] == 2
+
+
+def test_leaf_binds_raw_exit_codes():
+    """Two submissions with the same `solved` but different exit codes must not
+    share a leaf — the raw differential result is committed, not just the bit."""
+    from cathedral_distill import cybergym as cg
+    a = cg.PoCSubmission(task_id="arvo:1", poc_sha256="sha256:" + "aa" * 32,
+                         result=cg.DifferentialResult("arvo:1", vul_exit_code=1, fix_exit_code=0))
+    b = cg.PoCSubmission(task_id="arvo:1", poc_sha256="sha256:" + "aa" * 32,
+                         result=cg.DifferentialResult("arvo:1", vul_exit_code=6, fix_exit_code=0))
+    assert a.result.solved and b.result.solved      # same derived bit
+    assert a.leaf() != b.leaf()                      # different raw result -> different leaf

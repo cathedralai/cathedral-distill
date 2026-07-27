@@ -148,11 +148,19 @@ class PoCSubmission:
             raise CyberGymError("submission task_id disagrees with its result")
 
     def leaf(self) -> bytes:
-        """Per-task leaf for a Merkle root, so a validator can spot-check one task."""
+        """Per-task leaf for a Merkle root, so a validator can spot-check one task.
+
+        Binds the RAW verified result — both exit codes — not only the derived
+        `solved` bit, so the receipt commits to the actual differential outcome a
+        re-run must reproduce, and a mislabelled `solved` cannot hide behind the
+        commitment.
+        """
         body = json.dumps(
             {
                 "task_id": self.task_id,
                 "poc_sha256": self.poc_sha256,
+                "vul_exit_code": self.result.vul_exit_code,
+                "fix_exit_code": self.result.fix_exit_code,
                 "solved": self.result.solved,
             },
             sort_keys=True,
