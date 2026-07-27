@@ -1,0 +1,108 @@
+# Hermes profile for the Cathedral computer-use trace agent.
+# Reference: https://hermes-agent.nousresearch.com/docs (config schema)
+#
+# Forked from cathedral-baseline-regulatory. The regulatory profile's job was to
+# produce one Card per cron tick; this profile's job is to complete desktop
+# tasks and leave behind a trace good enough to train on. The differences that
+# matter are the MCP set (desktop instead of fetch/filesystem), the output
+# schema (Action instead of Card), and the fact that this agent runs against a
+# task queue rather than a refresh cadence.
+
+profile:
+  name: cathedral-computer-use-trace
+  version: "0.1.0"
+  description: >-
+    Drives a Linux desktop through computer-use-linux MCP and records every
+    step as a verified trace. Traces are the training corpus and the evaluation
+    set for the distilled computer-use student.
+
+agent:
+  reasoning_effort: high
+  # High effort on purpose. The reasoning field is the primary training signal,
+  # and today's benchmark measured chain-of-thought as worth roughly three
+  # times the gain of final answers alone (+13 items vs +5). Cheap reasoning
+  # here produces a cheap corpus.
+
+model:
+  # The teacher. Swappable by design — the corpus is the asset, not the model
+  # that produced it. Any OpenAI-compatible endpoint works; the licence must be
+  # reviewed in teachers.json before its output can enter a corpus.
+  provider: openai_compatible
+  base_url: ${TEACHER_BASE_URL}
+  model: ${TEACHER_MODEL}
+  temperature: 0.2
+  max_tokens: 8192
+  # 8192, not the usual 1024: reasoning models spend thousands of tokens
+  # thinking before they answer, and a short budget truncates them mid-thought
+  # into unparsable output. We measured this — a 1024 cap turned 29 of 32
+  # otherwise-correct answers into parse failures.
+
+  # Provider-side JSON Schema enforcement. The token stream is constrained to
+  # the Action schema, so prose and markdown fences are physically impossible
+  # rather than merely discouraged. The canonical artifact is
+  # ./action_schema.json; keep the two in sync.
+  response_format:
+    type: json_schema
+    json_schema:
+      name: cathedral_action
+      strict: true
+      schema_file: ./action_schema.json
+
+auxiliary:
+  # A small model for observation summarisation, so the full accessibility tree
+  # does not have to ride in context on every turn.
+  summariser:
+    provider: openai_compatible
+    base_url: ${TEACHER_BASE_URL}
+    model: ${SUMMARISER_MODEL}
+    temperature: 0.0
+    max_tokens: 1024
+
+terminal:
+  backend: docker
+  image: ${CATHEDRAL_DESKTOP_IMAGE}
+  workdir: /workspace
+  network: none
+  # No egress by default. A trace corpus should not contain whatever the open
+  # internet happened to serve during recording, and a desktop with network is
+  # a desktop whose state cannot be reproduced.
+  resources:
+    cpu: "4.0"
+    memory: "8Gi"
+
+mcp_servers_file: ./mcp_servers.yaml
+skills_dir: ./skills
+
+# Tasks arrive from a queue rather than a cron schedule: an episode ends when
+# its predicate passes or the step budget is exhausted, not when a timer fires.
+task_queue_file: ./tasks/queue.jsonl
+
+required_env:
+  - CATHEDRAL_TASK_ID
+  - CATHEDRAL_TRACE_DIR
+  - CATHEDRAL_DESKTOP_IMAGE
+  - TEACHER_BASE_URL
+  - TEACHER_MODEL
+
+required_env_oneof:
+  - CATHEDRAL_HOTKEY_PATH
+  - CATHEDRAL_HOTKEY_SEED
+
+env_defaults:
+  SUMMARISER_MODEL: ${TEACHER_MODEL}
+  CATHEDRAL_MAX_STEPS: "40"
+  # A hard step ceiling. Desktop agents that lose the thread will loop until
+  # something stops them, and an unbounded episode burns teacher tokens while
+  # producing a trace nobody should train on.
+
+limits:
+  max_steps_per_episode: 40
+  max_repeated_action: 2
+  observation_max_bytes: 2097152
+
+logging:
+  level: INFO
+  format: json
+  fields:
+    profile: cathedral-computer-use-trace
+    task_id: ${CATHEDRAL_TASK_ID}

@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CathedralAction",
+  "description": "One step of a desktop trace. The agent emits exactly one of these per turn; the executor performs `action`, and the distillation pipeline trains on `reasoning` + `action` together. Strict mode: every object forbids additional properties, so a non-conforming token stream is rejected at the provider rather than discovered by the grader.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["step", "reasoning", "action"],
+  "properties": {
+    "step": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Zero-based index of this step within the trace."
+    },
+    "reasoning": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 4000,
+      "description": "Why this action, written for a reader who cannot see the screen. Name the target element, say what ruled out the plausible alternatives, and state the expected result. This is the primary training signal."
+    },
+    "observation_ref": {
+      "type": "string",
+      "description": "Digest of the observation this action was chosen from (sha256:...). Binds the action to exactly what the agent could see, so a replay can present the same input."
+    },
+    "action": {
+      "$ref": "#/$defs/Action"
+    }
+  },
+  "$defs": {
+    "Action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool"],
+      "description": "Tool names mirror the computer-use-linux MCP surface. Hermes registers them as mcp_computer_use_linux_<tool>; the bare name is stored so traces stay portable across harnesses.",
+      "properties": {
+        "tool": {
+          "type": "string",
+          "enum": [
+            "get_app_state",
+            "screenshot",
+            "list_windows",
+            "list_apps",
+            "focused_window",
+            "click",
+            "drag",
+            "scroll",
+            "press_key",
+            "type_text",
+            "perform_action",
+            "set_value",
+            "activate_window",
+            "move_window",
+            "resize_window",
+            "done",
+            "blocked"
+          ]
+        },
+        "element_index": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Accessibility element index from the most recent get_app_state. Preferred over coordinates: indices survive window movement, coordinates do not, and a coordinate-based trace cannot be replayed on a different resolution."
+        },
+        "selector": {
+          "type": ["string", "null"],
+          "description": "Semantic selector for the target element, when an index is unavailable."
+        },
+        "coordinates": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["x", "y"],
+          "description": "Desktop pixel coordinates. Last resort only; a trace that relies on these is weaker training data and harder to grade.",
+          "properties": {
+            "x": { "type": "integer" },
+            "y": { "type": "integer" }
+          }
+        },
+        "text": {
+          "type": ["string", "null"],
+          "maxLength": 8192,
+          "description": "Literal text for type_text, or the value for set_value."
+        },
+        "keys": {
+          "type": ["string", "null"],
+          "description": "Key or chord for press_key, e.g. 'ctrl+s'."
+        },
+        "target_window": {
+          "type": ["string", "null"],
+          "description": "Window selector for activate_window, or to target input at a specific window."
+        },
+        "action_name": {
+          "type": ["string", "null"],
+          "description": "AT-SPI action for perform_action: Press, Activate, Toggle, and so on. Defaults to the element's primary action."
+        },
+        "outcome_claim": {
+          "type": ["string", "null"],
+          "maxLength": 1000,
+          "description": "For done and blocked only: what was observed that proves the task succeeded, or what specifically prevents progress. An unobserved claim here is the single most damaging thing an agent can write, because a trace that passes its predicate for the wrong reason teaches the wrong lesson."
+        }
+      }
+    }
+  }
+}
