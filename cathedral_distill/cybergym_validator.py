@@ -66,6 +66,91 @@ class MinerResult:
     contribution: Mapping[str, object]
 
 
+def cybergym_track_policy(track: str = "cybergym-v0", **kw):
+    """A TrackPolicy that requires only the gates CyberGym has (see
+    frontier.CYBERGYM_REQUIRED_GATES): attestation, reproduction, no
+    contamination, a registered model, and an independent evaluator."""
+    from cathedral_distill import frontier as fr
+    kw.setdefault("required_gates", fr.CYBERGYM_REQUIRED_GATES)
+    return fr.TrackPolicy(track=track, **kw)
+
+
+def derive_cybergym_candidate(
+    receipt: Mapping[str, object],
+    key_registry,
+    *,
+    source_epoch: int,
+    chain: ChainContext,
+    model_commitment: str,
+    miner_coldkey: str,
+    evaluator_coldkey: str,
+    bundle_registry=None,
+    reproduction: Mapping[str, object] | None = None,
+):
+    """Build a frontier `Candidate` from a VERIFIED CyberGym receipt.
+
+    Every gate is derived from evidence, never asserted: the candidate is only
+    marked evidence-verified after `verify_receipt` passes, and `Frontier.submit`
+    refuses anything else. Contamination is checked structurally — the batch nonce
+    must reproduce the chain-anchored, post-commitment derivation bound to the
+    miner's committed model, so the miner could not have trained on the drawn set.
+    """
+    from datetime import datetime, timezone
+
+    from cathedral_distill import frontier as fr
+
+    doc = cr.verify_receipt(receipt, key_registry, source_epoch=source_epoch)
+    miner_hotkey = str(doc["miner_hotkey"])
+
+    # no_contamination: the receipt's nonce must equal the nonce derived from
+    # finalized chain state AND this miner's committed model. A mismatch means we
+    # cannot prove the set post-dates the commitment -> treat as contaminated.
+    expected_nonce = derive_batch_nonce(
+        block=chain.block, block_hash=chain.block_hash, network=chain.network,
+        netuid=chain.netuid, source_epoch=source_epoch, miner_hotkey=miner_hotkey,
+        model_commitment=model_commitment,
+    )
+    contamination_detected = doc["batch"]["nonce"] != expected_nonce
+
+    reproduced = False
+    if reproduction is not None:
+        rdoc = cr.verify_receipt(reproduction, key_registry, source_epoch=source_epoch)
+        reproduced = (
+            rdoc["batch"]["batch_id"] == doc["batch"]["batch_id"]
+            and rdoc["score"]["items_root"] == doc["score"]["items_root"]
+            and rdoc["validator_hotkey"] != doc["validator_hotkey"]
+        )
+
+    registered_bundle = bool(
+        bundle_registry is not None
+        and bundle_registry.is_registered_by(model_commitment, miner_hotkey)
+    )
+    independent_evaluator = bool(
+        miner_coldkey and evaluator_coldkey and miner_coldkey != evaluator_coldkey
+    )
+    submitted_at = datetime.strptime(
+        str(doc["issued_at"]), "%Y-%m-%dT%H:%M:%S.%fZ"
+    ).replace(tzinfo=timezone.utc)
+
+    return fr.Candidate(
+        miner_hotkey=miner_hotkey,
+        bundle_digest=model_commitment,
+        checkpoint_digest=model_commitment,
+        receipt_id=str(doc["receipt_id"]),
+        score=Decimal(str(doc["score"]["score"])),
+        latency_p50_ms=Decimal(0),
+        cost_usd=Decimal(0),
+        submitted_at=submitted_at,
+        batch_id=str(doc["batch"]["batch_id"]),
+        attested=True,               # reached only because verify_receipt passed
+        reproduced=reproduced,
+        contamination_detected=contamination_detected,
+        registered_bundle=registered_bundle,
+        independent_evaluator=independent_evaluator,
+        evidence_verified=True,      # provenance: derived from a verified receipt
+    )
+
+
 def run_epoch(
     miners: list[MinerCommit],
     pool: TaskPool,

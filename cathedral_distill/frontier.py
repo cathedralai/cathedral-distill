@@ -88,6 +88,10 @@ class TrackPolicy:
     # Past this, the champion is stale and pays burn until it is revalidated on a
     # current shard. Bounds how long a since-degraded or vanished model earns.
     crown_ttl_s: int = 86_400
+    # Which gates this track requires. Default is the full Distill set; a track
+    # like CyberGym (no teacher, a post-commit holdout instead of canaries, and
+    # not a served model) names its own subset. Only these gates are evaluated.
+    required_gates: tuple[str, ...] = REQUIRED_GATES
 
     def __post_init__(self) -> None:
         if not self.track:
@@ -98,6 +102,10 @@ class TrackPolicy:
             raise FrontierError("min_score_to_crown must be a nonzero qualification floor")
         if self.crown_ttl_s <= 0:
             raise FrontierError("crown_ttl_s must be positive")
+        if not self.required_gates:
+            raise FrontierError("a track must require at least one gate")
+        if any(g not in REQUIRED_GATES for g in self.required_gates):
+            raise FrontierError("required_gates names an unknown gate")
 
 
 @dataclass(frozen=True)
@@ -251,27 +259,37 @@ class GateResult:
 
 
 def evaluate_gates(candidate: Candidate, policy: TrackPolicy) -> GateResult:
-    """Run every gate. All must pass; a single failure makes the score moot."""
-    failures: list[str] = []
-    if not candidate.attested:
-        failures.append(GATE_ATTESTED_RECEIPT)
-    if not candidate.teacher_permitted:
-        failures.append(GATE_TEACHER_PERMITTED)
-    if not candidate.reproduced:
-        failures.append(GATE_REPRODUCED)
-    if candidate.cost_usd > policy.max_cost_usd:
-        failures.append(GATE_WITHIN_COST)
-    if candidate.contamination_detected:
-        failures.append(GATE_NO_CONTAMINATION)
-    if candidate.latency_p50_ms > policy.max_latency_p50_ms:
+    """Run the gates this track requires. All must pass; a single failure makes
+    the score moot. A gate not in `policy.required_gates` is not evaluated, so a
+    track (CyberGym) that has no teacher or serving-latency requirement is judged
+    only on the gates that apply to it — never silently on an irrelevant one."""
+    checks = {
+        GATE_ATTESTED_RECEIPT: candidate.attested,
+        GATE_TEACHER_PERMITTED: candidate.teacher_permitted,
+        GATE_REPRODUCED: candidate.reproduced,
         # A student that scores well but cannot serve inside the CPU envelope is
         # worthless to a business whose only confidential profile is TDX CPU.
-        failures.append(GATE_WITHIN_LATENCY)
-    if not candidate.registered_bundle:
-        failures.append(GATE_REGISTERED_BUNDLE)
-    if not candidate.independent_evaluator:
-        failures.append(GATE_INDEPENDENT_EVALUATOR)
-    return GateResult(passed=not failures, failures=tuple(failures))
+        GATE_WITHIN_COST: candidate.cost_usd <= policy.max_cost_usd,
+        GATE_NO_CONTAMINATION: not candidate.contamination_detected,
+        GATE_WITHIN_LATENCY: candidate.latency_p50_ms <= policy.max_latency_p50_ms,
+        GATE_REGISTERED_BUNDLE: candidate.registered_bundle,
+        GATE_INDEPENDENT_EVALUATOR: candidate.independent_evaluator,
+    }
+    failures = tuple(gate for gate in policy.required_gates if not checks[gate])
+    return GateResult(passed=not failures, failures=failures)
+
+
+# CyberGym has no teacher, uses a post-commit private holdout (not canaries), and
+# is not a served model — so it requires attestation, an independent reproduction,
+# no contamination, a registered model, and an independent evaluator, but not the
+# teacher-licence, cost, or serving-latency gates.
+CYBERGYM_REQUIRED_GATES: tuple[str, ...] = (
+    GATE_ATTESTED_RECEIPT,
+    GATE_REPRODUCED,
+    GATE_NO_CONTAMINATION,
+    GATE_REGISTERED_BUNDLE,
+    GATE_INDEPENDENT_EVALUATOR,
+)
 
 
 @dataclass(frozen=True)

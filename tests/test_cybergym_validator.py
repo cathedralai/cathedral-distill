@@ -260,3 +260,74 @@ def test_full_epoch_persists_scores_and_feeds_the_vector(tmp_path):
     miners_in_feed = {w["miner_hotkey"] for w in feed["weights"]}
     assert miners_in_feed == {"5Alice", "5Bob", "5ComputeMiner"}
     assert feed["burn_snapshot"]["forced_burn_percentage"] == pytest.approx(10.0)
+
+
+# --------------------------------------------------------------------------- #
+# CyberGym candidate derivation (#4): gates from a verified receipt, no booleans
+# --------------------------------------------------------------------------- #
+
+def _chain():
+    return cv.ChainContext(block=100, block_hash=BLOCK_HASH, network="finney", netuid=39,
+                           source_epoch=SOURCE_EPOCH, valid_from_block=100, valid_until_block=460)
+
+
+def _bundle_reg(model_commitment, hotkey="5Miner"):
+    from cathedral_distill import bundle_registry as br
+    reg = br.BundleRegistry()
+    reg.register(br.BundleRegistration(miner_hotkey=hotkey, track="cybergym-v0",
+                 bundle_digest=model_commitment, version="v1", registered_at=NOW, signature="s"),
+                 verify_signature=False)
+    return reg
+
+
+def test_derived_cybergym_candidate_crowns():
+    from cathedral_distill import frontier as fr
+    mc = _digest("ckpt")
+    cand = cv.derive_cybergym_candidate(
+        _receipt(), KEYREG, source_epoch=SOURCE_EPOCH, chain=_chain(), model_commitment=mc,
+        miner_coldkey="ck-miner", evaluator_coldkey="ck-val", bundle_registry=_bundle_reg(mc),
+        reproduction=_receipt(validator_hotkey="5Validator2"))
+    assert cand.evidence_verified and cand.attested and not cand.contamination_detected
+    policy = cv.cybergym_track_policy()
+    dec = fr.Frontier([policy]).submit(policy.track, cand)
+    assert dec.crowned, dec.reason
+
+
+def test_derived_candidate_detects_contamination_on_nonce_mismatch():
+    mc = _digest("ckpt")
+    bad_chain = cv.ChainContext(block=999, block_hash=BLOCK_HASH, network="finney", netuid=39,
+                                source_epoch=SOURCE_EPOCH, valid_from_block=100, valid_until_block=460)
+    cand = cv.derive_cybergym_candidate(_receipt(), KEYREG, source_epoch=SOURCE_EPOCH,
+        chain=bad_chain, model_commitment=mc, miner_coldkey="a", evaluator_coldkey="b",
+        bundle_registry=_bundle_reg(mc))
+    assert cand.contamination_detected     # nonce from block 999 != the receipt's nonce
+
+
+def test_self_evaluation_fails_the_independent_gate():
+    from cathedral_distill import frontier as fr
+    mc = _digest("ckpt")
+    cand = cv.derive_cybergym_candidate(_receipt(), KEYREG, source_epoch=SOURCE_EPOCH,
+        chain=_chain(), model_commitment=mc, miner_coldkey="same", evaluator_coldkey="same",
+        bundle_registry=_bundle_reg(mc), reproduction=_receipt(validator_hotkey="5Validator2"))
+    assert not cand.independent_evaluator
+    gates = fr.evaluate_gates(cand, cv.cybergym_track_policy())
+    assert fr.GATE_INDEPENDENT_EVALUATOR in gates.failures
+
+
+def test_cybergym_track_does_not_require_the_teacher_gate():
+    from cathedral_distill import frontier as fr
+    policy = cv.cybergym_track_policy()
+    assert fr.GATE_TEACHER_PERMITTED not in policy.required_gates
+    assert fr.GATE_ATTESTED_RECEIPT in policy.required_gates
+
+
+def test_raw_candidate_is_refused_by_submit():
+    from cathedral_distill import frontier as fr
+    raw = fr.Candidate(miner_hotkey="5X", bundle_digest="sha256:" + "aa" * 32,
+        checkpoint_digest="sha256:" + "aa" * 32, receipt_id="not-a-receipt",
+        score=Decimal("0.9"), latency_p50_ms=Decimal(0), cost_usd=Decimal(0),
+        submitted_at=NOW, attested=True, reproduced=True, contamination_detected=False,
+        registered_bundle=True, independent_evaluator=True)  # evidence_verified defaults False
+    policy = cv.cybergym_track_policy()
+    dec = fr.Frontier([policy]).submit(policy.track, raw)
+    assert not dec.crowned and dec.reason == "unverified_candidate"
