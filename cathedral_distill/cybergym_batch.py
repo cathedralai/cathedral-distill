@@ -27,15 +27,77 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Sequence
 
+import json
+import re
+
 from cathedral_distill.cybergym import Level, Task
 
 BATCH_DOMAIN = b"cathedral-cybergym-batch-draw-v1\x00"
+NONCE_DOMAIN = b"cathedral-cybergym-batch-nonce-v1\x00"
 
 MAX_BATCH = 4096
+_BLOCK_HASH_RE = re.compile(r"\A(0x)?[0-9a-f]{64}\Z")
+_DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 
 
 class BatchError(ValueError):
     """Raised when a batch cannot be drawn."""
+
+
+def derive_batch_nonce(
+    *,
+    block: int,
+    block_hash: str,
+    network: str,
+    netuid: int,
+    source_epoch: int,
+    miner_hotkey: str,
+    model_commitment: str,
+) -> str:
+    """Derive the batch-draw nonce from finalized chain state, after commitment.
+
+    A random validator-chosen nonce is not a public freshness proof: nothing
+    ties it to the epoch or to the model being scored. Instead the nonce is
+    DERIVED, under a domain separator, from independently verifiable inputs — the
+    finalized block and its hash, the audience, the epoch, the miner, and the
+    digest of the model the miner committed *before* this block existed:
+
+        nonce = sha256( DOMAIN || canonical{block, block_hash, network, netuid,
+                                             source_epoch, miner_hotkey,
+                                             model_commitment} )
+
+    The block hash is observable by anyone; the model_commitment pins the draw to
+    the exact checkpoint the miner is being scored on, so a miner cannot have
+    trained on the set (the block postdates its commitment) and every validator
+    draws the identical batch. `draw_batch` consumes the result.
+    """
+    if isinstance(block, bool) or not isinstance(block, int) or block < 0:
+        raise BatchError("block height is invalid")
+    if not isinstance(block_hash, str) or _BLOCK_HASH_RE.match(block_hash.strip().lower()) is None:
+        raise BatchError("block_hash must be a 32-byte hex value")
+    if not network or not isinstance(network, str):
+        raise BatchError("network is invalid")
+    if isinstance(netuid, bool) or not isinstance(netuid, int) or netuid < 0:
+        raise BatchError("netuid is invalid")
+    if isinstance(source_epoch, bool) or not isinstance(source_epoch, int) or source_epoch < 0:
+        raise BatchError("source_epoch is invalid")
+    if not miner_hotkey or not isinstance(miner_hotkey, str):
+        raise BatchError("miner_hotkey is invalid")
+    if not isinstance(model_commitment, str) or _DIGEST_RE.match(model_commitment) is None:
+        raise BatchError("model_commitment must be a sha256: digest")
+    material = json.dumps(
+        {
+            "block": int(block),
+            "block_hash": block_hash.strip().lower().removeprefix("0x"),
+            "miner_hotkey": miner_hotkey,
+            "model_commitment": model_commitment,
+            "netuid": int(netuid),
+            "network": network,
+            "source_epoch": int(source_epoch),
+        },
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("ascii")
+    return "cgnonce-sha256:" + hashlib.sha256(NONCE_DOMAIN + material).hexdigest()
 
 
 @dataclass(frozen=True)
