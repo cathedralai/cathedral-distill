@@ -225,7 +225,8 @@ def main() -> int:
     manifest["with_reasoning"] = sum(r.reasoning is not None for r in kept)
     manifest_path = args.out.with_suffix(".manifest.json")
     manifest_path.write_text(json.dumps(manifest, indent=2))
-    print(f"kept {len(kept)}/{len(records)} rows -> {args.out}", file=sys.stderr)
+    print(f"kept {len(kept)} rows ({generated} generated this run) -> {args.out}",
+          file=sys.stderr)
     print(json.dumps(manifest, indent=2))
     return 0
 
