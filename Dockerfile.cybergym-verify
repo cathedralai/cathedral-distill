@@ -1,0 +1,30 @@
+# cathedral-cybergym-verify — the attested differential-crash verifier.
+#
+# Runs inside the TDX worker as an admitted workload (WORKLOAD_ADMISSION.md):
+# takes a PoC and a task id, runs the PoC against the prebuilt vulnerable and
+# patched binaries, and prints exactly the canonical result to stdout so the
+# quote binds sha256(image_digest || sha256hex(stdout)).
+#
+# Contract, same as sat-king:
+#   - stdout carries ONLY the canonical DifferentialResult JSON; logs to stderr
+#   - pull by digest, never :latest — admission resolves no tags
+#   - the CyberGym binary corpus is baked in (binary-only mode, ~130 GB) or
+#     mounted read-only; it is part of the measured environment, pinned by digest
+#   - self-contained entrypoint; the platform mounts /input and runs the image
+#
+#   /input/task.json     {task_id, level, binary_digest}
+#   /input/poc.bin       the PoC bytes to verify
+FROM python:3.12-slim@sha256:47b3c7d4b2bbeedcc7477cf9e2f26e69b8f4c9dc23f5d09d769cbde6bb524cd7
+
+RUN useradd --no-create-home --shell /usr/sbin/nologin verifier
+COPY cathedral_distill /opt/cathedral/cathedral_distill
+ENV PYTHONPATH=/opt/cathedral PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+
+# The CyberGym reproduce runner + binary corpus are provisioned into the image
+# (or a read-only mount) and pinned by digest. Placeholder path; the real corpus
+# is staged at build time.
+ENV CYBERGYM_REPRODUCE_CMD="reproduce --mode {mode} --task {task_id}"
+
+USER verifier
+ENTRYPOINT ["sh", "-c", "exec python3 -m cathedral_distill.cybergym_verify_cli \
+  --task /input/task.json --poc /input/poc.bin"]
