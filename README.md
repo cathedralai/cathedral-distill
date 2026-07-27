@@ -211,6 +211,27 @@ one version says nothing about the next.
 
 ---
 
+## Measured result
+
+A complete distillation loop on the `hermes-extract-v1` track, all numbers from
+receipts in [`docs/benchmarks/`](docs/benchmarks/):
+
+| Run | Score | p50 latency | Train time |
+|---|---:|---:|---:|
+| `Qwen3-4B-Instruct-2507` base | 15/32 — 46.9% | 2,573 ms | — |
+| Student · answer-only | 20/32 — 62.5% | **2,387 ms** | 91 s |
+| **Student · reasoning** | **28/32 — 87.5%** | 25,201 ms | 278 s |
+
+Training on the teacher's chain-of-thought was worth roughly three times the
+gain of training on its answers alone. The reasoning student is also **10×
+slower**, so under a CPU serving budget it wins on quality and fails
+`within_latency_budget` — the trade-off the gate exists to arbitrate, now a
+measured quantity.
+
+Two full runs of the base model produced byte-identical `items_root` values, so
+the **`reproduced` gate passes**. Full write-up, including what these receipts
+do *not* prove: [`docs/BENCHMARK.md`](docs/BENCHMARK.md).
+
 ## What is proven today
 
 - All modules pass **205 local tests**, hardware-free, including one end-to-end
@@ -228,8 +249,9 @@ one version says nothing about the next.
 
 ## What is NOT proven
 
-- **No fine-tune has been run.** No student model exists; no measured-improvement
-  number exists.
+- **The benchmark above is unattested.** Those runs happened on an ordinary GPU
+  box; `attestation.kind` is `"none"` and `creditable_as_verified_work()` returns
+  `False` for every one of them. Under the mechanism they would earn zero.
 - **Attestation-gated key release is disabled upstream.** The sealed-evaluation
   design matches the published key-release contract but cannot be described as
   live.

@@ -1,0 +1,60 @@
+{
+  "attestation": {
+    "evidence_digest": "",
+    "evidence_uri": "",
+    "kind": "none",
+    "policy_digest": "",
+    "report_data_hex": ""
+  },
+  "completed_at": "2026-07-27T07:00:00Z",
+  "eval_authorization": null,
+  "eval_id": "sha256:a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9",
+  "evalset": {
+    "evalset_id": "hermes-extract-v1",
+    "item_count": 32,
+    "key_grant_id": "grant-v1-bench",
+    "plaintext_digest": "sha256:9f93d4a2fd891f286553ded76040b29af829570dbff2a71b713c65d59f363209",
+    "sealed_digest": "sha256:bf665acaa143716ad6906f5872e2120ce0698f391304b01cc768aa1b0939b877"
+  },
+  "grader": {
+    "grader_digest": "sha256:3422ce4967710cbad7e98b1f934c09e82e37f37d7de4d5ee368b7c72074a0645",
+    "grader_id": "extraction_exact_v0",
+    "harness_digest": "sha256:700651aba8f66fceeae605b49bbf1c42d660282d9caa95da7a3173e9f17f236d"
+  },
+  "issued_at": "2026-07-27T06:00:00Z",
+  "miner_hotkey": "5TestMinerPlaceholderNotAnOnChainIdentity0000000",
+  "model": {
+    "model_id": "qwen3-4b-student-reasoning",
+    "tokenizer_digest": "sha256:1ca3d350f65b8944f46806893b157b6ca88c27d65b0e2d948b1637c5767ff27b",
+    "weights_digest": "sha256:fe9dd3146871b49c46e63d8cc14bc7c0926d89aeeb2c17ad4b6abb289fc05b7d"
+  },
+  "netuid": 39,
+  "network": "finney",
+  "nonce_base64": "3q2+7wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "receipt_id": "sha256:31257a0457332506e49943be1ba62a750caf8887c15f990cd918c312e48e08f4",
+  "runtime": {
+    "decode_digest": "sha256:8fa0bde721a87456ec0ce234c1b3a1062f6491789f4fc2194454953096794cbb",
+    "image_digest": "sha256:1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+    "runner_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "schema": "cathedral_ml_eval_receipt_v1",
+  "score": {
+    "graded_items": 32,
+    "input_tokens": 20243,
+    "items_root": "sha256:787af2d2ce72714d361595d1a45e8e820aab00dff32e93637b66a9517e086f15",
+    "latency_p50_ms": "25200.653",
+    "latency_p95_ms": "28178.575",
+    "output_tokens": 27101,
+    "passed_items": 28,
+    "score": "0.875",
+    "work_units": "32"
+  },
+  "signature": {
+    "algorithm": "none",
+    "value_base64": ""
+  },
+  "source_epoch": 4311,
+  "valid_from_block": 6210000,
+  "valid_until_block": 6210720,
+  "validator_hotkey": "5TestValidatorPlaceholderNotAnOnChainIdentity000"
+}
