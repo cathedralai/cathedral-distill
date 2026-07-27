@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cathedral-distill"
+name = "cathedral-cybergym"
 version = "0.1.0"
-description = "Sealed evaluation and frontier scoring for the Cathedral SN39 distillation track"
+description = "Verified vulnerability-discovery subnet for Bittensor SN39"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
