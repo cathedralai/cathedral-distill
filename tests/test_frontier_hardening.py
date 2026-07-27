@@ -279,3 +279,32 @@ def test_empty_evidence_cannot_forge_gates():
     assert not candidate.independent_evaluator
     assert candidate.contamination_detected            # fail-closed
     assert not fr.evaluate_gates(candidate, POLICY).passed
+
+
+# --------------------------------------------------------------------------- #
+# Signed, tamper-evident frontier state (#1.6, signed-persistence half)
+# --------------------------------------------------------------------------- #
+
+def test_signed_state_round_trips_and_rejects_tampering():
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cathedral_distill.receipt_keys import ReceiptKeyRegistry
+    key = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    reg = ReceiptKeyRegistry.from_keys({"frontier-1": key.public_key().public_bytes_raw()})
+
+    f = fr.Frontier([POLICY])
+    _crown(f)
+    signed = f.signed_state(key, "frontier-1")
+
+    restored = fr.Frontier.from_signed_state([POLICY], signed, reg, at=NOW)
+    assert restored.state_digest() == f.state_digest()
+    assert restored.emission_shares(now=NOW) == f.emission_shares(now=NOW)
+
+    # tamper the state body -> signature no longer verifies
+    tampered = {**signed, "state": {**signed["state"], "champions": []}}
+    with pytest.raises(fr.FrontierError, match="signature does not verify"):
+        fr.Frontier.from_signed_state([POLICY], tampered, reg, at=NOW)
+
+    # a signer not in the registry -> rejected (never a caller-supplied key)
+    empty = ReceiptKeyRegistry.from_keys({})
+    with pytest.raises(fr.FrontierError, match="signing key could not be resolved"):
+        fr.Frontier.from_signed_state([POLICY], signed, empty, at=NOW)

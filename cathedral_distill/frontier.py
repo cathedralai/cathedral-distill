@@ -32,6 +32,14 @@ from decimal import Decimal
 from typing import Mapping, Sequence
 
 FRONTIER_SCHEMA = "cathedral_track_frontier_v1"
+_SIGNED_STATE_SCHEMA = "cathedral_frontier_signed_state_v1"
+
+
+def _canonical_state_bytes(body) -> bytes:
+    import json
+    return json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
 
 # Every gate must pass. Names are stable: they appear in reasons and receipts.
 GATE_ATTESTED_RECEIPT = "attested_receipt"
@@ -602,6 +610,51 @@ class Frontier:
                 contaminated=bool(entry.get("contaminated", False)),
             )
         return frontier
+
+    def signed_state(self, private_key, signing_key_id: str) -> dict[str, object]:
+        """Canonical frontier state with an Ed25519 signature over it (#1.6).
+
+        Persisting/exchanging state as a caller-supplied dict is tamper-prone: a
+        peer cannot tell a genuine frontier from a hand-edited one. This wraps the
+        canonical state in a signature under a registry-anchored key, so
+        `from_signed_state` reconstructs only from state a trusted signer
+        produced. (Deriving the state from finalized chain data — rather than a
+        signed snapshot — remains tracked; this closes the signed-persistence half.)
+        """
+        import base64
+        state = self.state()
+        body = {"schema": _SIGNED_STATE_SCHEMA, "signing_key_id": signing_key_id,
+                "state": state}
+        signature = private_key.sign(_canonical_state_bytes(body))
+        return {**body, "signature": {"algorithm": "ed25519",
+                                      "value_base64": base64.b64encode(signature).decode()}}
+
+    @classmethod
+    def from_signed_state(
+        cls, policies: Sequence[TrackPolicy], signed: Mapping[str, object], key_registry,
+        *, at: datetime,
+    ) -> "Frontier":
+        """Verify a signed state against the anchored key, then reconstruct it."""
+        import base64
+        from cryptography.exceptions import InvalidSignature
+        if signed.get("schema") != _SIGNED_STATE_SCHEMA:
+            raise FrontierError("unsupported signed frontier state schema")
+        sig = signed.get("signature")
+        if not isinstance(sig, Mapping) or sig.get("algorithm") != "ed25519":
+            raise FrontierError("signed frontier state signature is invalid")
+        try:
+            public_key = key_registry.resolve(signed.get("signing_key_id"), at=at)
+        except Exception as exc:  # noqa: BLE001 - resolver failure -> reject
+            raise FrontierError(f"frontier state signing key could not be resolved: {exc}") from exc
+        body = {k: v for k, v in signed.items() if k != "signature"}
+        try:
+            public_key.verify(base64.b64decode(sig["value_base64"]), _canonical_state_bytes(body))
+        except (InvalidSignature, ValueError) as exc:
+            raise FrontierError("frontier state signature does not verify") from exc
+        state = signed.get("state")
+        if not isinstance(state, Mapping):
+            raise FrontierError("signed frontier state has no state body")
+        return cls.from_state(policies, state)
 
     def submit(
         self,

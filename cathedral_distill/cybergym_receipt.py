@@ -23,6 +23,7 @@ import base64
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
@@ -280,20 +281,31 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
 
 def verify_receipt(
     receipt: Mapping[str, Any],
-    public_key: Ed25519PublicKey,
+    key_registry: Any,
     *,
     source_epoch: int,
 ) -> Mapping[str, Any]:
     """Independently verify a receipt before scoring. Fails closed on any check.
 
-    Structure → receipt_id recomputation → Ed25519 signature → source_epoch
-    replay binding. The differential re-run of solved verdicts is the separate
-    spot-check; this admits the receipt on the same evidence a compute receipt
-    is admitted on.
+    Structure → receipt_id recomputation → key resolution → Ed25519 signature →
+    source_epoch replay binding. `key_registry` resolves the receipt's
+    `signing_key_id` to the anchored public key
+    (`key_registry.resolve(key_id, at=issued_at)`); the verifier never takes a
+    caller-supplied key. The differential re-run of solved verdicts is the
+    separate spot-check.
     """
     doc = validate_structure(receipt)
     if doc["receipt_id"] != compute_receipt_id(doc):
         raise CyberGymReceiptError("receipt_id does not match the receipt body")
+    try:
+        issued_at = datetime.strptime(
+            str(doc["issued_at"]), "%Y-%m-%dT%H:%M:%S.%fZ"
+        ).replace(tzinfo=timezone.utc)
+        public_key = key_registry.resolve(doc["signing_key_id"], at=issued_at)
+    except CyberGymReceiptError:
+        raise
+    except Exception as exc:  # ReceiptKeyError / parse failure -> reject
+        raise CyberGymReceiptError(f"signing key could not be resolved: {exc}") from exc
     sig = _exact_keys(doc["signature"], _SIGNATURE_KEYS, "signature")
     if sig["algorithm"] != "ed25519":
         raise CyberGymReceiptError("unsupported signature algorithm")

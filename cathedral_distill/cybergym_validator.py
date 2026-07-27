@@ -27,6 +27,7 @@ from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level, PoCSubmissi
 from cathedral_distill.cybergym_batch import Batch, TaskPool, derive_batch_nonce, draw_batch
 from cathedral_distill.cybergym_scores import CyberGymScoreStore
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
+from cathedral_distill.receipt_keys import ReceiptKeyRegistry
 
 
 @dataclass(frozen=True)
@@ -89,7 +90,11 @@ def run_epoch(
     batch_id. Returns one `MinerResult` per miner, with the signed receipt and the
     lane contribution ready for `lane_feed.compose_vector`.
     """
-    public_key = private_key.public_key()
+    # The validator resolves its own signing key by id, exactly as a peer will —
+    # never a caller-supplied key.
+    key_registry = ReceiptKeyRegistry.from_keys(
+        {signing_key_id: private_key.public_key().public_bytes_raw()}
+    )
     results: list[MinerResult] = []
     for miner in miners:
         nonce = derive_batch_nonce(
@@ -122,8 +127,8 @@ def run_epoch(
             level_weights=level_weights,
         )
         # Self-verify before persisting: the validator admits its own receipt on
-        # exactly the evidence a peer validator will.
-        cr.verify_receipt(receipt, public_key, source_epoch=chain.source_epoch)
+        # exactly the evidence a peer validator will, resolving the key by id.
+        cr.verify_receipt(receipt, key_registry, source_epoch=chain.source_epoch)
         score_store.record(receipt)
         results.append(
             MinerResult(

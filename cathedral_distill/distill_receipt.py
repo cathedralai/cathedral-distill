@@ -33,10 +33,19 @@ import base64
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping
 
 _SCORE_Q = Decimal("0.000000000001")  # 12 dp, the shared score-comparison quantum
+
+
+def _parse_ts(value: str) -> datetime:
+    """Parse a six-fraction-digit UTC receipt timestamp to an aware datetime."""
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError) as exc:
+        raise DistillReceiptError("issued_at is not a valid UTC timestamp") from exc
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -240,17 +249,22 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
 
 def verify_receipt(
     receipt: Mapping[str, Any],
-    public_key: Ed25519PublicKey,
+    key_registry: Any,
     *,
     now_iso: str,
     source_epoch: int,
 ) -> Mapping[str, Any]:
     """Independently verify a receipt before scoring. Fails closed on any check.
 
-    Checks, in order — structure, receipt_id, signature, replay/epoch binding,
-    lifecycle, and freshness — mirroring the compute receipt's verification so a
-    Distill contribution is admitted on exactly the same evidence a compute
-    contribution is.
+    Checks, in order — structure, receipt_id, key resolution, signature,
+    replay/epoch binding, lifecycle, and freshness — mirroring the compute
+    receipt's verification so a Distill contribution is admitted on exactly the
+    same evidence a compute contribution is.
+
+    `key_registry` resolves the receipt's `signing_key_id` to the anchored public
+    key (`key_registry.resolve(key_id, at=issued_at)`); the verifier NEVER takes a
+    caller-supplied key, so a receipt cannot carry its own verifying key. Use
+    `cathedral_distill.receipt_keys.ReceiptKeyRegistry`.
     """
     doc = validate_structure(receipt)
 
@@ -258,7 +272,14 @@ def verify_receipt(
     if doc["receipt_id"] != compute_receipt_id(doc):
         raise DistillReceiptError("receipt_id does not match the receipt body")
 
-    # 2. Ed25519 signature over everything except `signature`.
+    # 2. Resolve the signing key from the anchored registry, at issue time.
+    issued_at_dt = _parse_ts(str(doc["issued_at"]))
+    try:
+        public_key = key_registry.resolve(doc["signing_key_id"], at=issued_at_dt)
+    except Exception as exc:  # ReceiptKeyError (or any resolver failure) -> reject
+        raise DistillReceiptError(f"signing key could not be resolved: {exc}") from exc
+
+    # 3. Ed25519 signature over everything except `signature`.
     sig = _exact_keys(doc["signature"], frozenset({"algorithm", "value_base64"}), "signature")
     if sig["algorithm"] != "ed25519":
         raise DistillReceiptError("unsupported signature algorithm")

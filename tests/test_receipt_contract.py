@@ -30,6 +30,8 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 _SEED = bytes(range(32))
 KEY = Ed25519PrivateKey.from_private_bytes(_SEED)
 PUB = KEY.public_key()
+from cathedral_distill.receipt_keys import ReceiptKeyRegistry  # noqa: E402
+KEYREG = ReceiptKeyRegistry.from_keys({"distill-test-1": PUB.public_bytes_raw()})
 
 NOW = "2026-07-17T12:30:00.000000Z"
 SOURCE_EPOCH = 11
@@ -124,8 +126,16 @@ def test_shared_fields_match_the_compute_receipt():
 
 
 def test_receipt_verifies_end_to_end():
-    receipt = dr.verify_receipt(_receipt(), PUB, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+    receipt = dr.verify_receipt(_receipt(), KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
     assert receipt["work"]["status"] == "passed"
+
+
+def test_unknown_signing_key_id_is_rejected():
+    # #3.3: a receipt whose signing_key_id is not anchored in the registry
+    # is rejected — the verifier never trusts a caller-supplied key.
+    empty = ReceiptKeyRegistry.from_keys({})
+    with pytest.raises(dr.DistillReceiptError, match="signing key could not be resolved"):
+        dr.verify_receipt(_receipt(), empty, now_iso=NOW, source_epoch=SOURCE_EPOCH)
 
 
 def test_receipt_id_recomputes():
@@ -137,7 +147,7 @@ def test_tampering_breaks_the_receipt_id():
     receipt = _receipt()
     receipt["subject_hotkey"] = "5Evil"            # a field not internally re-derived
     with pytest.raises(dr.DistillReceiptError, match="receipt_id"):
-        dr.verify_receipt(receipt, PUB, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+        dr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
 
 
 def test_tampering_after_fixing_id_breaks_the_signature():
@@ -145,24 +155,25 @@ def test_tampering_after_fixing_id_breaks_the_signature():
     receipt["subject_hotkey"] = "5Evil"
     receipt["receipt_id"] = dr.compute_receipt_id(receipt)  # relabel it
     with pytest.raises(dr.DistillReceiptError, match="signature"):
-        dr.verify_receipt(receipt, PUB, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+        dr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
 
 
 def test_wrong_key_fails_signature():
     other = Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33))).public_key()
+    wrong = ReceiptKeyRegistry.from_keys({"distill-test-1": other.public_bytes_raw()})
     with pytest.raises(dr.DistillReceiptError, match="signature"):
-        dr.verify_receipt(_receipt(), other, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+        dr.verify_receipt(_receipt(), wrong, now_iso=NOW, source_epoch=SOURCE_EPOCH)
 
 
 def test_replay_across_epochs_is_rejected():
     with pytest.raises(dr.DistillReceiptError, match="source_epoch"):
-        dr.verify_receipt(_receipt(), PUB, now_iso=NOW, source_epoch=SOURCE_EPOCH + 1)
+        dr.verify_receipt(_receipt(), KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH + 1)
 
 
 def test_stale_evidence_is_rejected():
     later = "2026-07-17T13:30:00.000000Z"  # past worker_evidence_expires_at
     with pytest.raises(dr.DistillReceiptError, match="expired"):
-        dr.verify_receipt(_receipt(), PUB, now_iso=later, source_epoch=SOURCE_EPOCH)
+        dr.verify_receipt(_receipt(), KEYREG, now_iso=later, source_epoch=SOURCE_EPOCH)
 
 
 def test_revoked_receipt_is_rejected():
@@ -170,14 +181,14 @@ def test_revoked_receipt_is_rejected():
     body["lifecycle"]["revocation_reference"] = "revoked-key"
     receipt = dr.build_receipt(body, KEY, signing_key_id="distill-test-1")
     with pytest.raises(dr.DistillReceiptError, match="revocation"):
-        dr.verify_receipt(receipt, PUB, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+        dr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
 
 
 def test_unknown_field_fails_closed():
     receipt = _receipt()
     receipt["surprise"] = 1
     with pytest.raises(dr.DistillReceiptError, match="unknown keys"):
-        dr.verify_receipt(receipt, PUB, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+        dr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
 
 
 def test_floats_are_rejected_in_canonical_bytes():
@@ -195,7 +206,7 @@ def test_passed_cannot_exceed_graded():
     body = _receipt_body(passed=40, graded=32)
     receipt = dr.build_receipt(body, KEY, signing_key_id="distill-test-1")
     with pytest.raises(dr.DistillReceiptError, match="exceeds graded"):
-        dr.verify_receipt(receipt, PUB, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+        dr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
 
 
 # --------------------------------------------------------------------------- #
@@ -219,7 +230,7 @@ def _distill_contribution(receipt):
 
 
 def test_both_lanes_produce_contributions_in_one_feed():
-    verified = dr.verify_receipt(_receipt(), PUB, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+    verified = dr.verify_receipt(_receipt(), KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
     compute = lf.Lane("cathedral_confidential_tdx", Decimal("0.45"),
                       [_compute_contribution()])
     distill = lf.Lane("cathedral_distill", Decimal("0.45"),
@@ -260,10 +271,10 @@ def test_empty_lane_leaves_pre_burn_supply_at_one():
 def test_regenerate_fixtures():
     FIXTURES.mkdir(exist_ok=True)
     receipt = _receipt()
-    dr.verify_receipt(receipt, PUB, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+    dr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
     (FIXTURES / "distill-receipt-v1.json").write_text(json.dumps(receipt, indent=2, sort_keys=True))
 
-    verified = dr.verify_receipt(receipt, PUB, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+    verified = dr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
     feed = lf.compose_vector(
         [lf.Lane("cathedral_confidential_tdx", Decimal("0.45"), [_compute_contribution()]),
          lf.Lane("cathedral_distill", Decimal("0.45"), [_distill_contribution(verified)])],

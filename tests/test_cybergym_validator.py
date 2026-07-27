@@ -23,6 +23,8 @@ from datetime import UTC, datetime  # noqa: E402
 _SEED = bytes(range(32))
 KEY = Ed25519PrivateKey.from_private_bytes(_SEED)
 PUB = KEY.public_key()
+from cathedral_distill.receipt_keys import ReceiptKeyRegistry  # noqa: E402
+KEYREG = ReceiptKeyRegistry.from_keys({"cybergym-test-1": PUB.public_bytes_raw()})
 
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
 CUTOFF = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
@@ -118,7 +120,7 @@ def test_nonce_rejects_bad_commitment_and_block():
 # --------------------------------------------------------------------------- #
 
 def test_receipt_verifies_end_to_end():
-    doc = cr.verify_receipt(_receipt(), PUB, source_epoch=SOURCE_EPOCH)
+    doc = cr.verify_receipt(_receipt(), KEYREG, source_epoch=SOURCE_EPOCH)
     assert doc["score"]["work_units"] == "12"     # 8 (level0) + 4 (level1)
     assert doc["score"]["score"] == "0.857142857143"
 
@@ -134,7 +136,7 @@ def test_work_units_are_rederived_from_solves_and_weights():
     r["score"]["earned_units"] = "20"
     r["score"]["work_units"] = "20"
     with pytest.raises(cr.CyberGymReceiptError, match="earned_units does not match"):
-        cr.verify_receipt(r, PUB, source_epoch=SOURCE_EPOCH)
+        cr.verify_receipt(r, KEYREG, source_epoch=SOURCE_EPOCH)
 
 
 def test_tampering_breaks_receipt_id_then_signature():
@@ -144,28 +146,29 @@ def test_tampering_breaks_receipt_id_then_signature():
     r = _receipt()
     r["validator_hotkey"] = "5Evil"
     with pytest.raises(cr.CyberGymReceiptError, match="receipt_id"):
-        cr.verify_receipt(r, PUB, source_epoch=SOURCE_EPOCH)
+        cr.verify_receipt(r, KEYREG, source_epoch=SOURCE_EPOCH)
     r["receipt_id"] = cr.compute_receipt_id(r)      # relabel it
     with pytest.raises(cr.CyberGymReceiptError, match="signature"):
-        cr.verify_receipt(r, PUB, source_epoch=SOURCE_EPOCH)
+        cr.verify_receipt(r, KEYREG, source_epoch=SOURCE_EPOCH)
 
 
 def test_wrong_key_fails_signature():
     other = Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33))).public_key()
+    wrong = ReceiptKeyRegistry.from_keys({"cybergym-test-1": other.public_bytes_raw()})
     with pytest.raises(cr.CyberGymReceiptError, match="signature"):
-        cr.verify_receipt(_receipt(), other, source_epoch=SOURCE_EPOCH)
+        cr.verify_receipt(_receipt(), wrong, source_epoch=SOURCE_EPOCH)
 
 
 def test_replay_across_epochs_is_rejected():
     with pytest.raises(cr.CyberGymReceiptError, match="source_epoch"):
-        cr.verify_receipt(_receipt(), PUB, source_epoch=SOURCE_EPOCH + 1)
+        cr.verify_receipt(_receipt(), KEYREG, source_epoch=SOURCE_EPOCH + 1)
 
 
 def test_unknown_field_fails_closed():
     r = _receipt()
     r["surprise"] = 1
     with pytest.raises(cr.CyberGymReceiptError, match="unknown keys"):
-        cr.verify_receipt(r, PUB, source_epoch=SOURCE_EPOCH)
+        cr.verify_receipt(r, KEYREG, source_epoch=SOURCE_EPOCH)
 
 
 def test_floats_are_rejected():
@@ -177,7 +180,7 @@ def test_solved_cannot_exceed_graded():
     r = _receipt()
     r["score"]["solved_tasks"] = 99
     with pytest.raises(cr.CyberGymReceiptError, match="exceeds graded"):
-        cr.verify_receipt(r, PUB, source_epoch=SOURCE_EPOCH)
+        cr.verify_receipt(r, KEYREG, source_epoch=SOURCE_EPOCH)
 
 
 # --------------------------------------------------------------------------- #
@@ -237,7 +240,7 @@ def test_full_epoch_persists_scores_and_feeds_the_vector(tmp_path):
     assert {r.miner_hotkey for r in results} == {"5Alice", "5Bob"}
     # every receipt independently verifies, and each miner drew its own batch
     for r in results:
-        cr.verify_receipt(r.receipt, PUB, source_epoch=SOURCE_EPOCH)
+        cr.verify_receipt(r.receipt, KEYREG, source_epoch=SOURCE_EPOCH)
     assert results[0].batch.batch_id != results[1].batch.batch_id
 
     # verified units persisted for the adapter to read
