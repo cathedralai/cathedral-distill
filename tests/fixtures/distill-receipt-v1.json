@@ -1,0 +1,94 @@
+{
+  "assurance": {
+    "claims": {
+      "channel": {
+        "evidence_digest": "sha256:ce92d15c7f6bb668746d01daffe60d1222b3b31ce670b465b009aed6e4d3ce3b",
+        "policy_digest": "sha256:23945d8b4777e3d125f1c1b9fbc43bdd40b6f2082b025e0cd09b64d889b97b6d",
+        "reason": null,
+        "status": "passed",
+        "verified_at": "2026-07-17T12:00:00.000000Z"
+      },
+      "hardware": {
+        "evidence_digest": "sha256:aaf24414db323c64dc7cffec3ae07c3da45cb811e16e69eb2b2f3314fd26f715",
+        "policy_digest": "sha256:98e3858ee7462cdda224913e78bddbdc004bc99ab05cb408105927f7dfd5f7f9",
+        "reason": null,
+        "status": "passed",
+        "verified_at": "2026-07-17T12:00:00.000000Z"
+      },
+      "software": {
+        "evidence_digest": "sha256:ad4920940e5a3e54aef452b28b56d19b4690db89da143dca4765536a511c92da",
+        "policy_digest": "sha256:8d034a59a006f401f6242d32273f9bdb1ede1508194f475a69c312147220cfd5",
+        "reason": null,
+        "status": "passed",
+        "verified_at": "2026-07-17T12:00:00.000000Z"
+      },
+      "work": {
+        "evidence_digest": "sha256:7007be5ef013a7bb88c740134adf21ec918cb9fbd8cadc8f0ee52b1051f3e12b",
+        "policy_digest": "sha256:840733b21d3f5fd539760324f7227ebcf21dfd5329c036d5d4259e8bd4f4a653",
+        "reason": null,
+        "status": "passed",
+        "verified_at": "2026-07-17T12:00:00.000000Z"
+      }
+    },
+    "schema": "assurance_claims_v1"
+  },
+  "channel": {
+    "binding_digest": "sha256:0fcfaca5649d43e96b528cb68e1cac0d42b1cf702578d4c5f4cb14756397b229",
+    "status": "passed"
+  },
+  "epoch_id": 7,
+  "evaluation": {
+    "evalset_digest": "sha256:2d794b827cc6dd2c7fae7c9a06bf3ae80d538255c210b3de0d59261f39e2ecc1",
+    "evaluator_digest": "sha256:6ca8c73a3e6c66765c4d6b8d645ea6d8aa2d9397ab0cea1af369391513c93f9c",
+    "evidence_digest": "sha256:4360fff47b20df4687341dce99526bcef69e651242050a4c9501ad027ffdd9b7",
+    "graded_items": 32,
+    "model_digest": "sha256:2b737eb379f52c98745f2eb10851e9d799c6a75024fa3c738d94939ebb92909f",
+    "passed_items": 28,
+    "runtime_digest": "sha256:2424149cb72e137f51ed9c0ae0006d9318192cb0bdd66ed74d3351911a8d01d8",
+    "schema": "cathedral_distill_evaluation_v1",
+    "score": "0.875",
+    "tokenizer_digest": "sha256:5f97e3774c51edd1d63706c2ec3826c564a067794770cdab0f8c4797971cacf9"
+  },
+  "issued_at": "2026-07-17T12:00:00.000000Z",
+  "lifecycle": {
+    "revocation_reference": null,
+    "state": "issued",
+    "worker_event_id": 2,
+    "worker_evidence_expires_at": "2026-07-17T13:00:00.000000Z",
+    "worker_generation": 1,
+    "worker_reason": "attestation_verified",
+    "worker_revision": 2,
+    "worker_state": "attested"
+  },
+  "measurement": "tdx-measurement-sha256:distill-evaluator-v1",
+  "platform_pseudonym": "platform-sha256:23c5f12b8ad4b756301fc7d422f12f5a9337e80c8e2b1570e43c1cab6681ce03",
+  "policy_profile_ids": [
+    "cpu-tdx-distill-v1"
+  ],
+  "policy_registry_digest": "sha256:741fad500f3be5f12aa1774618ed57dd65e10aaf10465d724f17946be1b93850",
+  "policy_registry_release": 1,
+  "receipt_id": "receipt-sha256:2de8fdff16bde75f429b5f4cc4d41e87e96d456a1ce23fdce586766745d2aeab",
+  "schema": "cathedral_distill_receipt_v1",
+  "signature": {
+    "algorithm": "ed25519",
+    "value_base64": "gpOaTwVgN/xAdwqQdl7A4SeneqxP9xhyJ2CYmt6mqFboswKlZbXtru0LTg5cKNH4WB/Ruk7loFee4Yso17S7Dw=="
+  },
+  "signing_key_id": "distill-test-1",
+  "source_epoch": 11,
+  "subject_hotkey": "5Miner",
+  "tcb": {
+    "advisory_ids": [],
+    "collateral_current": true,
+    "debug_enabled": false,
+    "status": "UpToDate",
+    "svn": "01010101010101010101010101010101",
+    "version": 1
+  },
+  "work": {
+    "challenge_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "manifest_digest": "sha256:63e4e3758a053c1d90e4c4c5894d57e30ad84be6536b3c875d600bb021980d8d",
+    "result_digest": "sha256:bd21c05c8bb8721b739c2acd83cadc17324b8d28f8cc0fa4784e64417c48eb00",
+    "status": "passed",
+    "work_units": "28"
+  }
+}

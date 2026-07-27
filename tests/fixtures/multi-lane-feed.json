@@ -1,0 +1,50 @@
+{
+  "burn_snapshot": {
+    "burn_hotkey": "5Burn",
+    "burn_uid": null,
+    "forced_burn_percentage": 10.0
+  },
+  "lanes": [
+    {
+      "allocation": "0.45",
+      "audit_root": "sha256:6ea3827f29eadcedc858b148c71a934b4f142493f34792fb2350ee30d88b3988",
+      "contributing": true,
+      "contributions": [
+        {
+          "miner_hotkey": "5ComputeMiner",
+          "receipt_id": "receipt-sha256:db060909273e11cb4e5f6d5fac7c3ac6a0cb435a3ed9ffc57caa4910a3cb1f9d",
+          "work_units": "3.5"
+        }
+      ],
+      "lane": "cathedral_confidential_tdx"
+    },
+    {
+      "allocation": "0.45",
+      "audit_root": "sha256:0cb4115ea4a76c5e6f64701700540775a45db31ebb0473e1bf898ea79b084963",
+      "contributing": true,
+      "contributions": [
+        {
+          "miner_hotkey": "5Miner",
+          "receipt_id": "receipt-sha256:2de8fdff16bde75f429b5f4cc4d41e87e96d456a1ce23fdce586766745d2aeab",
+          "work_units": "28"
+        }
+      ],
+      "lane": "cathedral_distill"
+    }
+  ],
+  "schema": "cathedral_lane_feed_v1",
+  "weights": [
+    {
+      "base_component": 0.0,
+      "external_component": 0.45,
+      "miner_hotkey": "5ComputeMiner",
+      "weight": 0.45
+    },
+    {
+      "base_component": 0.0,
+      "external_component": 0.45,
+      "miner_hotkey": "5Miner",
+      "weight": 0.45
+    }
+  ]
+}
