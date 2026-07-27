@@ -135,14 +135,14 @@ def test_receipt_id_recomputes():
 
 def test_tampering_breaks_the_receipt_id():
     receipt = _receipt()
-    receipt["evaluation"]["score"] = "0.999"       # claim a better score
+    receipt["subject_hotkey"] = "5Evil"            # a field not internally re-derived
     with pytest.raises(dr.DistillReceiptError, match="receipt_id"):
         dr.verify_receipt(receipt, PUB, now_iso=NOW, source_epoch=SOURCE_EPOCH)
 
 
 def test_tampering_after_fixing_id_breaks_the_signature():
     receipt = _receipt()
-    receipt["evaluation"]["score"] = "0.999"
+    receipt["subject_hotkey"] = "5Evil"
     receipt["receipt_id"] = dr.compute_receipt_id(receipt)  # relabel it
     with pytest.raises(dr.DistillReceiptError, match="signature"):
         dr.verify_receipt(receipt, PUB, now_iso=NOW, source_epoch=SOURCE_EPOCH)
@@ -235,17 +235,22 @@ def test_both_lanes_produce_contributions_in_one_feed():
     miners = {w["miner_hotkey"] for w in feed["weights"]}
     assert miners == {"5ComputeMiner", "5Miner"}
     assert feed["burn_snapshot"]["forced_burn_percentage"] == pytest.approx(10.0)
-    assert sum(w["weight"] for w in feed["weights"]) == pytest.approx(0.90, abs=1e-9)
+    assert sum(w["weight"] for w in feed["weights"]) == pytest.approx(1.0, abs=1e-9)
+    # pre-burn row grammar: base_component 0, weight == external_component
+    assert all(w["base_component"] == 0.0 and w["weight"] == w["external_component"]
+               for w in feed["weights"])
 
 
-def test_empty_lane_mass_falls_to_burn_not_peers():
+def test_empty_lane_leaves_pre_burn_supply_at_one():
     compute = lf.Lane("cathedral_confidential_tdx", Decimal("0.45"),
                       [_compute_contribution()])
     empty_distill = lf.Lane("cathedral_distill", Decimal("0.45"), [])  # no solves
     feed = lf.compose_vector([compute, empty_distill], burn_hotkey="5Burn")
-    # distill's 0.45 is unallocated → it burns, it does not inflate compute.
-    assert feed["burn_snapshot"]["forced_burn_percentage"] == pytest.approx(55.0)
-    assert sum(w["weight"] for w in feed["weights"]) == pytest.approx(0.45, abs=1e-9)
+    # Pre-burn contract: rows sum to 1.0 among miners with verified work; the
+    # fixed 10% burn is applied downstream, never expressed as a variable burn %.
+    assert feed["burn_snapshot"]["forced_burn_percentage"] == pytest.approx(10.0)
+    assert {w["miner_hotkey"] for w in feed["weights"]} == {"5ComputeMiner"}
+    assert sum(w["weight"] for w in feed["weights"]) == pytest.approx(1.0, abs=1e-9)
 
 
 # --------------------------------------------------------------------------- #

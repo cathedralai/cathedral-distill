@@ -71,7 +71,7 @@ def _candidate(miner, score, batch_id, receipt_seed):
         checkpoint_digest="sha256:" + (receipt_seed * 2) * 32,
         receipt_id="sha256:" + (receipt_seed * 2) * 32,
         score=score, latency_p50_ms=Decimal("500"), cost_usd=Decimal("2"),
-        submitted_at=NOW, batch_id=batch_id,
+        submitted_at=NOW, batch_id=batch_id, evidence_verified=True,
         attested=True, teacher_permitted=True, reproduced=True,
         contamination_detected=False, registered_bundle=True,
         independent_evaluator=True)

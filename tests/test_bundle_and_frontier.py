@@ -268,6 +268,7 @@ def _cand(score="0.70", **kw):
         contamination_detected=False,
         registered_bundle=True,
         independent_evaluator=True,
+        evidence_verified=True,  # tests exercise judge mechanics; real path uses derive_candidate
     )
     base.update(kw)
     return fr.Candidate(**base)
@@ -337,17 +338,40 @@ def test_tie_keeps_the_incumbent():
     assert f.champion(POLICY.track).miner_hotkey == "5Alice"
 
 
-def test_margin_must_be_cleared_not_merely_matched():
+def test_higher_score_wins_on_the_same_batch():
+    # On one sealed batch there is no measurement noise between candidates graded
+    # on identical items, so the strictly higher score wins — the margin does NOT
+    # apply within a batch (that is what made the outcome order-dependent, #1.4).
     f = fr.Frontier([POLICY])
     f.submit(POLICY.track, _cand(score="0.70"))
-    # +0.004 is inside the noise margin.
-    assert not f.submit(
-        POLICY.track, _cand(score="0.704", miner_hotkey="5Bob")
-    ).crowned
-    # +0.005 clears it.
-    assert f.submit(
-        POLICY.track, _cand(score="0.705", miner_hotkey="5Bob")
-    ).crowned
+    assert f.submit(POLICY.track, _cand(score="0.704", miner_hotkey="5Bob",
+                                        checkpoint_digest="sha256:" + "bb" * 32)).crowned
+    assert f.champion(POLICY.track).score == Decimal("0.704")
+
+
+def test_frontier_is_submission_order_independent():
+    # The owner's #1.4 example: same batch, two candidates within 0.005. The
+    # champion must be identical regardless of arrival order.
+    a = dict(score="0.600", miner_hotkey="5A", checkpoint_digest="sha256:" + "a1" * 32)
+    b = dict(score="0.604", miner_hotkey="5B", checkpoint_digest="sha256:" + "b2" * 32)
+    f1 = fr.Frontier([POLICY])
+    f1.submit(POLICY.track, _cand(**a)); f1.submit(POLICY.track, _cand(**b))
+    f2 = fr.Frontier([POLICY])
+    f2.submit(POLICY.track, _cand(**b)); f2.submit(POLICY.track, _cand(**a))
+    assert f1.champion(POLICY.track).miner_hotkey == f2.champion(POLICY.track).miner_hotkey == "5B"
+    assert f1.champion(POLICY.track).score == f2.champion(POLICY.track).score == Decimal("0.604")
+
+
+def test_exact_tie_is_deterministic_and_plagiarism_fails():
+    f = fr.Frontier([POLICY])
+    f.submit(POLICY.track, _cand(score="0.70", checkpoint_digest="sha256:" + "cc" * 32))
+    # Resubmitting the SAME checkpoint (plagiarism) ties the key exactly -> no crown.
+    assert not f.submit(POLICY.track, _cand(score="0.70", miner_hotkey="5Bob",
+                                            checkpoint_digest="sha256:" + "cc" * 32)).crowned
+    # A different checkpoint with a lexicographically smaller digest wins the tie
+    # deterministically (not by who arrived first).
+    assert f.submit(POLICY.track, _cand(score="0.70", miner_hotkey="5Cara",
+                                        checkpoint_digest="sha256:" + "00" * 32)).crowned
 
 
 def test_sandbagging_gains_nothing():

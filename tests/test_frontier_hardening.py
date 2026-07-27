@@ -111,6 +111,7 @@ def _full_evidence(**over):
                                              hotkeys={ro.Role.SERVING_MINER: "5Eval"}),
         reproduction_receipt=repro,
         canary_passed=1, canary_total=8, canary_chance_rate=Decimal("0.25"),
+        attestation_verified=True,  # the raw Polaris/TDX quote verified
     )
     ev.update(over)
     return fr.CandidateEvidence(**ev)

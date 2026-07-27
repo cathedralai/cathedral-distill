@@ -82,20 +82,34 @@ def compose_vector(
     burn_hotkey: str,
     burn_fraction: Decimal = Decimal("0.10"),
 ) -> dict[str, object]:
-    """Compose lanes into the final per-miner weight vector, with burn.
+    """Compose verified lane contributions into the PRE-burn per-miner allocation.
 
-    Mirrors the router: each lane normalizes its own work units to sum 1, then
-    contributes `allocation × normalized` to each miner. A lane with no positive
-    work contributes nothing (its allocation is not redistributed to peers; the
-    unallocated mass falls to burn, matching the empty-verified-set stance). The
-    final weights renormalize to sum 1 including burn.
+    This is the composition input the production publisher
+    (`scaffold/publisher/weights.py::build_signed_vector`) turns into the signed
+    `validated_supply_v2` vector and the validator applies burn to; it is NOT a
+    competing signed vector. So it emits the shape that contract requires:
+
+      * per-miner rows summing to **1.0 pre-burn**, with `base_component == 0`
+        and `weight == external_component` (the validator applies the fixed 10%
+        burn after mapping hotkeys to uids — the rows are never pre-burned to
+        0.90);
+      * `burn_snapshot = {burn_uid: null, burn_hotkey, forced_burn_percentage:
+        10.0}`;
+      * empty rows (zero supply) when nothing is verified, never a post-burn or
+        variable-burn grammar.
+
+    Each lane normalizes its own work units to sum 1 and contributes
+    `allocation × normalized`; the composed mass is then renormalized to sum 1.0
+    across all miners with verified work, so the rows meet the pre-burn contract.
+    The `lanes` block records each contribution and its audit root for the
+    publisher to bind; the publisher owns the signature and the full
+    `validated_supply`/`confidential_primary`/`external_scores` policy metadata.
     """
     if not Decimal(0) <= burn_fraction <= Decimal(1):
         raise LaneFeedError("burn_fraction must be within 0..1")
 
     combined: dict[str, Decimal] = {}
     lane_records: list[dict[str, object]] = []
-    allocated = Decimal(0)
 
     for lane in sorted(lanes, key=lambda ln: ln.lane):
         total = sum((c.work_units for c in lane.contributions), Decimal(0))
@@ -106,7 +120,6 @@ def compose_vector(
                     continue
                 share = lane.allocation * (c.work_units / total)
                 combined[c.miner_hotkey] = combined.get(c.miner_hotkey, Decimal(0)) + share
-            allocated += lane.allocation
         lane_records.append({
             "lane": lane.lane,
             "audit_root": lane.audit_root(),
@@ -119,30 +132,33 @@ def compose_vector(
             ],
         })
 
-    # Burn takes its fixed floor; any unallocated lane mass falls to burn too,
-    # never to a miner who did not earn it.
-    burn = burn_fraction + max(Decimal(1) - burn_fraction - allocated, Decimal(0))
-    live = Decimal(1) - burn
+    # PRE-burn rows: normalize the composed mass to sum exactly 1.0. The fixed
+    # burn is a snapshot the validator applies downstream, never subtracted here.
     weights: list[dict[str, object]] = []
     combined_total = sum(combined.values(), Decimal(0))
-    if combined_total > 0 and live > 0:
+    if combined_total > 0:
         for miner in sorted(combined):
-            w = (live * (combined[miner] / combined_total)).quantize(_QUANT)
+            w = (combined[miner] / combined_total).quantize(_QUANT)
             weights.append({
                 "miner_hotkey": miner,
                 "weight": float(w),
                 "base_component": 0.0,
                 "external_component": float(w),
             })
-    else:
-        burn = Decimal(1)  # nothing verified anywhere → everything burns
 
     return {
         "schema": LANE_FEED_SCHEMA,
+        "pre_burn": True,
         "burn_snapshot": {
             "burn_uid": None,
             "burn_hotkey": burn_hotkey,
-            "forced_burn_percentage": float(burn * 100),
+            "forced_burn_percentage": float(burn_fraction * 100),
+        },
+        "policy_metadata": {
+            "composer": "cathedral_distill.lane_feed",
+            "pre_burn_supply": "1.0" if weights else "0",
+            "fixed_burn_allocation": str(burn_fraction),
+            "signed_by_publisher": False,  # build_signed_vector applies the signature
         },
         "lanes": lane_records,
         "weights": weights,

@@ -98,34 +98,38 @@ evidence, a revocation reference, an unknown field, and a float each fail closed
 
 ---
 
-## 3. The shared feed — one compute and one Distill contribution
+## 3. The shared feed — the pre-burn composition the publisher signs
 
-Neither lane publishes weights. Each verified receipt yields a **lane
-contribution** (`subject_hotkey` + `work_units`), and `lane_feed.compose_vector`
-composes lanes into the one signed SN39 vector — the same model as
-`mechanism_router.compose`: per-lane allocation, per-lane normalization, a fixed
-burn holding the remainder.
+`lane_feed.compose_vector` is **not** a competing signed vector. It is the
+composition input the production publisher
+(`scaffold/publisher/weights.py::build_signed_vector`) turns into the signed
+`validated_supply_v2` vector, and the validator applies burn to. So it emits the
+grammar that contract requires:
+
+- per-miner rows summing to **1.0 pre-burn**, with `base_component == 0` and
+  `weight == external_component` (the validator applies the fixed 10% burn *after*
+  mapping hotkeys to uids — rows are never pre-burned to 0.90);
+- `burn_snapshot = {burn_uid: null, burn_hotkey, forced_burn_percentage: 10.0}`;
+- empty rows (zero supply) when nothing is verified — never a post-burn or
+  variable-burn percentage.
 
 The generated [`multi-lane-feed.json`](../tests/fixtures/multi-lane-feed.json)
-shows both lanes at 0.45 with a 0.10 burn:
+composes one compute and one Distill contribution:
 
 ```
 lane                          allocation  audit_root        contribution
 cathedral_confidential_tdx    0.45        sha256:…          5ComputeMiner  work_units 3.5
 cathedral_distill             0.45        sha256:…          5Miner         work_units 28
 
-composed weights:  5ComputeMiner 0.45   5Miner 0.45   (burn 0.10)
+pre-burn weights (sum 1.0):  5ComputeMiner 0.5   5Miner 0.5     burn_snapshot 10.0%
 ```
 
-Each lane records its **audit root** — a root over that lane's receipts — so the
-final vector is auditable back to the receipts that produced it. If a lane has no
-verified work its allocation **falls to burn, not to peer lanes** (matching the
-empty-verified-set stance): an empty Distill lane at 0.45 pushes burn to 0.55, it
-never inflates compute.
-
-The feed carries: `lane`, `audit_root` (the receipt/audit root), `allocation`,
-per-miner `contributions`, and the `weights` (final composed vector) — exactly the
-publishing fields the issue requires.
+Each lane records its **audit root** so the publisher can bind the vector back to
+the receipts. The composed mass is renormalized to sum 1.0 across all miners with
+verified work; a lane with none contributes nothing (the present lanes hold the
+1.0). The **signature** and the full `validated_supply`/`confidential_primary`/
+`external_scores` policy metadata are the publisher's, not this primitive's —
+cross-repo integration with that real builder is tracked in #3 and #4.
 
 ---
 

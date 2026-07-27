@@ -40,6 +40,7 @@ def _open(index, ids, commits, truth, leaves, *, passed=None):
     return ch.OpenedItem(
         index=index,
         item_id=ids[index],
+        output=f"out-{index}",              # the preimage of commits[index]
         output_commitment=commits[index],
         passed=truth[index] if passed is None else passed,
         proof=ch.build_proof(leaves, index),
@@ -184,8 +185,8 @@ def test_one_opening_cannot_answer_two_positions():
     # It must claim proof.index == 7 (OpenedItem enforces that); reusing item 2's
     # leaf and path under position 7 is the strongest forgery available.
     forged = ch.MerkleProof(index=7, leaf=leaves[2], path=honest2.path)
-    opened = ch.OpenedItem(index=7, item_id=ids[2], output_commitment=commits[2],
-                           passed=truth[2], proof=forged)
+    opened = ch.OpenedItem(index=7, item_id=ids[2], output="out-2",
+                           output_commitment=commits[2], passed=truth[2], proof=forged)
     result = ch.spot_check(
         opened=[opened], items_root_value=root, item_count=16,
         expected_indices=[7], regrade=lambda _i, _c: True)
@@ -196,8 +197,8 @@ def test_one_opening_cannot_answer_two_positions():
 def test_opening_index_must_match_proof_index():
     ids, commits, truth, leaves = _tree(8)
     with pytest.raises(ch.ChallengeError, match="proof index"):
-        ch.OpenedItem(index=5, item_id=ids[5], output_commitment=commits[5],
-                      passed=truth[5], proof=ch.build_proof(leaves, 4))
+        ch.OpenedItem(index=5, item_id=ids[5], output="out-5",
+                      output_commitment=commits[5], passed=truth[5], proof=ch.build_proof(leaves, 4))
 
 
 def test_declining_to_open_an_item_is_a_failure():

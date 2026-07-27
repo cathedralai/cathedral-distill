@@ -46,6 +46,7 @@ from typing import Sequence
 from cathedral_distill.eval_receipt import (
     EvalReceiptError,
     ITEM_NODE_DOMAIN,
+    digest_bytes,
     item_leaf,
     items_root,
 )
@@ -204,6 +205,12 @@ def verify_proof(proof: MerkleProof, root: str, *, leaf_count: int) -> bool:
 class OpenedItem:
     """What a miner reveals for one challenged index.
 
+    The reveal carries the actual model `output` (through the approved bounded
+    channel), not only its commitment: the validator recomputes the commitment
+    from those bytes AND runs the pinned grader over them, so the spot-check is an
+    *independent regrade*, not merely a check that a committed verdict was
+    position-bound. `output_commitment` remains for the leaf binding.
+
     The opening index and the proof index must agree; `spot_check` additionally
     requires both to equal a challenged index. A mismatch is not an accident to
     tolerate — it is exactly the relabelling an attacker would attempt.
@@ -211,6 +218,7 @@ class OpenedItem:
 
     index: int
     item_id: str
+    output: str
     output_commitment: str
     passed: bool
     proof: MerkleProof
@@ -250,12 +258,13 @@ def spot_check(
     """Verify openings at their challenged positions and re-grade them locally.
 
     `item_count` is the receipt's graded-item count (the tree's leaf count), used
-    to derive each proof's orientation from its position. `regrade(item_id,
-    output_commitment) -> bool` is the validator's own verdict, produced by the
-    grader digest pinned in the receipt. A receipt survives only if every
-    challenged index is opened, each opening's leaf binds that exact position and
-    proves against `items_root`, *and* the validator's verdict matches the one the
-    enclave recorded.
+    to derive each proof's orientation from its position. `regrade(item_id, output)
+    -> bool` is the validator's own verdict, produced by executing the grader
+    digest pinned in the receipt against the REVEALED output bytes. A receipt
+    survives only if every challenged index is opened, each opening's leaf binds
+    that exact position and proves against `items_root`, the revealed output
+    hashes to the committed digest, *and* the validator's independent regrade of
+    those bytes matches the verdict the enclave recorded.
 
     Missing an index is a failure, not an omission: a miner that could decline to
     open an item would simply decline whichever it faked. An opening for an index
@@ -286,7 +295,14 @@ def spot_check(
         if not verify_proof(item.proof, items_root_value, leaf_count=item_count):
             unproven.append(item.index)
             continue
-        if regrade(item.item_id, item.output_commitment) != item.passed:
+        # The revealed output must hash to the committed digest the leaf binds —
+        # otherwise the miner revealed bytes it never committed to.
+        if digest_bytes(item.output.encode("utf-8")) != item.output_commitment:
+            unproven.append(item.index)
+            continue
+        # Independent regrade: run the pinned grader over the REAL output bytes,
+        # not the commitment, and require it to match the recorded verdict.
+        if regrade(item.item_id, item.output) != item.passed:
             mismatched.append(item.index)
 
     return SpotCheckResult(

@@ -64,9 +64,11 @@ class TrackPolicy:
     """Per-track rules. Set once, changed only as a reviewed mechanism change."""
 
     track: str
-    # A challenger must exceed the champion by at least this much. Without a
-    # margin, evaluation noise flips the crown every epoch and nobody can build
-    # a business on holding it.
+    # Reserved cross-batch guard. Within one sealed batch the crown is decided by
+    # strict argmax (see `judge`) because there is no measurement noise between
+    # candidates graded on identical items; the margin is retained for a future
+    # cross-batch comparison path and is NOT applied to same-batch paired
+    # evaluation, where applying it made the outcome submission-order dependent.
     min_margin: Decimal = Decimal("0.005")
     max_cost_usd: Decimal = Decimal("100")
     max_latency_p50_ms: Decimal = Decimal("5000")
@@ -117,6 +119,11 @@ class Candidate:
     # operator who controls the machine can re-run the eval and submit only its
     # best result. See roles.assert_independent_evaluator.
     independent_evaluator: bool = False
+    # Provenance: only `derive_candidate` sets this true, after computing every
+    # gate from verified evidence. A hand-built `Candidate` (all-true booleans,
+    # a made-up receipt string) has it false, and `judge` refuses to crown it —
+    # so a caller cannot assert its way onto the frontier.
+    evidence_verified: bool = False
 
     def __post_init__(self) -> None:
         if not Decimal(0) <= self.score <= Decimal(1):
@@ -176,14 +183,17 @@ class Champion:
             "contaminated": self.contaminated,
         }
 
-    def rescored(self, score: Decimal, batch_id: str, receipt_id: str) -> "Champion":
+    def rescored(
+        self, score: Decimal, batch_id: str, receipt_id: str, *, revalidated_at: datetime
+    ) -> "Champion":
         """The same champion, its score refreshed on a new batch.
 
         Identity (miner, bundle, checkpoint, crowned_at) is preserved — it is the
         *same model still holding the crown* — but the score now reflects the
         current batch, so a challenger on that batch is judged fairly. The receipt
-        of the fresh evaluation replaces the stale one. Re-scoring is a fresh
-        proof-of-life, so it also refreshes `revalidated_at`.
+        of the fresh evaluation replaces the stale one. A re-score IS a fresh
+        proof-of-life, so `revalidated_at` advances to when it ran — otherwise a
+        champion re-scored every epoch could still age past its TTL and pay burn.
         """
         return Champion(
             track=self.track,
@@ -194,7 +204,7 @@ class Champion:
             score=score,
             crowned_at=self.crowned_at,
             batch_id=batch_id,
-            revalidated_at=self.revalidated_at,
+            revalidated_at=revalidated_at,
             revoked=self.revoked,
             available=self.available,
             contaminated=self.contaminated,
@@ -288,6 +298,11 @@ class CandidateEvidence:
     canary_passed: int = 0
     canary_total: int = 0
     canary_chance_rate: Decimal = Decimal("0.25")
+    # The result of the RAW attestation verification (Polaris/TDX quote + policy),
+    # supplied by the verifier — NOT inferred from the receipt's attestation kind.
+    # A structurally valid `kind: "tdx"` receipt is not creditable unless the raw
+    # quote actually verified; this must be True for the attested gate to pass.
+    attestation_verified: bool | None = None
 
 
 def _reproduction_ok(
@@ -339,7 +354,13 @@ def derive_candidate(evidence: CandidateEvidence, policy: TrackPolicy) -> Candid
     receipt = er.validate_receipt(evidence.receipt)  # raises on malformed -> fail closed
     score_block = receipt["score"]
 
-    attested = er.creditable_as_verified_work(evidence.receipt)
+    # Creditable requires BOTH a non-"none" attested receipt AND the raw quote
+    # verification result. A structurally valid tdx receipt whose quote never
+    # verified is not attested — the kind is a claim, not a proof.
+    attested = (
+        er.creditable_as_verified_work(evidence.receipt)
+        and evidence.attestation_verified is True
+    )
 
     teacher_permitted = bool(
         evidence.teacher_registry is not None
@@ -382,6 +403,7 @@ def derive_candidate(evidence: CandidateEvidence, policy: TrackPolicy) -> Candid
         contamination_detected=contamination_detected,
         registered_bundle=registered_bundle,
         independent_evaluator=independent_evaluator,
+        evidence_verified=True,  # provenance: this candidate came through the evidence path
     )
 
 
@@ -422,6 +444,12 @@ def judge(
     policy: TrackPolicy,
 ) -> CrownDecision:
     """Decide whether a candidate takes the crown. Incumbent wins every tie."""
+    if not candidate.evidence_verified:
+        # A raw Candidate was never checked against evidence. Refuse it before any
+        # gate or score is considered — the frontier only judges candidates that
+        # came through `derive_candidate`.
+        return CrownDecision(False, "unverified_candidate", champion, GateResult(False))
+
     gates = evaluate_gates(candidate, policy)
     if not gates.passed:
         return CrownDecision(False, f"gates_failed:{gates.reason}", champion, gates)
@@ -439,10 +467,18 @@ def judge(
             return CrownDecision(
                 False, "champion_not_scored_on_this_batch", champion, gates
             )
-        required = champion.score + policy.min_margin
-        if candidate.score < required:
-            # Covers both "worse" and "tied": a challenger must be better by the
-            # margin, so resubmitting the champion's own checkpoint gains nothing.
+        # Order-independent crown. On ONE sealed batch there is no measurement
+        # noise between candidates — both were graded on identical items — so the
+        # strictly higher score wins, and an exact score tie resolves by a
+        # deterministic key (checkpoint_digest), never by who submitted first.
+        # This is what makes the frontier converge to the same champion whatever
+        # order validators observe submissions in. Re-submitting the champion's
+        # own checkpoint ties its key exactly, so it never unseats the incumbent.
+        challenger_wins = candidate.score > champion.score or (
+            candidate.score == champion.score
+            and candidate.checkpoint_digest < champion.checkpoint_digest
+        )
+        if not challenger_wins:
             return CrownDecision(False, "did_not_beat_frontier", champion, gates)
 
     crowned = Champion(
@@ -601,6 +637,7 @@ class Frontier:
                 champion_rescore.score,
                 champion_rescore.batch_id,
                 champion_rescore.receipt_id,
+                revalidated_at=candidate.submitted_at,  # the rescore is proof-of-life
             )
             self._champions[track] = champion  # keep the incumbent current
 

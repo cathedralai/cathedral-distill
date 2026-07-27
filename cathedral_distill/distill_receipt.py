@@ -33,7 +33,10 @@ import base64
 import hashlib
 import json
 import re
+from decimal import Decimal
 from typing import Any, Mapping
+
+_SCORE_Q = Decimal("0.000000000001")  # 12 dp, the shared score-comparison quantum
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -190,7 +193,7 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
     work = _exact_keys(doc["work"], _WORK_KEYS, "work")
     _digest(work["manifest_digest"], "work.manifest_digest")
     _digest(work["result_digest"], "work.result_digest")
-    _decimal(work["work_units"], "work.work_units")
+    work_units = _decimal(work["work_units"], "work.work_units")
 
     assurance = _exact_keys(doc["assurance"], frozenset({"schema", "claims"}), "assurance")
     if assurance["schema"] != ASSURANCE_SCHEMA:
@@ -212,6 +215,26 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
             raise DistillReceiptError(f"evaluation.{field} must be a non-negative integer")
     if ev["passed_items"] > ev["graded_items"]:
         raise DistillReceiptError("evaluation.passed_items exceeds graded_items")
+
+    # Rederive the score and the rewardable units from the item counts, so a
+    # receipt cannot claim a score its own counts do not support (e.g. score=1.0
+    # with passed=0) or an arbitrary work_units (e.g. 999). The distill work-unit
+    # rule (distill_work_units_v1) is: work_units == passed_items — the count of
+    # verified-correct items is the rewardable quantity, never a signer's number.
+    graded = ev["graded_items"]
+    passed = ev["passed_items"]
+    reported_score = Decimal(str(ev["score"]))
+    if reported_score > 1:
+        raise DistillReceiptError("evaluation.score must be within 0..1")
+    expected_score = (
+        Decimal(passed) / Decimal(graded) if graded else Decimal(0)
+    ).quantize(_SCORE_Q)
+    if reported_score.quantize(_SCORE_Q) != expected_score:
+        raise DistillReceiptError("evaluation.score does not match passed_items/graded_items")
+    if Decimal(work_units) != Decimal(passed):
+        raise DistillReceiptError(
+            "work.work_units must equal evaluation.passed_items (distill_work_units_v1)"
+        )
     return doc
 
 
