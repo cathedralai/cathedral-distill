@@ -53,7 +53,7 @@ def _receipt_body(*, subject="5Miner", score="0.875", work_units="28",
         "source_epoch": SOURCE_EPOCH,
         "issued_at": "2026-07-17T12:00:00.000000Z",
         "platform_pseudonym": "platform-" + _digest("evaluator-machine"),
-        "measurement": "tdx-measurement-sha256:distill-evaluator-v1",
+        "measurement": "tdx-measurement-sha256:" + "ab" * 32,
         "policy_registry_release": 1,
         "policy_registry_digest": _digest("policy-registry"),
         "policy_profile_ids": ["cpu-tdx-distill-v1"],
@@ -267,6 +267,63 @@ def test_empty_lane_leaves_pre_burn_supply_at_one():
 # --------------------------------------------------------------------------- #
 # Regenerate the committed fixtures from the code above
 # --------------------------------------------------------------------------- #
+
+def test_debug_enabled_tcb_is_rejected():
+    body = _receipt_body(); body["tcb"]["debug_enabled"] = True
+    r = dr.build_receipt(body, KEY, signing_key_id="distill-test-1")
+    with pytest.raises(dr.DistillReceiptError, match="debug_enabled must be false"):
+        dr.verify_receipt(r, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+def test_stale_collateral_is_rejected():
+    body = _receipt_body(); body["tcb"]["collateral_current"] = False
+    r = dr.build_receipt(body, KEY, signing_key_id="distill-test-1")
+    with pytest.raises(dr.DistillReceiptError, match="collateral_current must be true"):
+        dr.verify_receipt(r, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+def test_revoked_tcb_status_is_rejected():
+    body = _receipt_body(); body["tcb"]["status"] = "Revoked"
+    r = dr.build_receipt(body, KEY, signing_key_id="distill-test-1")
+    with pytest.raises(dr.DistillReceiptError, match="Revoked"):
+        dr.verify_receipt(r, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+def test_non_uptodate_without_advisories_is_rejected():
+    body = _receipt_body()
+    body["tcb"]["status"] = "SWHardeningNeeded"; body["tcb"]["advisory_ids"] = []
+    r = dr.build_receipt(body, KEY, signing_key_id="distill-test-1")
+    with pytest.raises(dr.DistillReceiptError, match="must list its advisories"):
+        dr.verify_receipt(r, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+def test_bad_measurement_format_is_rejected():
+    body = _receipt_body(); body["measurement"] = "tdx-measurement-sha256:not-hex"
+    r = dr.build_receipt(body, KEY, signing_key_id="distill-test-1")
+    with pytest.raises(dr.DistillReceiptError, match="measurement must be"):
+        dr.verify_receipt(r, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+def test_unpassed_hardware_claim_is_rejected():
+    body = _receipt_body()
+    body["assurance"]["claims"]["hardware"]["status"] = "failed"
+    r = dr.build_receipt(body, KEY, signing_key_id="distill-test-1")
+    with pytest.raises(dr.DistillReceiptError, match="hardware claim must be passed"):
+        dr.verify_receipt(r, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+def test_policy_gating_rejects_disallowed_measurement():
+    with pytest.raises(dr.DistillReceiptError, match="not admitted by policy"):
+        dr.verify_receipt(_receipt(), KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH,
+                          allowed_measurements={"tdx-measurement-sha256:" + "cd" * 32})
+
+
+def test_policy_gating_admits_the_measurement_when_listed():
+    m = "tdx-measurement-sha256:" + "ab" * 32
+    dr.verify_receipt(_receipt(), KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH,
+                      allowed_measurements={m}, allowed_tcb_statuses={"UpToDate"},
+                      allowed_advisories=set())
+
 
 def test_regenerate_fixtures():
     FIXTURES.mkdir(exist_ok=True)

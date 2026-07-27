@@ -60,18 +60,18 @@
     "worker_revision": 2,
     "worker_state": "attested"
   },
-  "measurement": "tdx-measurement-sha256:distill-evaluator-v1",
+  "measurement": "tdx-measurement-sha256:abababababababababababababababababababababababababababababababab",
   "platform_pseudonym": "platform-sha256:23c5f12b8ad4b756301fc7d422f12f5a9337e80c8e2b1570e43c1cab6681ce03",
   "policy_profile_ids": [
     "cpu-tdx-distill-v1"
   ],
   "policy_registry_digest": "sha256:741fad500f3be5f12aa1774618ed57dd65e10aaf10465d724f17946be1b93850",
   "policy_registry_release": 1,
-  "receipt_id": "receipt-sha256:2de8fdff16bde75f429b5f4cc4d41e87e96d456a1ce23fdce586766745d2aeab",
+  "receipt_id": "receipt-sha256:6696273e4ecd4f5c37d2e7dd2e085699b1a2c5409a554b0c24d5051ef10da593",
   "schema": "cathedral_distill_receipt_v1",
   "signature": {
     "algorithm": "ed25519",
-    "value_base64": "gpOaTwVgN/xAdwqQdl7A4SeneqxP9xhyJ2CYmt6mqFboswKlZbXtru0LTg5cKNH4WB/Ruk7loFee4Yso17S7Dw=="
+    "value_base64": "vmMXyyZl8gaE9cCVDsm9IrYfaTvFs/IDf3dhg6mPmtD840tfs7Xd7K6cWdyiP6QaAajhgi3hxlCxyqpj62DqAQ=="
   },
   "signing_key_id": "distill-test-1",
   "source_epoch": 11,

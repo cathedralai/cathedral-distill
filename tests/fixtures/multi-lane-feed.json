@@ -20,12 +20,12 @@
     },
     {
       "allocation": "0.45",
-      "audit_root": "sha256:0cb4115ea4a76c5e6f64701700540775a45db31ebb0473e1bf898ea79b084963",
+      "audit_root": "sha256:9e1c4b880de034a2d1eabea37bc9f00bb6b345e840bf0bb48868060479c30670",
       "contributing": true,
       "contributions": [
         {
           "miner_hotkey": "5Miner",
-          "receipt_id": "receipt-sha256:2de8fdff16bde75f429b5f4cc4d41e87e96d456a1ce23fdce586766745d2aeab",
+          "receipt_id": "receipt-sha256:6696273e4ecd4f5c37d2e7dd2e085699b1a2c5409a554b0c24d5051ef10da593",
           "work_units": "28"
         }
       ],

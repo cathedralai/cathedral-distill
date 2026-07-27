@@ -63,6 +63,22 @@ _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 _RECEIPT_ID_RE = re.compile(r"\Areceipt-sha256:[0-9a-f]{64}\Z")
 _DECIMAL_RE = re.compile(r"\A(?:0|[1-9][0-9]{0,29})(?:\.[0-9]{1,12})?\Z")
 _TS_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z\Z")
+# Strict TDX semantics, mirroring cathedral_assurance_receipt_v2 (#3.4).
+_TCB_SVN_RE = re.compile(r"\A[0-9a-f]{32}\Z")
+_MEASUREMENT_RE = re.compile(r"\Atdx-measurement-sha256:[0-9a-f]{64}\Z")
+MAX_TCB_ADVISORIES = 256
+# The vendor TCB status vocabulary from the compute repo (cathedral.common).
+TDX_TCB_STATUSES = frozenset(
+    {
+        "UpToDate", "OutOfDate", "ConfigurationNeeded",
+        "OutOfDateConfigurationNeeded", "SWHardeningNeeded",
+        "ConfigurationAndSWHardeningNeeded", "Revoked",
+    }
+)
+_TCB_KEYS = frozenset(
+    {"status", "version", "svn", "advisory_ids", "debug_enabled", "collateral_current"}
+)
+_CHANNEL_KEYS = frozenset({"status", "binding_digest"})
 
 # The shared top-level field set, verbatim from cathedral_assurance_receipt_v2,
 # plus the single Distill extension `evaluation`. Keeping the set explicit is
@@ -187,6 +203,33 @@ def _decimal(value: Any, label: str) -> str:
     return text
 
 
+def _validate_tcb(tcb: Any) -> None:
+    """The TDX TCB block, verified with the compute receipt's strict rules: a
+    known non-Revoked status, a 32-hex SVN, bounded advisories that must be
+    listed when the status is not UpToDate, debug OFF, and current collateral."""
+    block = _exact_keys(tcb, _TCB_KEYS, "tcb")
+    version = block["version"]
+    if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+        raise DistillReceiptError("tcb.version must be a non-negative integer")
+    if block["status"] not in TDX_TCB_STATUSES:
+        raise DistillReceiptError("tcb.status is not a known TDX status")
+    if block["status"] == "Revoked":
+        raise DistillReceiptError("tcb.status is Revoked")
+    if not isinstance(block["svn"], str) or _TCB_SVN_RE.match(block["svn"]) is None:
+        raise DistillReceiptError("tcb.svn must be 32 lowercase hex")
+    advisories = block["advisory_ids"]
+    if not isinstance(advisories, list) or len(advisories) > MAX_TCB_ADVISORIES:
+        raise DistillReceiptError("tcb.advisory_ids must be a bounded list")
+    if any(not isinstance(a, str) or not a or len(a) > 128 for a in advisories):
+        raise DistillReceiptError("tcb.advisory_ids entries are invalid")
+    if block["status"] != "UpToDate" and not advisories:
+        raise DistillReceiptError("a non-UpToDate TCB must list its advisories")
+    if block["debug_enabled"] is not False:
+        raise DistillReceiptError("tcb.debug_enabled must be false")
+    if block["collateral_current"] is not True:
+        raise DistillReceiptError("tcb.collateral_current must be true")
+
+
 def validate_structure(receipt: Any) -> Mapping[str, Any]:
     """Structural validation: fail closed on any unknown or missing field."""
     doc = _exact_keys(receipt, _RECEIPT_KEYS, "distill receipt")
@@ -198,6 +241,15 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
         raise DistillReceiptError("receipt_id must be receipt-sha256:<64 hex>")
     if not _TS_RE.match(str(doc["issued_at"])):
         raise DistillReceiptError("issued_at must be six-fraction-digit UTC")
+
+    # Shared attestation fields, verified with Compute's strict semantics (#3.4).
+    if not _MEASUREMENT_RE.match(str(doc["measurement"])):
+        raise DistillReceiptError("measurement must be tdx-measurement-sha256:<64 hex>")
+    _validate_tcb(doc["tcb"])
+    channel = _exact_keys(doc["channel"], _CHANNEL_KEYS, "channel")
+    _digest(channel["binding_digest"], "channel.binding_digest")
+    if str(channel["status"]) not in ("passed", "failed", "unknown"):
+        raise DistillReceiptError("channel status is invalid")
 
     work = _exact_keys(doc["work"], _WORK_KEYS, "work")
     _digest(work["manifest_digest"], "work.manifest_digest")
@@ -211,6 +263,11 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
     for name, claim in claims.items():
         if str(claim.get("status")) not in ("passed", "failed", "unknown"):
             raise DistillReceiptError(f"assurance claim {name} has an invalid status")
+    # A creditable receipt asserts hardware and software actually verified — the
+    # same requirement Compute's KEY_RELEASE/score-eligibility policies enforce.
+    for required in ("hardware", "software"):
+        if str(claims[required].get("status")) != "passed":
+            raise DistillReceiptError(f"assurance {required} claim must be passed")
 
     ev = _exact_keys(doc["evaluation"], _EVALUATION_KEYS, "evaluation")
     if ev["schema"] != EVALUATION_SCHEMA:
@@ -253,6 +310,9 @@ def verify_receipt(
     *,
     now_iso: str,
     source_epoch: int,
+    allowed_measurements: frozenset[str] | set[str] | None = None,
+    allowed_tcb_statuses: frozenset[str] | set[str] | None = None,
+    allowed_advisories: frozenset[str] | set[str] | None = None,
 ) -> Mapping[str, Any]:
     """Independently verify a receipt before scoring. Fails closed on any check.
 
@@ -289,7 +349,19 @@ def verify_receipt(
     except (InvalidSignature, ValueError) as exc:
         raise DistillReceiptError("signature does not verify") from exc
 
-    # 3. Replay protection: the receipt is bound to the authorized source epoch.
+    # 3. Policy gating (when the validator supplies the signed-registry policy):
+    # measurement, TCB status, and advisories must be admitted by policy — the
+    # same membership checks Compute applies against its policy registry.
+    if allowed_measurements is not None and doc["measurement"] not in allowed_measurements:
+        raise DistillReceiptError("measurement is not admitted by policy")
+    if allowed_tcb_statuses is not None and doc["tcb"]["status"] not in allowed_tcb_statuses:
+        raise DistillReceiptError("tcb.status is not admitted by policy")
+    if allowed_advisories is not None and not set(doc["tcb"]["advisory_ids"]).issubset(
+        allowed_advisories
+    ):
+        raise DistillReceiptError("tcb advisories are not admitted by policy")
+
+    # 4. Replay protection: the receipt is bound to the authorized source epoch.
     if int(doc["source_epoch"]) != int(source_epoch):
         raise DistillReceiptError("receipt source_epoch does not match the authorized epoch")
 
