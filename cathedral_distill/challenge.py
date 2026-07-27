@@ -59,21 +59,44 @@ class ChallengeError(EvalReceiptError):
 
 @dataclass(frozen=True)
 class MerkleProof:
-    """An opening for one graded item.
+    """An opening for one graded item at a fixed position.
 
-    `path` is bottom-up. `left` records, per step, whether the sibling sits on
-    the left — a promoted odd node has no sibling at that level and is omitted
-    from the path entirely, matching how `items_root` builds the tree.
+    `path` is bottom-up sibling hashes. Orientation is NOT carried here: a
+    prover-supplied direction flag would let an opening be re-oriented to verify
+    at a position it was not built for. Instead `verify_proof` derives the
+    orientation deterministically from `index` and the tree's `leaf_count`, so a
+    proof only ever verifies at the one position it belongs to.
     """
 
     index: int
     leaf: bytes
     path: tuple[bytes, ...]
-    left: tuple[bool, ...]
 
     def __post_init__(self) -> None:
-        if len(self.path) != len(self.left):
-            raise ChallengeError("proof path and orientation lengths disagree")
+        if isinstance(self.index, bool) or not isinstance(self.index, int) or self.index < 0:
+            raise ChallengeError("proof index must be a non-negative integer")
+
+
+def _orientation(index: int, leaf_count: int) -> list[bool]:
+    """Derive, per path level, whether the sibling sits on the left.
+
+    Recomputed from position alone, mirroring `items_root`'s tree exactly: a
+    promoted odd node contributes no path element at its level. This is the only
+    source of orientation — the prover cannot influence it.
+    """
+    if not 0 <= index < leaf_count:
+        raise ChallengeError("index out of range for leaf_count")
+    orient: list[bool] = []
+    level_size = leaf_count
+    cursor = index
+    while level_size > 1:
+        pairs = level_size - (level_size % 2)
+        if cursor < pairs:
+            orient.append(cursor % 2 == 1)  # odd cursor -> sibling is on the left
+        # else: promoted odd node, no sibling at this level
+        cursor //= 2
+        level_size = pairs // 2 + (level_size % 2)
+    return orient
 
 
 def derive_challenge_indices(
@@ -121,28 +144,26 @@ def derive_challenge_indices(
 
 
 def build_proof(leaves: Sequence[bytes], index: int) -> MerkleProof:
-    """Construct the opening for one leaf, mirroring `items_root`'s tree."""
+    """Construct the opening for one leaf, mirroring `items_root`'s tree.
+
+    Only the sibling hashes are recorded; orientation is not, because a verifier
+    re-derives it from the position (`_orientation`).
+    """
     if not leaves:
         raise ChallengeError("cannot prove an empty tree")
     if not 0 <= index < len(leaves):
         raise ChallengeError("index out of range")
 
     path: list[bytes] = []
-    left: list[bool] = []
     level = list(leaves)
     cursor = index
 
     while len(level) > 1:
         pairs = len(level) - (len(level) % 2)
         if cursor < pairs:
-            if cursor % 2 == 0:
-                path.append(level[cursor + 1])
-                left.append(False)
-            else:
-                path.append(level[cursor - 1])
-                left.append(True)
-        # else: this node is the promoted odd one — it has no sibling here, so
-        # nothing is appended and it simply rises a level.
+            sibling = cursor + 1 if cursor % 2 == 0 else cursor - 1
+            path.append(level[sibling])
+        # else: this node is the promoted odd one — no sibling at this level.
         nxt: list[bytes] = [
             hashlib.sha256(ITEM_NODE_DOMAIN + level[i] + level[i + 1]).digest()
             for i in range(0, pairs, 2)
@@ -152,15 +173,27 @@ def build_proof(leaves: Sequence[bytes], index: int) -> MerkleProof:
         cursor //= 2
         level = nxt
 
-    return MerkleProof(
-        index=index, leaf=leaves[index], path=tuple(path), left=tuple(left)
-    )
+    return MerkleProof(index=index, leaf=leaves[index], path=tuple(path))
 
 
-def verify_proof(proof: MerkleProof, root: str) -> bool:
-    """Recompute the root from one opening."""
+def verify_proof(proof: MerkleProof, root: str, *, leaf_count: int) -> bool:
+    """Recompute the root from one opening, orientation derived from position.
+
+    `leaf_count` is the number of graded items (the receipt's `item_count`). A
+    proof only verifies at the single position `proof.index`: the orientation is
+    derived from that index, so a valid opening for one position cannot be
+    replayed at another.
+    """
+    if not 0 <= proof.index < leaf_count:
+        return False
+    try:
+        orientation = _orientation(proof.index, leaf_count)
+    except ChallengeError:
+        return False
+    if len(orientation) != len(proof.path):
+        return False
     node = proof.leaf
-    for sibling, sibling_on_left in zip(proof.path, proof.left):
+    for sibling, sibling_on_left in zip(proof.path, orientation):
         node = hashlib.sha256(
             ITEM_NODE_DOMAIN + (sibling + node if sibling_on_left else node + sibling)
         ).digest()
@@ -169,13 +202,22 @@ def verify_proof(proof: MerkleProof, root: str) -> bool:
 
 @dataclass(frozen=True)
 class OpenedItem:
-    """What a miner reveals for one challenged index."""
+    """What a miner reveals for one challenged index.
+
+    The opening index and the proof index must agree; `spot_check` additionally
+    requires both to equal a challenged index. A mismatch is not an accident to
+    tolerate — it is exactly the relabelling an attacker would attempt.
+    """
 
     index: int
     item_id: str
     output_commitment: str
     passed: bool
     proof: MerkleProof
+
+    def __post_init__(self) -> None:
+        if self.proof.index != self.index:
+            raise ChallengeError("opening index does not match its proof index")
 
 
 @dataclass(frozen=True)
@@ -201,34 +243,47 @@ def spot_check(
     *,
     opened: Sequence[OpenedItem],
     items_root_value: str,
+    item_count: int,
     expected_indices: Sequence[int],
     regrade,
 ) -> SpotCheckResult:
-    """Verify openings and re-grade them locally.
+    """Verify openings at their challenged positions and re-grade them locally.
 
-    `regrade(item_id, output_commitment) -> bool` is the validator's own verdict,
-    produced by the grader digest pinned in the receipt. A receipt survives only
-    if every opening proves against `items_root` *and* the validator's verdict
-    matches the one the enclave recorded.
+    `item_count` is the receipt's graded-item count (the tree's leaf count), used
+    to derive each proof's orientation from its position. `regrade(item_id,
+    output_commitment) -> bool` is the validator's own verdict, produced by the
+    grader digest pinned in the receipt. A receipt survives only if every
+    challenged index is opened, each opening's leaf binds that exact position and
+    proves against `items_root`, *and* the validator's verdict matches the one the
+    enclave recorded.
 
     Missing an index is a failure, not an omission: a miner that could decline to
-    open an item would simply decline whichever it faked.
+    open an item would simply decline whichever it faked. An opening for an index
+    that was not challenged is a protocol violation, not tolerated slack.
     """
+    challenged = set(expected_indices)
     provided = {item.index for item in opened}
-    missing = tuple(sorted(set(expected_indices) - provided))
+    missing = tuple(sorted(challenged - provided))
 
     unproven: list[int] = list(missing)
     mismatched: list[int] = []
+    seen: set[int] = set()
 
     for item in opened:
-        if item.index not in set(expected_indices):
+        if item.index not in challenged:
             raise ChallengeError(f"index {item.index} was not challenged")
-        expected_leaf = item_leaf(item.item_id, item.output_commitment, item.passed)
+        if item.index in seen:
+            raise ChallengeError(f"index {item.index} was opened more than once")
+        seen.add(item.index)
+        # The leaf must bind THIS position: item_leaf includes the index, so a
+        # leaf built for another position cannot answer this challenge.
+        expected_leaf = item_leaf(
+            item.index, item.item_id, item.output_commitment, item.passed
+        )
         if item.proof.leaf != expected_leaf:
-            # The revealed content does not hash to the leaf being proven.
             unproven.append(item.index)
             continue
-        if not verify_proof(item.proof, items_root_value):
+        if not verify_proof(item.proof, items_root_value, leaf_count=item_count):
             unproven.append(item.index)
             continue
         if regrade(item.item_id, item.output_commitment) != item.passed:

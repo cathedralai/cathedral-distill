@@ -70,15 +70,24 @@ class TrackPolicy:
     min_margin: Decimal = Decimal("0.005")
     max_cost_usd: Decimal = Decimal("100")
     max_latency_p50_ms: Decimal = Decimal("5000")
-    # The floor an unseated track pays nothing below: a first champion still has
-    # to be better than useless.
-    min_score_to_crown: Decimal = Decimal("0")
+    # The floor an unseated track pays nothing below. This must be *nonzero*: a
+    # zero floor would crown a model that answers nothing, and pay it for holding
+    # a frontier that measures no capability. Every track states its own floor.
+    min_score_to_crown: Decimal = Decimal("0.05")
+    # How long a crown stays payable without a fresh proof-of-life re-evaluation.
+    # Past this, the champion is stale and pays burn until it is revalidated on a
+    # current shard. Bounds how long a since-degraded or vanished model earns.
+    crown_ttl_s: int = 86_400
 
     def __post_init__(self) -> None:
         if not self.track:
             raise FrontierError("track is required")
         if self.min_margin < 0:
             raise FrontierError("min_margin must be non-negative")
+        if self.min_score_to_crown <= 0:
+            raise FrontierError("min_score_to_crown must be a nonzero qualification floor")
+        if self.crown_ttl_s <= 0:
+            raise FrontierError("crown_ttl_s must be positive")
 
 
 @dataclass(frozen=True)
@@ -129,6 +138,25 @@ class Champion:
     # time the incumbent is re-scored on a new batch (see `rescored`), so a
     # challenger is always compared against a same-batch number.
     batch_id: str = ""
+    # Proof-of-life. `revalidated_at` is when the crown was last re-evaluated on
+    # a current shard; a crown older than its track's TTL is stale and pays burn.
+    # `revoked`/`available`/`contaminated` are the other ways a crown stops
+    # earning without being unseated by a better model.
+    revalidated_at: datetime | None = None
+    revoked: bool = False
+    available: bool = True
+    contaminated: bool = False
+
+    def _last_life(self) -> datetime:
+        return self.revalidated_at or self.crowned_at
+
+    def is_live(self, now: datetime, ttl_s: int) -> bool:
+        """Whether this crown may earn: not revoked, available, uncontaminated,
+        and revalidated within the TTL. A crown that misses revalidation, is
+        revoked, goes unavailable, or is flagged contaminated pays burn."""
+        if self.revoked or not self.available or self.contaminated:
+            return False
+        return (now - self._last_life()).total_seconds() <= ttl_s
 
     def as_manifest(self) -> dict[str, object]:
         """The current-champion manifest, mirroring sat-king's shape."""
@@ -142,6 +170,10 @@ class Champion:
             "score": str(self.score),
             "crowned_at": self.crowned_at.isoformat(),
             "batch_id": self.batch_id,
+            "revalidated_at": self._last_life().isoformat(),
+            "revoked": self.revoked,
+            "available": self.available,
+            "contaminated": self.contaminated,
         }
 
     def rescored(self, score: Decimal, batch_id: str, receipt_id: str) -> "Champion":
@@ -150,7 +182,8 @@ class Champion:
         Identity (miner, bundle, checkpoint, crowned_at) is preserved — it is the
         *same model still holding the crown* — but the score now reflects the
         current batch, so a challenger on that batch is judged fairly. The receipt
-        of the fresh evaluation replaces the stale one.
+        of the fresh evaluation replaces the stale one. Re-scoring is a fresh
+        proof-of-life, so it also refreshes `revalidated_at`.
         """
         return Champion(
             track=self.track,
@@ -161,6 +194,29 @@ class Champion:
             score=score,
             crowned_at=self.crowned_at,
             batch_id=batch_id,
+            revalidated_at=self.revalidated_at,
+            revoked=self.revoked,
+            available=self.available,
+            contaminated=self.contaminated,
+        )
+
+    def with_liveness(
+        self,
+        *,
+        revalidated_at: datetime | None = None,
+        revoked: bool | None = None,
+        available: bool | None = None,
+        contaminated: bool | None = None,
+    ) -> "Champion":
+        """Return a copy with liveness fields updated (proof-of-life, revocation,
+        availability, contamination). Identity and score are untouched."""
+        from dataclasses import replace
+        return replace(
+            self,
+            revalidated_at=revalidated_at if revalidated_at is not None else self.revalidated_at,
+            revoked=self.revoked if revoked is None else revoked,
+            available=self.available if available is None else available,
+            contaminated=self.contaminated if contaminated is None else contaminated,
         )
 
 
@@ -198,6 +254,135 @@ def evaluate_gates(candidate: Candidate, policy: TrackPolicy) -> GateResult:
     if not candidate.independent_evaluator:
         failures.append(GATE_INDEPENDENT_EVALUATOR)
     return GateResult(passed=not failures, failures=tuple(failures))
+
+
+@dataclass(frozen=True)
+class CandidateEvidence:
+    """The raw, verifiable inputs a candidate's gates are DERIVED from.
+
+    The boolean gates on `Candidate` are convenient but attackable: a caller can
+    set them all true. `derive_candidate` instead computes each gate from
+    evidence a validator can check — the signed eval receipt, the teacher
+    registry, the bundle registry, the evaluator's coldkey, an independent
+    reproduction receipt, and the canary outcome — so no gate can be asserted
+    into existence. Missing or failing evidence fails that gate closed.
+    """
+
+    receipt: Mapping[str, object]
+    miner_hotkey: str
+    submitted_at: datetime
+    cost_usd: Decimal
+    batch_id: str = ""
+    teacher_registry: object | None = None
+    teacher_id: str = ""
+    licence_checked_at: datetime | None = None
+    bundle_registry: object | None = None
+    bundle_digest: str = ""
+    training_participant: object | None = None
+    evaluator_participant: object | None = None
+    reproduction_receipt: Mapping[str, object] | None = None
+    # Canary outcome: how many canary items the model passed, out of how many,
+    # and the rate an uncontaminated model would pass by chance. A canary's
+    # answer is not derivable from public data, so passing above chance means the
+    # sealed set was seen. No canary evidence fails the gate closed.
+    canary_passed: int = 0
+    canary_total: int = 0
+    canary_chance_rate: Decimal = Decimal("0.25")
+
+
+def _reproduction_ok(
+    receipt: Mapping[str, object], reproduction: Mapping[str, object] | None
+) -> bool:
+    """A second, independently-evaluated receipt that reproduces the result:
+    same sealed set, same checkpoint, same graded items_root, different
+    evaluator. Anything less does not clear the reproduced gate."""
+    from cathedral_distill import eval_receipt as er
+
+    if reproduction is None:
+        return False
+    try:
+        original = er.validate_receipt(receipt)
+        replay = er.validate_receipt(reproduction)
+    except er.EvalReceiptError:
+        return False
+    if not er.creditable_as_verified_work(reproduction):
+        return False
+    return (
+        replay["evalset"]["plaintext_digest"] == original["evalset"]["plaintext_digest"]
+        and replay["model"]["weights_digest"] == original["model"]["weights_digest"]
+        and replay["score"]["items_root"] == original["score"]["items_root"]
+        and replay["validator_hotkey"] != original["validator_hotkey"]
+    )
+
+
+def _canary_contaminated(evidence: CandidateEvidence) -> bool:
+    """Contaminated when the canary pass rate exceeds chance (the set was seen),
+    or when there is no canary evidence at all (cannot assert clean)."""
+    if evidence.canary_total <= 0:
+        return True
+    observed = Decimal(evidence.canary_passed) / Decimal(evidence.canary_total)
+    return observed > evidence.canary_chance_rate
+
+
+def derive_candidate(evidence: CandidateEvidence, policy: TrackPolicy) -> Candidate:
+    """Build a `Candidate` whose gates are derived from verified evidence.
+
+    This is the production path: `Frontier.submit(derive_candidate(evidence,
+    policy))`. Each gate is computed by an actual check, never taken on trust, so
+    an attacker cannot pass all-true booleans. A malformed receipt raises; a
+    check without evidence fails that gate closed.
+    """
+    from cathedral_distill import eval_receipt as er
+    from cathedral_distill import roles as ro
+    from cathedral_distill.teacher_registry import PURPOSE_DISTILLATION
+
+    receipt = er.validate_receipt(evidence.receipt)  # raises on malformed -> fail closed
+    score_block = receipt["score"]
+
+    attested = er.creditable_as_verified_work(evidence.receipt)
+
+    teacher_permitted = bool(
+        evidence.teacher_registry is not None
+        and evidence.teacher_id
+        and evidence.licence_checked_at is not None
+        and evidence.teacher_registry.is_permitted(
+            evidence.teacher_id, purpose=PURPOSE_DISTILLATION, at=evidence.licence_checked_at
+        )
+    )
+    registered_bundle = bool(
+        evidence.bundle_registry is not None
+        and evidence.bundle_digest
+        and evidence.bundle_registry.is_registered_by(
+            evidence.bundle_digest, evidence.miner_hotkey
+        )
+    )
+    independent_evaluator = bool(
+        evidence.training_participant is not None
+        and evidence.evaluator_participant is not None
+        and not ro.is_self_evaluation(
+            evidence.training_participant, evidence.evaluator_participant
+        )
+    )
+    reproduced = _reproduction_ok(evidence.receipt, evidence.reproduction_receipt)
+    contamination_detected = _canary_contaminated(evidence)
+
+    return Candidate(
+        miner_hotkey=evidence.miner_hotkey,
+        bundle_digest=evidence.bundle_digest,
+        checkpoint_digest=str(receipt["model"]["weights_digest"]),
+        receipt_id=str(receipt["receipt_id"]),
+        score=Decimal(str(score_block["score"])),
+        latency_p50_ms=Decimal(str(score_block["latency_p50_ms"])),
+        cost_usd=evidence.cost_usd,
+        submitted_at=evidence.submitted_at,
+        batch_id=evidence.batch_id,
+        attested=attested,
+        teacher_permitted=teacher_permitted,
+        reproduced=reproduced,
+        contamination_detected=contamination_detected,
+        registered_bundle=registered_bundle,
+        independent_evaluator=independent_evaluator,
+    )
 
 
 @dataclass(frozen=True)
@@ -291,6 +476,97 @@ class Frontier:
     def champion(self, track: str) -> Champion | None:
         return self._champions.get(track)
 
+    def set_liveness(
+        self,
+        track: str,
+        *,
+        revalidated_at: datetime | None = None,
+        revoked: bool | None = None,
+        available: bool | None = None,
+        contaminated: bool | None = None,
+    ) -> None:
+        """Record a proof-of-life, revocation, availability, or contamination
+        signal for a track's champion. This is how a validator marks a crown
+        that missed revalidation, was revoked, went unreachable, or was caught
+        contaminated — all of which stop it earning (see `emission_shares`)."""
+        champion = self._champions.get(track)
+        if champion is None:
+            raise FrontierError(f"no champion for track: {track}")
+        self._champions[track] = champion.with_liveness(
+            revalidated_at=revalidated_at, revoked=revoked,
+            available=available, contaminated=contaminated,
+        )
+
+    def live_champions(self, now: datetime | None = None) -> dict[str, Champion]:
+        """Champions currently eligible to earn. A revoked, unavailable, or
+        contaminated crown is always excluded; when `now` is given, a crown past
+        its track TTL (missed revalidation) is excluded too."""
+        live: dict[str, Champion] = {}
+        for track, champion in self._champions.items():
+            if champion.revoked or not champion.available or champion.contaminated:
+                continue
+            if now is not None and not champion.is_live(now, self.policy(track).crown_ttl_s):
+                continue
+            live[track] = champion
+        return live
+
+    def state(self) -> dict[str, object]:
+        """Canonical, order-independent frontier state.
+
+        Two validators that applied the same crown decisions produce a
+        byte-identical state and the same `state_digest`, regardless of restart
+        time or the order they observed submissions — the frontier is data, not
+        process-local history. `from_state` reconstructs it.
+        """
+        return {
+            "schema": FRONTIER_SCHEMA,
+            "champions": [
+                self._champions[track].as_manifest()
+                for track in sorted(self._champions)
+            ],
+        }
+
+    def state_digest(self) -> str:
+        import hashlib
+        import json
+        body = json.dumps(self.state(), sort_keys=True, separators=(",", ":")).encode()
+        return "sha256:" + hashlib.sha256(b"cathedral-frontier-state-v1\x00" + body).hexdigest()
+
+    @classmethod
+    def from_state(
+        cls, policies: Sequence[TrackPolicy], state: Mapping[str, object]
+    ) -> "Frontier":
+        """Deterministically reconstruct a frontier from canonical state, so a
+        restarted or newly-joined validator converges on the same champions."""
+        frontier = cls(policies)
+        if state.get("schema") != FRONTIER_SCHEMA:
+            raise FrontierError("unsupported frontier state schema")
+        champions = state.get("champions", [])
+        if not isinstance(champions, list):
+            raise FrontierError("frontier state champions must be a list")
+        for entry in champions:
+            track = str(entry["track"])
+            if track not in frontier._policies:
+                raise FrontierError(f"frontier state names an unknown track: {track}")
+            if track in frontier._champions:
+                raise FrontierError(f"frontier state repeats track: {track}")
+            frontier._champions[track] = Champion(
+                track=track,
+                miner_hotkey=str(entry["miner_hotkey"]),
+                bundle_digest=str(entry["bundle_digest"]),
+                checkpoint_digest=str(entry["checkpoint_digest"]),
+                receipt_id=str(entry["receipt_id"]),
+                score=Decimal(str(entry["score"])),
+                crowned_at=datetime.fromisoformat(str(entry["crowned_at"])),
+                batch_id=str(entry.get("batch_id", "")),
+                revalidated_at=datetime.fromisoformat(str(entry["revalidated_at"]))
+                if entry.get("revalidated_at") else None,
+                revoked=bool(entry.get("revoked", False)),
+                available=bool(entry.get("available", True)),
+                contaminated=bool(entry.get("contaminated", False)),
+            )
+        return frontier
+
     def submit(
         self,
         track: str,
@@ -338,13 +614,17 @@ class Frontier:
         *,
         burn_fraction: Decimal = Decimal("0.10"),
         serving_fraction: Decimal = Decimal("0"),
+        now: datetime | None = None,
     ) -> dict[str, Decimal]:
-        """Split one epoch's emission across champions, serving, and burn.
+        """Split one epoch's emission across LIVE champions, serving, and burn.
 
         `burn_fraction` defaults to Cathedral's contractual 10%
-        (`MECHANISM_BURN_FRACTION`). An empty champion set pays everything to
-        burn rather than to anyone unverified — the same stance the existing
-        mechanism takes for an empty verified set.
+        (`MECHANISM_BURN_FRACTION`). Only live champions earn: a revoked,
+        unavailable, or contaminated crown never pays, and — when `now` is given
+        — a crown past its track TTL (missed revalidation) does not either. An
+        empty *live* champion set pays everything to burn rather than to anyone
+        unverified, the same stance the existing mechanism takes for an empty
+        verified set. Production always passes `now` so a stale crown burns.
         """
         if not Decimal(0) <= burn_fraction <= Decimal(1):
             raise FrontierError("burn_fraction must be within 0..1")
@@ -358,8 +638,10 @@ class Frontier:
             shares["serving"] = serving_fraction
 
         remaining = Decimal(1) - burn_fraction - serving_fraction
-        held = sorted(self._champions)
+        held = sorted(self.live_champions(now))
         if not held or remaining <= 0:
+            # Unpaid mass (no live champion, or nothing left after serving) falls
+            # to burn, never to an unverified or stale holder.
             shares["burn"] = burn_fraction + max(remaining, Decimal(0))
             return shares
 

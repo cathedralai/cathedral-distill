@@ -45,7 +45,13 @@ RECEIPT_ID_DOMAIN = b"cathedral-ml-eval-receipt-id-v1\x00"
 AUTHORIZATION_DOMAIN = b"cathedral-ml-eval-authorization-v1\x00"
 IDENTITY_BINDING_DOMAIN = b"cathedral-ml-eval-identity-binding-v1\x00"
 EXECUTION_BINDING_DOMAIN = b"cathedral-ml-eval-execution-binding-v1\x00"
-ITEM_LEAF_DOMAIN = b"cathedral-ml-eval-item-leaf-v1\x00"
+# v2 binds the item's position into the leaf. A v1 leaf committed only
+# (item_id, output_commitment, passed), so a valid opening at one position could
+# be replayed under a different challenged position (issue #1). The position is
+# now part of the commitment, and challenge.verify_proof derives orientation from
+# that position rather than trusting a prover-supplied direction flag. The domain
+# bump means any stray v1 leaf fails loudly instead of being silently reinterpreted.
+ITEM_LEAF_DOMAIN = b"cathedral-ml-eval-item-leaf-v2\x00"
 ITEM_NODE_DOMAIN = b"cathedral-ml-eval-item-node-v1\x00"
 
 ATTESTATION_KINDS = frozenset({"none", "tdx", "tdx+nvidia", "polaris_tdx"})
@@ -214,14 +220,19 @@ def _count(value: Any, label: str, *, maximum: int = MAX_ITEMS) -> int:
     return value
 
 
-def item_leaf(item_id: str, output_commitment: str, passed: bool) -> bytes:
-    """Hash one graded item.
+def item_leaf(index: int, item_id: str, output_commitment: str, passed: bool) -> bytes:
+    """Hash one graded item at its position in the graded sequence.
 
-    `output_commitment` is a commitment, not the output: a validator that wants
-    to audit one item asks the miner to reveal only that item.
+    `index` is the item's 0-based position and is part of the commitment, so an
+    opening proved for one position cannot be relabelled under another. A
+    validator that wants to audit one item asks the miner to reveal only that
+    item's `output_commitment` (a commitment, not the output) at that index.
     """
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        raise EvalReceiptError("item index must be a non-negative integer")
     body = canonical_json(
         {
+            "index": index,
             "item_id": str(item_id),
             "output_commitment": _digest(output_commitment, "output_commitment"),
             "passed": bool(passed),

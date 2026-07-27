@@ -28,7 +28,7 @@ def _digest(seed: str) -> str:
 
 def _pre_attestation():
     leaves = [
-        er.item_leaf(f"item-{n}", _digest(f"out-{n}"), n < 7) for n in range(10)
+        er.item_leaf(n, f"item-{n}", _digest(f"out-{n}"), n < 7) for n in range(10)
     ]
     return {
         "schema": er.SCHEMA,

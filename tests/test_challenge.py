@@ -1,9 +1,10 @@
 """Tests for validator-side spot-checking.
 
 The properties that matter: openings must prove against the receipt's committed
-root, a faked verdict must be caught when challenged, a declined opening must
-fail rather than be ignored, and the challenge must be unpredictable to the miner
-but identical across validators.
+root *at the position that was challenged*, a faked verdict must be caught when
+challenged, a declined opening must fail rather than be ignored, one opening must
+not be able to answer a different position, and the challenge must be
+unpredictable to the miner but identical across validators.
 """
 from __future__ import annotations
 
@@ -30,7 +31,8 @@ def _tree(n=20, truth=None):
     truth = truth or {i: i % 3 != 0 for i in range(n)}
     ids = [f"item-{i:03d}" for i in range(n)]
     commits = [_commit(f"out-{i}") for i in range(n)]
-    leaves = [er.item_leaf(ids[i], commits[i], truth[i]) for i in range(n)]
+    # Leaves bind position: item_leaf(index, id, commitment, passed).
+    leaves = [er.item_leaf(i, ids[i], commits[i], truth[i]) for i in range(n)]
     return ids, commits, truth, leaves
 
 
@@ -53,29 +55,46 @@ def test_every_leaf_proves_against_the_root(n):
     _, _, _, leaves = _tree(n)
     root = er.items_root(leaves)
     for index in range(n):
-        assert ch.verify_proof(ch.build_proof(leaves, index), root)
+        assert ch.verify_proof(ch.build_proof(leaves, index), root, leaf_count=n)
 
 
 def test_proof_for_a_different_leaf_fails():
     _, _, _, leaves = _tree(8)
     root = er.items_root(leaves)
     proof = ch.build_proof(leaves, 3)
-    forged = ch.MerkleProof(
-        index=3, leaf=leaves[4], path=proof.path, left=proof.left
-    )
-    assert not ch.verify_proof(forged, root)
+    forged = ch.MerkleProof(index=3, leaf=leaves[4], path=proof.path)
+    assert not ch.verify_proof(forged, root, leaf_count=8)
 
 
 def test_proof_against_a_different_root_fails():
     _, _, _, leaves = _tree(8)
     other = er.items_root(list(reversed(leaves)))
-    assert not ch.verify_proof(ch.build_proof(leaves, 0), other)
+    assert not ch.verify_proof(ch.build_proof(leaves, 0), other, leaf_count=8)
+
+
+def test_proof_only_verifies_at_its_own_position():
+    # THE spot-check invariant: an opening built for one position must not verify
+    # when relabelled to another, even reusing the same leaf and path.
+    _, _, _, leaves = _tree(16)
+    root = er.items_root(leaves)
+    honest = ch.build_proof(leaves, 5)
+    assert ch.verify_proof(honest, root, leaf_count=16)
+    relabelled = ch.MerkleProof(index=6, leaf=honest.leaf, path=honest.path)
+    assert not ch.verify_proof(relabelled, root, leaf_count=16)
 
 
 def test_index_out_of_range_is_rejected():
     _, _, _, leaves = _tree(4)
     with pytest.raises(ch.ChallengeError, match="out of range"):
         ch.build_proof(leaves, 9)
+
+
+def test_verify_rejects_index_beyond_leaf_count():
+    _, _, _, leaves = _tree(8)
+    root = er.items_root(leaves)
+    proof = ch.build_proof(leaves, 3)
+    assert not ch.verify_proof(ch.MerkleProof(index=99, leaf=proof.leaf,
+                                              path=proof.path), root, leaf_count=8)
 
 
 def test_empty_tree_cannot_be_proven():
@@ -96,7 +115,6 @@ def test_challenge_is_reproducible_across_validators():
 
 
 def test_challenge_moves_with_the_block():
-    # The miner commits the receipt before this block exists.
     a = ch.derive_challenge_indices(
         receipt_id=RECEIPT_ID, block_hash=BLOCK, item_count=200, k=10)
     b = ch.derive_challenge_indices(
@@ -135,7 +153,8 @@ def test_honest_receipt_survives():
     indices = [2, 5, 9]
     opened = [_open(i, ids, commits, truth, leaves) for i in indices]
     result = ch.spot_check(
-        opened=opened, items_root_value=root, expected_indices=indices,
+        opened=opened, items_root_value=root, item_count=len(leaves),
+        expected_indices=indices,
         regrade=lambda item_id, _c: truth[int(item_id.split("-")[1])])
     assert result.passed and result.reason == "spot_check_passed"
 
@@ -144,17 +163,41 @@ def test_faked_verdict_is_caught_on_regrade():
     # The enclave recorded a pass; the validator re-grades it as a fail.
     ids, commits, truth, leaves = _tree()
     lie = dict(truth); lie[3] = not truth[3]
-    leaves_lied = [
-        er.item_leaf(ids[i], commits[i], lie[i]) for i in range(len(ids))
-    ]
+    leaves_lied = [er.item_leaf(i, ids[i], commits[i], lie[i]) for i in range(len(ids))]
     root = er.items_root(leaves_lied)
     opened = [_open(3, ids, commits, lie, leaves_lied)]
     result = ch.spot_check(
-        opened=opened, items_root_value=root, expected_indices=[3],
+        opened=opened, items_root_value=root, item_count=len(leaves_lied),
+        expected_indices=[3],
         regrade=lambda item_id, _c: truth[int(item_id.split("-")[1])])
     assert not result.passed
     assert result.mismatched == (3,)
     assert "regrade_mismatch" in result.reason
+
+
+def test_one_opening_cannot_answer_two_positions():
+    # The exact attack the position binding closes: a miner faked item 7 and is
+    # challenged there; it tries to answer index 7 with honest item 2's material.
+    ids, commits, truth, leaves = _tree(16)
+    root = er.items_root(leaves)
+    honest2 = ch.build_proof(leaves, 2)
+    # It must claim proof.index == 7 (OpenedItem enforces that); reusing item 2's
+    # leaf and path under position 7 is the strongest forgery available.
+    forged = ch.MerkleProof(index=7, leaf=leaves[2], path=honest2.path)
+    opened = ch.OpenedItem(index=7, item_id=ids[2], output_commitment=commits[2],
+                           passed=truth[2], proof=forged)
+    result = ch.spot_check(
+        opened=[opened], items_root_value=root, item_count=16,
+        expected_indices=[7], regrade=lambda _i, _c: True)
+    assert not result.passed
+    assert result.unproven == (7,)
+
+
+def test_opening_index_must_match_proof_index():
+    ids, commits, truth, leaves = _tree(8)
+    with pytest.raises(ch.ChallengeError, match="proof index"):
+        ch.OpenedItem(index=5, item_id=ids[5], output_commitment=commits[5],
+                      passed=truth[5], proof=ch.build_proof(leaves, 4))
 
 
 def test_declining_to_open_an_item_is_a_failure():
@@ -163,7 +206,8 @@ def test_declining_to_open_an_item_is_a_failure():
     root = er.items_root(leaves)
     opened = [_open(2, ids, commits, truth, leaves)]
     result = ch.spot_check(
-        opened=opened, items_root_value=root, expected_indices=[2, 7],
+        opened=opened, items_root_value=root, item_count=len(leaves),
+        expected_indices=[2, 7],
         regrade=lambda item_id, _c: truth[int(item_id.split("-")[1])])
     assert not result.passed
     assert result.unproven == (7,)
@@ -175,7 +219,8 @@ def test_revealed_content_must_hash_to_the_proven_leaf():
     # Claim a different verdict than the leaf actually commits to.
     tampered = _open(4, ids, commits, truth, leaves, passed=not truth[4])
     result = ch.spot_check(
-        opened=[tampered], items_root_value=root, expected_indices=[4],
+        opened=[tampered], items_root_value=root, item_count=len(leaves),
+        expected_indices=[4],
         regrade=lambda item_id, _c: truth[int(item_id.split("-")[1])])
     assert not result.passed
     assert result.unproven == (4,)
@@ -187,8 +232,18 @@ def test_opening_an_unchallenged_index_is_an_error():
     with pytest.raises(ch.ChallengeError, match="was not challenged"):
         ch.spot_check(
             opened=[_open(1, ids, commits, truth, leaves)],
-            items_root_value=root, expected_indices=[2],
+            items_root_value=root, item_count=len(leaves), expected_indices=[2],
             regrade=lambda *_: True)
+
+
+def test_opening_the_same_index_twice_is_an_error():
+    ids, commits, truth, leaves = _tree()
+    root = er.items_root(leaves)
+    twice = [_open(2, ids, commits, truth, leaves),
+             _open(2, ids, commits, truth, leaves)]
+    with pytest.raises(ch.ChallengeError, match="more than once"):
+        ch.spot_check(opened=twice, items_root_value=root, item_count=len(leaves),
+                      expected_indices=[2], regrade=lambda *_: True)
 
 
 # --------------------------------------------------------------------------- #
@@ -204,7 +259,6 @@ def test_detection_probability_rises_with_challenge_size():
 
 
 def test_faking_enough_to_move_a_frontier_is_caught_almost_surely():
-    # Moving a frontier by 0.05 on a 200-item set means faking ~10 items.
     assert ch.detection_probability(item_count=200, faked=10, challenged=60) > 0.95
 
 

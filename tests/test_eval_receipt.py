@@ -24,7 +24,7 @@ def _digest(seed: str) -> str:
 
 def _receipt(**overrides):
     leaves = [
-        er.item_leaf(f"item-{index}", _digest(f"out-{index}"), index < 7)
+        er.item_leaf(index, f"item-{index}", _digest(f"out-{index}"), index < 7)
         for index in range(10)
     ]
     document = {
@@ -189,21 +189,27 @@ def test_quote_cannot_be_replayed_onto_another_run():
 
 
 def test_items_root_is_order_sensitive_and_stable():
-    a = [er.item_leaf("a", _digest("1"), True), er.item_leaf("b", _digest("2"), False)]
+    a = [er.item_leaf(0, "a", _digest("1"), True),
+         er.item_leaf(1, "b", _digest("2"), False)]
     assert er.items_root(a) == er.items_root(list(a))
     assert er.items_root(a) != er.items_root(list(reversed(a)))
 
 
 def test_items_root_distinguishes_pass_from_fail():
-    passed = [er.item_leaf("a", _digest("1"), True)]
-    failed = [er.item_leaf("a", _digest("1"), False)]
+    passed = [er.item_leaf(0, "a", _digest("1"), True)]
+    failed = [er.item_leaf(0, "a", _digest("1"), False)]
     assert er.items_root(passed) != er.items_root(failed)
+
+
+def test_leaf_binds_position():
+    # The same content at two positions hashes to two different leaves.
+    assert er.item_leaf(0, "a", _digest("1"), True) != er.item_leaf(1, "a", _digest("1"), True)
 
 
 def test_odd_leaf_promotion_avoids_duplicate_ambiguity():
     # A three-leaf tree must not collide with the four-leaf tree formed by
     # duplicating the last leaf.
-    leaves = [er.item_leaf(f"i{n}", _digest(str(n)), True) for n in range(3)]
+    leaves = [er.item_leaf(n, f"i{n}", _digest(str(n)), True) for n in range(3)]
     assert er.items_root(leaves) != er.items_root(leaves + [leaves[-1]])
 
 
