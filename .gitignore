@@ -13,3 +13,9 @@ build/
 sealed/
 receipts/
 .internal/
+
+# Distillation corpus outputs retain teacher reasoning + licence obligations —
+# never commit them, even if a run writes to the repo root by mistake.
+corpus*.jsonl
+corpus*.manifest.json
+corpus*.jsonl.*
