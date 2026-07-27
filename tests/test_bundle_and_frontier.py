@@ -445,3 +445,107 @@ def test_self_evaluation_blocks_the_crown():
     decision = f.submit(POLICY.track, _cand(score="0.99", independent_evaluator=False))
     assert not decision.crowned
     assert fr.GATE_INDEPENDENT_EVALUATOR in decision.gates.failures
+
+
+# --------------------------------------------------------------------------- #
+# Paired evaluation — a champion must be scored on the challenger's batch
+# --------------------------------------------------------------------------- #
+
+def test_unbatched_comparison_still_works():
+    # Default empty batch_id preserves the old behaviour for a static set.
+    f = fr.Frontier([POLICY])
+    f.submit(POLICY.track, _cand(score="0.70"))
+    assert f.submit(POLICY.track, _cand(score="0.80", miner_hotkey="5Bob")).crowned
+
+
+def test_cross_batch_challenge_is_refused_without_rescore():
+    f = fr.Frontier([POLICY])
+    f.submit(POLICY.track, _cand(score="0.70", batch_id="epoch-1"))
+    # A challenger on a different batch cannot be judged against the stale score.
+    decision = f.submit(
+        POLICY.track, _cand(score="0.99", batch_id="epoch-2", miner_hotkey="5Bob"))
+    assert not decision.crowned
+    assert decision.reason == "champion_not_scored_on_this_batch"
+    assert f.champion(POLICY.track).miner_hotkey == "5Alice"
+
+
+def test_rescore_enables_a_fair_paired_comparison():
+    f = fr.Frontier([POLICY])
+    f.submit(POLICY.track, _cand(score="0.70", batch_id="epoch-1"))
+    # epoch-2 rotates in. Re-score the incumbent on epoch-2 (it does worse there),
+    # then the challenger — genuinely better on the SAME batch — wins.
+    decision = f.submit(
+        POLICY.track,
+        _cand(score="0.75", batch_id="epoch-2", miner_hotkey="5Bob"),
+        champion_rescore=fr.ChampionRescore(
+            score=Decimal("0.60"), batch_id="epoch-2",
+            receipt_id="sha256:" + "re" * 32))
+    assert decision.crowned
+    assert f.champion(POLICY.track).miner_hotkey == "5Bob"
+
+
+def test_easy_batch_attack_is_blocked():
+    """The bug this fixes: a champion crowned on an easy batch must not survive
+    a challenger who is genuinely better on a hard one — nor win by comparison
+    against its own inflated old score."""
+    f = fr.Frontier([POLICY])
+    # Alice crowned at 0.90 on an easy batch.
+    f.submit(POLICY.track, _cand(score="0.90", batch_id="easy"))
+    # Bob scores 0.80 on a hard batch. Against Alice's stale 0.90 he would lose —
+    # but that comparison is invalid, so it is refused until Alice is re-scored.
+    refused = f.submit(
+        POLICY.track, _cand(score="0.80", batch_id="hard", miner_hotkey="5Bob"))
+    assert not refused.crowned and refused.reason == "champion_not_scored_on_this_batch"
+    # Re-scored on the hard batch Alice only manages 0.50, so Bob's 0.80 wins.
+    decision = f.submit(
+        POLICY.track, _cand(score="0.80", batch_id="hard", miner_hotkey="5Bob"),
+        champion_rescore=fr.ChampionRescore(
+            score=Decimal("0.50"), batch_id="hard", receipt_id="sha256:" + "aa" * 32))
+    assert decision.crowned
+    assert f.champion(POLICY.track).miner_hotkey == "5Bob"
+
+
+def test_incumbent_survives_when_it_still_wins_on_the_new_batch():
+    f = fr.Frontier([POLICY])
+    f.submit(POLICY.track, _cand(score="0.90", batch_id="epoch-1"))
+    decision = f.submit(
+        POLICY.track,
+        _cand(score="0.70", batch_id="epoch-2", miner_hotkey="5Bob"),
+        champion_rescore=fr.ChampionRescore(
+            score=Decimal("0.85"), batch_id="epoch-2", receipt_id="sha256:" + "bb" * 32))
+    assert not decision.crowned
+    assert decision.reason == "did_not_beat_frontier"
+    # The incumbent's stored score is now the fresh epoch-2 number, not the stale one.
+    champ = f.champion(POLICY.track)
+    assert champ.miner_hotkey == "5Alice" and champ.batch_id == "epoch-2"
+    assert champ.score == Decimal("0.85")
+
+
+def test_rescore_for_the_wrong_batch_is_ignored_and_refused():
+    f = fr.Frontier([POLICY])
+    f.submit(POLICY.track, _cand(score="0.70", batch_id="epoch-1"))
+    # A rescore measured on epoch-3 does not license an epoch-2 comparison.
+    decision = f.submit(
+        POLICY.track, _cand(score="0.99", batch_id="epoch-2", miner_hotkey="5Bob"),
+        champion_rescore=fr.ChampionRescore(
+            score=Decimal("0.10"), batch_id="epoch-3", receipt_id="sha256:" + "cc" * 32))
+    assert not decision.crowned
+    assert decision.reason == "champion_not_scored_on_this_batch"
+
+
+def test_rescore_requires_a_batch_id():
+    with pytest.raises(fr.FrontierError, match="name the batch"):
+        fr.ChampionRescore(score=Decimal("0.5"), batch_id="", receipt_id="x")
+
+
+def test_first_champion_on_a_batch_needs_no_rescore():
+    f = fr.Frontier([POLICY])
+    decision = f.submit(POLICY.track, _cand(score="0.70", batch_id="epoch-1"))
+    assert decision.crowned
+    assert f.champion(POLICY.track).batch_id == "epoch-1"
+
+
+def test_champion_manifest_carries_batch_id():
+    f = fr.Frontier([POLICY])
+    f.submit(POLICY.track, _cand(score="0.70", batch_id="epoch-1"))
+    assert f.champion(POLICY.track).as_manifest()["batch_id"] == "epoch-1"

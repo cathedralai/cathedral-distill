@@ -93,6 +93,11 @@ class Candidate:
     latency_p50_ms: Decimal
     cost_usd: Decimal
     submitted_at: datetime
+    # Which sealed item set this score was measured on. Two scores are only
+    # comparable when they were measured on the SAME batch — otherwise the crown
+    # turns on which items each happened to draw. Empty means "unbatched", which
+    # is only safe for a static set that never rotates.
+    batch_id: str = ""
     attested: bool = False
     teacher_permitted: bool = False
     reproduced: bool = False
@@ -120,6 +125,10 @@ class Champion:
     receipt_id: str
     score: Decimal
     crowned_at: datetime
+    # The batch the champion's *current* score was measured on. Refreshed every
+    # time the incumbent is re-scored on a new batch (see `rescored`), so a
+    # challenger is always compared against a same-batch number.
+    batch_id: str = ""
 
     def as_manifest(self) -> dict[str, object]:
         """The current-champion manifest, mirroring sat-king's shape."""
@@ -132,7 +141,27 @@ class Champion:
             "receipt_id": self.receipt_id,
             "score": str(self.score),
             "crowned_at": self.crowned_at.isoformat(),
+            "batch_id": self.batch_id,
         }
+
+    def rescored(self, score: Decimal, batch_id: str, receipt_id: str) -> "Champion":
+        """The same champion, its score refreshed on a new batch.
+
+        Identity (miner, bundle, checkpoint, crowned_at) is preserved — it is the
+        *same model still holding the crown* — but the score now reflects the
+        current batch, so a challenger on that batch is judged fairly. The receipt
+        of the fresh evaluation replaces the stale one.
+        """
+        return Champion(
+            track=self.track,
+            miner_hotkey=self.miner_hotkey,
+            bundle_digest=self.bundle_digest,
+            checkpoint_digest=self.checkpoint_digest,
+            receipt_id=receipt_id,
+            score=score,
+            crowned_at=self.crowned_at,
+            batch_id=batch_id,
+        )
 
 
 @dataclass(frozen=True)
@@ -172,6 +201,27 @@ def evaluate_gates(candidate: Candidate, policy: TrackPolicy) -> GateResult:
 
 
 @dataclass(frozen=True)
+class ChampionRescore:
+    """A fresh evaluation of the reigning champion on the current batch.
+
+    The validator re-runs the incumbent's model on the challenger's exact batch
+    and passes the result here. This is the paired-evaluation input: without it,
+    `submit` cannot compare a challenger against an incumbent whose score is from
+    a rotated-away batch, and will refuse.
+    """
+
+    score: Decimal
+    batch_id: str
+    receipt_id: str
+
+    def __post_init__(self) -> None:
+        if not Decimal(0) <= self.score <= Decimal(1):
+            raise FrontierError("rescore score must be within 0..1")
+        if not self.batch_id:
+            raise FrontierError("a rescore must name the batch it was measured on")
+
+
+@dataclass(frozen=True)
 class CrownDecision:
     """The outcome of judging one candidate against the reigning champion."""
 
@@ -195,6 +245,15 @@ def judge(
         return CrownDecision(False, "below_track_floor", champion, gates)
 
     if champion is not None:
+        # Paired comparison: the two scores must have been measured on the SAME
+        # batch. If the incumbent's score is stale (a batch has rotated since it
+        # was last scored), the comparison is meaningless — the challenger might
+        # win only because it drew easier items. Refuse until the caller
+        # re-scores the incumbent on this batch (Frontier.submit does this).
+        if candidate.batch_id != champion.batch_id:
+            return CrownDecision(
+                False, "champion_not_scored_on_this_batch", champion, gates
+            )
         required = champion.score + policy.min_margin
         if candidate.score < required:
             # Covers both "worse" and "tied": a challenger must be better by the
@@ -209,6 +268,7 @@ def judge(
         receipt_id=candidate.receipt_id,
         score=candidate.score,
         crowned_at=candidate.submitted_at,
+        batch_id=candidate.batch_id,
     )
     return CrownDecision(True, "crowned", crowned, gates)
 
@@ -231,9 +291,44 @@ class Frontier:
     def champion(self, track: str) -> Champion | None:
         return self._champions.get(track)
 
-    def submit(self, track: str, candidate: Candidate) -> CrownDecision:
+    def submit(
+        self,
+        track: str,
+        candidate: Candidate,
+        *,
+        champion_rescore: ChampionRescore | None = None,
+    ) -> CrownDecision:
+        """Judge a challenger, re-scoring the incumbent on its batch first.
+
+        When a champion exists and the challenger carries a `batch_id`, a paired
+        comparison is required: pass `champion_rescore` — the incumbent's model
+        re-evaluated on the challenger's exact batch — and the stored champion is
+        refreshed to that score before judging. Omitting it (or supplying one for
+        a different batch) makes `judge` refuse with
+        `champion_not_scored_on_this_batch`, which is the safe default: a crown is
+        never awarded on a cross-batch comparison.
+
+        The refreshed incumbent is persisted even when the challenger loses, so
+        the champion's stored score always reflects the most recent batch it was
+        measured on.
+        """
         policy = self.policy(track)
-        decision = judge(candidate, self._champions.get(track), policy)
+        champion = self._champions.get(track)
+
+        if (
+            champion is not None
+            and candidate.batch_id
+            and champion_rescore is not None
+            and champion_rescore.batch_id == candidate.batch_id
+        ):
+            champion = champion.rescored(
+                champion_rescore.score,
+                champion_rescore.batch_id,
+                champion_rescore.receipt_id,
+            )
+            self._champions[track] = champion  # keep the incumbent current
+
+        decision = judge(candidate, champion, policy)
         if decision.crowned and decision.champion is not None:
             self._champions[track] = decision.champion
         return decision
