@@ -29,6 +29,7 @@ itself cannot inflate the corpus.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -156,28 +157,67 @@ def main() -> int:
     registry = load_teachers(args.teachers)
 
     items = training_items(args.rows, args.seed, args.track)
-    records = tc.build_corpus(
-        client, [i.prompt for i in items],
-        registry=registry, at=datetime.now(UTC),
-    )
-    if args.track == "v1":
-        # v1 keeps only rows the teacher got FULLY right: the corpus becomes
-        # verified-correct demonstrations of source ranking, not merely
-        # well-formed JSON. Yield tracks the teacher's true accuracy.
-        by_prompt = {i.prompt: i for i in items}
-        def keep(record):
-            item = by_prompt.get(record.prompt)
-            return item is not None and grade_item(
-                item.item_id, record.completion, item.checks).passed
-        kept = tc.filter_corpus(records, keep=keep)
-    else:
-        kept = tc.filter_corpus(records, keep=keep_extraction)
-    with args.out.open("w") as handle:
-        for record in kept:
-            handle.write(json.dumps(record.as_dict(), sort_keys=True) + "\n")
 
+    # The licence gate runs once, before any token, exactly as build_corpus
+    # would — generation below is streamed rather than batched so a crash at
+    # row 150 costs one row, not the whole run.
+    registry.assert_permitted(
+        client.teacher_id, purpose=tr.PURPOSE_DISTILLATION, at=datetime.now(UTC))
+
+    by_prompt = {i.prompt: i for i in items}
+
+    def verified(record) -> bool:
+        if args.track != "v1":
+            return keep_extraction(record)
+        item = by_prompt.get(record.prompt)
+        return item is not None and grade_item(
+            item.item_id, record.completion, item.checks).passed
+
+    # Resume: rows already on disk are not regenerated. Seeds are stable per
+    # prompt index, so a completed seed identifies a completed row.
+    done_seeds: set[int] = set()
+    seen_completions: set[str] = set()
+    if args.out.exists():
+        for line in args.out.read_text().splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            done_seeds.add(int(row["seed"]))
+            seen_completions.add(hashlib.sha256(
+                row["completion"].encode()).hexdigest())
+        print(f"resuming: {len(done_seeds)} rows already on disk", file=sys.stderr)
+
+    generated = kept_rows = 0
+    with args.out.open("a") as handle:
+        for index, item in enumerate(items):
+            if index in done_seeds:
+                continue
+            try:
+                record = client.generate(item.prompt, seed=index)
+            except tc.TeacherError as exc:
+                print(f"[{index}] permanent failure, skipping: {exc}", file=sys.stderr)
+                continue
+            generated += 1
+            content_key = hashlib.sha256(record.completion.encode()).hexdigest()
+            if content_key in seen_completions or not verified(record):
+                continue
+            seen_completions.add(content_key)
+            handle.write(json.dumps(record.as_dict(), sort_keys=True) + "\n")
+            handle.flush()  # a killed process must not lose the last rows
+            kept_rows += 1
+            if kept_rows % 10 == 0:
+                print(f"[{index + 1}/{len(items)}] kept {kept_rows}", file=sys.stderr)
+
+    kept = [
+        tc.DistillRecord(
+            prompt=r["prompt"], completion=r["completion"],
+            teacher_id=r["teacher_id"], sampling=r["sampling"], seed=r["seed"],
+            top_k_logprobs=r["top_k_logprobs"], reasoning=r.get("reasoning"),
+            record_hash=r["record_hash"])
+        for r in (json.loads(l) for l in args.out.read_text().splitlines() if l.strip())
+    ]
     manifest = tc.corpus_manifest(kept)
-    manifest["generated_rows"] = len(records)
+    manifest["generated_rows"] = generated
     manifest["kept_rows"] = len(kept)
     manifest["track"] = args.track
     manifest["training_seed"] = args.seed

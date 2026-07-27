@@ -32,6 +32,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -53,6 +55,14 @@ class TeacherError(RuntimeError):
     """Raised on teacher configuration or transport failure. Never carries the key."""
 
 
+class TransientTeacherError(TeacherError):
+    """A failure worth retrying: timeout, rate limit, or upstream 5xx.
+
+    Separated from TeacherError because a corpus run must survive a flaky relay
+    without also silently retrying a permanent refusal like a bad key.
+    """
+
+
 @dataclass(frozen=True)
 class TeacherConfig:
     """One teacher endpoint. `teacher_id` is what the registry reviews."""
@@ -65,7 +75,8 @@ class TeacherConfig:
     temperature: float = 0.2
     max_tokens: int = 2048
     top_logprobs: int = 5
-    timeout_s: float = 120.0
+    timeout_s: float = 300.0  # reasoning models spend minutes on one answer
+    max_retries: int = 4
 
     @property
     def teacher_id(self) -> str:
@@ -116,9 +127,17 @@ def urllib_transport(config: TeacherConfig) -> Transport:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:200]
             # The Authorization header must never ride along on an exception.
+            if exc.code in (408, 409, 425, 429, 500, 502, 503, 504):
+                raise TransientTeacherError(
+                    f"teacher endpoint returned {exc.code}: {detail}") from None
             raise TeacherError(f"teacher endpoint returned {exc.code}: {detail}") from None
+        except (TimeoutError, socket.timeout) as exc:
+            raise TransientTeacherError(f"teacher endpoint timed out: {exc}") from None
         except urllib.error.URLError as exc:
-            raise TeacherError(f"teacher endpoint unreachable: {exc.reason}") from None
+            # URLError wraps timeouts and connection resets alike; both are the
+            # kind of failure a long corpus run should ride out.
+            raise TransientTeacherError(
+                f"teacher endpoint unreachable: {exc.reason}") from None
 
     return send
 
@@ -193,7 +212,22 @@ class TeacherClient:
         return self._config.teacher_id
 
     def generate(self, prompt: str, *, seed: int) -> DistillRecord:
-        """One completion, recorded with everything needed to reproduce it."""
+        """One completion, with bounded retries on transient failures.
+
+        Backoff is exponential from 2s. A permanent error (bad key, refused
+        model) raises immediately rather than burning the retry budget.
+        """
+        last: Exception | None = None
+        for attempt in range(self._config.max_retries):
+            try:
+                return self._generate_once(prompt, seed=seed)
+            except TransientTeacherError as exc:
+                last = exc
+                if attempt + 1 < self._config.max_retries:
+                    time.sleep(2 ** attempt)
+        raise TeacherError(f"giving up after retries: {last}")
+
+    def _generate_once(self, prompt: str, *, seed: int) -> DistillRecord:
         config = self._config
         sampling = {
             "temperature": config.temperature,
