@@ -158,6 +158,14 @@ tested:
 
 ---
 
+## Guides
+
+- **[Mining](docs/MINING.md)** — how to compete: the scoring, the epoch loop, what
+  you submit, the trace bonus, a reference setup, and what earns a zero.
+- **[Validating](docs/VALIDATING.md)** — how to run a validator: drawing sealed
+  batches, fail-closed verification, managing the private holdout, spot-checks, the
+  confidential-compute ladder, and corpus aggregation.
+
 ## Run the tests
 
 Requires Python 3.11+.
