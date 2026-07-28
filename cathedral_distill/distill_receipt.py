@@ -384,6 +384,27 @@ def verify_receipt(
     return doc
 
 
+# --------------------------------------------------------------------------- #
+# Public aliases for the shared `cathedral_assurance_receipt_v2` body primitives.
+# The compute receipt (`compute_receipt.py`) verifies the same shared body, so it
+# reuses these already-tested helpers rather than re-implementing the TDX/TCB and
+# canonical rules — the shared body is validated by one function in both lanes.
+# These are thin re-exports; behaviour is unchanged.
+# --------------------------------------------------------------------------- #
+validate_tcb = _validate_tcb
+exact_keys = _exact_keys
+digest_field = _digest
+decimal_field = _decimal
+parse_ts = _parse_ts
+MEASUREMENT_RE = _MEASUREMENT_RE
+RECEIPT_ID_RE = _RECEIPT_ID_RE
+TS_RE = _TS_RE
+DIGEST_RE = _DIGEST_RE
+CHANNEL_KEYS = _CHANNEL_KEYS
+WORK_KEYS = _WORK_KEYS
+CLAIM_KEYS = _CLAIM_KEYS
+
+
 def lane_contribution(receipt: Mapping[str, Any]) -> dict[str, Any]:
     """The per-miner contribution this receipt makes to the signed SN39 feed.
 
