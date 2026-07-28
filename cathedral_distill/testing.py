@@ -54,7 +54,11 @@ class IntegrationFixtures:
         self.network = network
         self.netuid = netuid
         self.source_epoch = source_epoch
+        # Per-TEE measurements. `measurement` overrides the TDX one for callers
+        # that pin it; the SEV measurement is the 48-byte (96-hex) launch digest.
         self.measurement = measurement or ("tdx-measurement-sha256:" + "ab" * 32)
+        self.tdx_measurement = self.measurement
+        self.sev_measurement = "sev-snp-measurement-sha384:" + "cd" * 48
         self.issued_at = issued_at
         self.evidence_expires_at = evidence_expires_at
         self._cfg_gen = config_generated_at
@@ -66,15 +70,25 @@ class IntegrationFixtures:
         )
 
     # -- Compute (cathedral_assurance_receipt_v2) ---------------------------- #
-    def _compute_body(self, subject: str, work_units: str, platform: dict) -> dict:
+    def _tcb_for(self, cpu_tee: str) -> dict:
+        if cpu_tee == _compute.CPU_TEE_SEV:
+            return {"tee_type": "sev_snp", "policy_debug_disabled": True,
+                    "boot_loader_svn": 3, "tee_svn": 0, "snp_svn": 8,
+                    "microcode_svn": 72, "reported_tcb": "0" * 16, "collateral_current": True}
+        return {"status": "UpToDate", "version": 3, "svn": "0" * 32,
+                "advisory_ids": [], "debug_enabled": False, "collateral_current": True}
+
+    def measurement_for(self, cpu_tee: str) -> str:
+        return self.sev_measurement if cpu_tee == _compute.CPU_TEE_SEV else self.tdx_measurement
+
+    def _compute_body(self, subject: str, work_units: str, platform: dict, cpu_tee: str) -> dict:
         return {
             "schema": _compute.RECEIPT_SCHEMA, "subject_hotkey": subject, "epoch_id": 7,
             "source_epoch": self.source_epoch, "issued_at": self.issued_at,
             "platform_pseudonym": "platform-" + digest(subject),
-            "measurement": self.measurement, "policy_registry_release": 1,
+            "measurement": self.measurement_for(cpu_tee), "policy_registry_release": 1,
             "policy_registry_digest": digest("policy"), "policy_profile_ids": ["compute-v1"],
-            "tcb": {"status": "UpToDate", "version": 3, "svn": "0" * 32,
-                    "advisory_ids": [], "debug_enabled": False, "collateral_current": True},
+            "tcb": self._tcb_for(cpu_tee),
             "channel": {"status": "passed", "binding_digest": digest("chan")},
             "work": {"challenge_id": "c-11", "manifest_digest": digest("m"),
                      "result_digest": digest("r"), "status": "passed", "work_units": work_units},
@@ -86,19 +100,23 @@ class IntegrationFixtures:
             "platform": platform,
         }
 
-    def cpu_receipt(self, subject: str = "5CpuMiner", work_units: str = "30") -> dict:
+    def cpu_receipt(self, subject: str = "5CpuMiner", work_units: str = "30",
+                    cpu_tee: str = _compute.CPU_TEE_TDX) -> dict:
+        platform = {"class": _compute.PLATFORM_CPU, "cpu_tee": cpu_tee}
         return _compute.build_receipt(
-            self._compute_body(subject, work_units, {"class": _compute.PLATFORM_CPU}),
+            self._compute_body(subject, work_units, platform, cpu_tee),
             self.key, signing_key_id="compute-1")
 
     def gpu_receipt(self, subject: str = "5GpuMiner", work_units: str = "20",
-                    bound: str | None = None, cc_mode: str = "on") -> dict:
-        platform = {"class": _compute.PLATFORM_GPU, "gpu": {
+                    bound: str | None = None, cc_mode: str = "on",
+                    cpu_tee: str = _compute.CPU_TEE_SEV) -> dict:
+        # Defaults to the real Cathedral G4 shape: AMD SEV-SNP guest + NVIDIA CC GPU.
+        platform = {"class": _compute.PLATFORM_GPU, "cpu_tee": cpu_tee, "gpu": {
             "cc_mode": cc_mode, "vbios_measurement": digest("vbios"),
             "attestation_report_digest": digest("gpu-report"),
-            "bound_measurement": bound or self.measurement}}
+            "bound_measurement": bound or self.measurement_for(cpu_tee)}}
         return _compute.build_receipt(
-            self._compute_body(subject, work_units, platform),
+            self._compute_body(subject, work_units, platform, cpu_tee),
             self.key, signing_key_id="compute-1")
 
     # -- Distill (cathedral_distill_receipt_v1) ------------------------------ #

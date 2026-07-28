@@ -64,24 +64,37 @@ Shared disciplines (identical across all receipt families):
 - **Replay / epoch binding** — `source_epoch` must equal the authorized epoch.
 - **Lifecycle + freshness** — `issued`, no revocation, evidence not expired.
 
-## 3. Compute CPU vs GPU (composite)
+## 3. Compute: CPU TEE + optional confidential GPU
 
-The Compute receipt carries a `platform` block:
+The Compute receipt's `platform` block names the confidential CPU TEE and,
+optionally, a confidential GPU bound to it:
 
-- **`intel_tdx_cpu`** — the shared TDX body is the whole proof.
-- **`confidential_gpu`** — a *composite*. The `platform.gpu` block
-  (`cc_mode`, `vbios_measurement`, `attestation_report_digest`, `bound_measurement`)
-  admits **only** when all hold:
+- **`cpu_tee`** — which TEE the `measurement` + `tcb` describe:
+  - `intel_tdx` — `measurement` is `tdx-measurement-sha256:<64 hex>`; `tcb` is the
+    Intel TDX TCB (non-Revoked status, 32-hex SVN, advisories listed unless
+    UpToDate, debug OFF, current collateral).
+  - `amd_sev_snp` — `measurement` is `sev-snp-measurement-sha384:<96 hex>` (the
+    48-byte launch measurement); `tcb` is the SEV-SNP TCB (guest-policy DEBUG
+    disabled, versioned bootloader/tee/snp/microcode SVNs, current collateral).
+- **`class`** — `confidential_cpu` (the CPU TEE alone is the proof) or
+  `confidential_gpu` (a *composite*). The `platform.gpu` block (`cc_mode`,
+  `vbios_measurement`, `attestation_report_digest`, `bound_measurement`) admits
+  **only** when all hold:
   1. `cc_mode == "on"`;
-  2. `bound_measurement == receipt.measurement` — the GPU is bound to *this* TDX quote;
+  2. `bound_measurement == receipt.measurement` — the GPU is bound to *this*
+     receipt's confidential guest (its CPU-TEE measurement — the guest binding);
   3. an injected **GPU attestation verifier** confirms the report.
 
-  Because the GPU receipt structurally carries and verifies the full TDX CPU body and
+  Because the GPU receipt structurally carries and verifies the full CPU-TEE body and
   must bind to it, **a GPU attestation on its own never admits**. With no verifier
   configured, the GPU lane is `NOT_PROVEN`, never a silent pass.
 
-The real TDX/GPU quote check is injected (hardware-free tests pass a stub; production
-swaps in the real verifier) — the contract is unchanged either way.
+This matches Cathedral's live confidential-GPU G4 receipt, verified end-to-end on
+2026-07-28 (`gcp-g4-rtx-pro-6000-sev-v1`): its `cpu_tee` is `amd_sev`, and the
+platform receipt's `gpu_attestation_verified` maps to the injected verifier's
+result while `guest_binding_verified` maps to the `bound_measurement == measurement`
+check. The real TDX/SEV/GPU quote check is injected (hardware-free tests pass a
+stub; production swaps in the real verifier) — the contract is unchanged either way.
 
 ## 4. Remote-controlled signed config (`signed_config.py`)
 

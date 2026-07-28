@@ -69,14 +69,15 @@ def _body(*, subject="5ComputeMiner", work_units="42", platform=None):
             "revocation_reference": None,
             "worker_evidence_expires_at": "2026-07-18T12:00:00.000000Z",
         },
-        "platform": platform or {"class": cr.PLATFORM_CPU},
+        "platform": platform or {"class": cr.PLATFORM_CPU, "cpu_tee": cr.CPU_TEE_TDX},
     }
     return body
 
 
-def _gpu_platform(*, bound=MEASUREMENT, cc_mode="on"):
+def _gpu_platform(*, bound=MEASUREMENT, cc_mode="on", cpu_tee=cr.CPU_TEE_TDX):
     return {
         "class": cr.PLATFORM_GPU,
+        "cpu_tee": cpu_tee,
         "gpu": {
             "cc_mode": cc_mode,
             "vbios_measurement": _digest("vbios"),
@@ -154,11 +155,11 @@ def test_gpu_verifier_rejection_is_refused():
                           gpu_attestation_verifier=lambda _g: False)
 
 
-def test_gpu_unbound_from_the_tdx_quote_never_admits():
-    # GPU evidence that is not bound to THIS receipt's TDX measurement is refused
-    # even with a passing verifier — "GPU alone never admits".
+def test_gpu_unbound_from_the_guest_never_admits():
+    # GPU evidence not bound to THIS receipt's confidential guest (its CPU-TEE
+    # measurement) is refused even with a passing verifier — "GPU alone never admits".
     receipt = _gpu_receipt(bound="tdx-measurement-sha256:" + "cd" * 32)
-    with pytest.raises(cr.ComputeReceiptError, match="not bound to this receipt's TDX measurement"):
+    with pytest.raises(cr.ComputeReceiptError, match="not bound to this receipt's confidential guest"):
         cr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH,
                           gpu_attestation_verifier=_accept_gpu)
 
@@ -217,4 +218,78 @@ def test_unverified_work_claim_is_refused():
     body["assurance"]["claims"]["work"]["status"] = "unknown"
     receipt = cr.build_receipt(body, KEY, signing_key_id="compute-test-1")
     with pytest.raises(cr.ComputeReceiptError, match="work claim must be passed"):
+        cr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+# --------------------------------------------------------------------------- #
+# AMD SEV-SNP CPU TEE (Cathedral's confidential-GPU G4 uses SEV, not TDX)
+# --------------------------------------------------------------------------- #
+
+SEV_MEASUREMENT = "sev-snp-measurement-sha384:" + "cd" * 48
+_SEV_TCB = {
+    "tee_type": "sev_snp", "policy_debug_disabled": True,
+    "boot_loader_svn": 3, "tee_svn": 0, "snp_svn": 8, "microcode_svn": 72,
+    "reported_tcb": "0" * 16, "collateral_current": True,
+}
+
+
+def _sev_body(*, platform=None, tcb=None):
+    body = _body()
+    body["measurement"] = SEV_MEASUREMENT
+    body["tcb"] = tcb if tcb is not None else dict(_SEV_TCB)
+    body["platform"] = platform or {"class": cr.PLATFORM_CPU, "cpu_tee": cr.CPU_TEE_SEV}
+    return body
+
+
+def _sev_receipt(**kw):
+    return cr.build_receipt(_sev_body(**kw), KEY, signing_key_id="compute-test-1")
+
+
+def test_sev_cpu_receipt_verifies():
+    doc = cr.verify_receipt(_sev_receipt(), KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+    assert cr.cpu_tee(doc) == cr.CPU_TEE_SEV
+    assert cr.platform_class(doc) == cr.PLATFORM_CPU
+
+
+def test_sev_gpu_composite_is_the_real_g4_shape():
+    # AMD SEV-SNP guest + NVIDIA confidential GPU, bound to the SEV measurement.
+    gpu_platform = {
+        "class": cr.PLATFORM_GPU, "cpu_tee": cr.CPU_TEE_SEV,
+        "gpu": {"cc_mode": "on", "vbios_measurement": _digest("vbios"),
+                "attestation_report_digest": _digest("gpu-report"),
+                "bound_measurement": SEV_MEASUREMENT},
+    }
+    doc = cr.verify_receipt(_sev_receipt(platform=gpu_platform), KEYREG, now_iso=NOW,
+                            source_epoch=SOURCE_EPOCH, gpu_attestation_verifier=_accept_gpu)
+    assert cr.cpu_tee(doc) == cr.CPU_TEE_SEV and cr.platform_class(doc) == cr.PLATFORM_GPU
+
+
+def test_sev_debug_enabled_policy_is_rejected():
+    bad = dict(_SEV_TCB); bad["policy_debug_disabled"] = False
+    with pytest.raises(cr.ComputeReceiptError, match="DEBUG must be disabled"):
+        cr.verify_receipt(_sev_receipt(tcb=bad), KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+def test_sev_measurement_grammar_is_enforced():
+    body = _sev_body()
+    body["measurement"] = "tdx-measurement-sha256:" + "ab" * 32  # wrong TEE's grammar
+    receipt = cr.build_receipt(body, KEY, signing_key_id="compute-test-1")
+    with pytest.raises(cr.ComputeReceiptError, match="sev-snp-measurement"):
+        cr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+def test_tdx_tcb_under_sev_cpu_tee_is_rejected():
+    # a TDX TCB block presented for an amd_sev_snp receipt fails closed
+    with pytest.raises(cr.ComputeReceiptError):
+        cr.verify_receipt(_sev_receipt(tcb={"status": "UpToDate", "version": 3, "svn": "0" * 32,
+                                            "advisory_ids": [], "debug_enabled": False,
+                                            "collateral_current": True}),
+                          KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+def test_missing_cpu_tee_is_rejected():
+    body = _body()
+    body["platform"] = {"class": cr.PLATFORM_CPU}  # no cpu_tee
+    receipt = cr.build_receipt(body, KEY, signing_key_id="compute-test-1")
+    with pytest.raises(cr.ComputeReceiptError, match="cpu_tee|unknown keys"):
         cr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)

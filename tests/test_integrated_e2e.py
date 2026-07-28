@@ -79,12 +79,13 @@ def _compute_body(subject, work_units, platform):
 
 
 def cpu_receipt(subject="5CpuMiner", work_units="30"):
-    return cr.build_receipt(_compute_body(subject, work_units, {"class": cr.PLATFORM_CPU}),
+    platform = {"class": cr.PLATFORM_CPU, "cpu_tee": cr.CPU_TEE_TDX}
+    return cr.build_receipt(_compute_body(subject, work_units, platform),
                             KEY, signing_key_id="compute-1")
 
 
 def gpu_receipt(subject="5GpuMiner", work_units="20", bound=MEASUREMENT):
-    platform = {"class": cr.PLATFORM_GPU, "gpu": {
+    platform = {"class": cr.PLATFORM_GPU, "cpu_tee": cr.CPU_TEE_TDX, "gpu": {
         "cc_mode": "on", "vbios_measurement": _dg("vbios"),
         "attestation_report_digest": _dg("gpu-report"), "bound_measurement": bound}}
     return cr.build_receipt(_compute_body(subject, work_units, platform),

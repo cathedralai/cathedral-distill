@@ -6,25 +6,33 @@ claims, policy registry, measurement, TCB, lifecycle, `issued_at`, `receipt_id`,
 signature — is validated by the *same* functions in both lanes, so a Compute
 contribution is admitted on exactly the same evidence discipline as Distill.
 
-Compute comes in two platform classes:
+The `platform` block names the confidential CPU TEE and, optionally, a
+confidential GPU riding on top of it:
 
-  * **`intel_tdx_cpu`** — an Intel TDX CPU attestation. The shared TDX body (a
-    64-hex measurement and a strict TCB block: known non-Revoked status, 32-hex
-    SVN, advisories listed when not UpToDate, debug OFF, current collateral) is
-    the whole proof.
+  * **`cpu_tee`** — the CPU trusted execution environment the measurement and TCB
+    describe. Two are supported, verified live on Cathedral:
+      - `intel_tdx`   — Intel TDX. `measurement` is `tdx-measurement-sha256:<64 hex>`
+        and `tcb` is the Intel TDX TCB (known non-Revoked status, 32-hex SVN,
+        advisories listed when not UpToDate, debug OFF, current collateral).
+      - `amd_sev_snp` — AMD SEV-SNP (the CPU TEE under Cathedral's confidential-GPU
+        G4 profile). `measurement` is `sev-snp-measurement-sha384:<96 hex>` (the
+        48-byte launch measurement) and `tcb` is the SEV-SNP TCB (guest-policy DEBUG
+        disabled, versioned bootloader/tee/snp/microcode SVNs, current collateral).
 
-  * **`confidential_gpu`** — a *composite* TDX-CPU + confidential-GPU attestation.
-    The GPU evidence only counts when it is bound to a valid TDX CPU quote in the
-    same receipt: confidential-compute mode must be on, the GPU's `bound_measurement`
-    must equal this receipt's TDX `measurement`, and an injected GPU attestation
-    verifier must confirm the GPU report. A GPU attestation on its own never
-    admits — the receipt structurally carries and verifies the full TDX CPU body,
-    so there is no "GPU alone" path to positive weight.
+  * **`class`** — `confidential_cpu` (the CPU TEE alone is the proof) or
+    `confidential_gpu` (a *composite*: a confidential GPU bound to the CPU-TEE
+    guest). A confidential-GPU receipt admits only when the GPU evidence is bound
+    to *this* receipt's confidential guest — confidential-compute mode on, the GPU
+    `bound_measurement` equal to the CPU-TEE `measurement` (the guest binding), and
+    an injected GPU attestation verifier confirming the report. Because the receipt
+    structurally carries and verifies the full CPU-TEE body and the GPU must bind to
+    it, a GPU attestation on its own never admits.
 
-The real TDX/GPU quote check is injected (`gpu_attestation_verifier`), exactly as
-the compute repo's verifier and the CyberGym crash backend are — the module is
-hardware-free and fully testable, and production swaps in the real attestation
-verifier without changing this contract.
+The mapping to Cathedral's live G4 receipt is direct: `gpu_attestation_verified`
+is the injected verifier's result, `guest_binding_verified` is the
+`bound_measurement == measurement` check, and `cpu_tee` is `amd_sev`. The real
+TDX/SEV/GPU quote check is injected (`gpu_attestation_verifier`) — the module is
+hardware-free and testable, and production swaps in the real verifier unchanged.
 
 A verified receipt yields the same `{miner_hotkey, receipt_id, work_units}` lane
 contribution as Distill and CyberGym, so all three compose through
@@ -33,6 +41,7 @@ contribution as Distill and CyberGym, so all three compose through
 from __future__ import annotations
 
 import base64
+import re
 from typing import Any, Callable, Mapping
 
 from cryptography.exceptions import InvalidSignature
@@ -40,7 +49,8 @@ from cryptography.exceptions import InvalidSignature
 from cathedral_distill import distill_receipt as dr
 
 # Reuse the shared `cathedral_assurance_receipt_v2` body primitives — one
-# implementation of the TDX/TCB and canonical rules, verified in both lanes.
+# implementation of the canonical/receipt_id rules and the Intel-TDX TCB rules,
+# verified in both lanes.
 canonical_bytes = dr.canonical_bytes
 compute_receipt_id = dr.compute_receipt_id
 
@@ -48,16 +58,30 @@ RECEIPT_SCHEMA = "cathedral_assurance_receipt_v2"
 ASSURANCE_SCHEMA = dr.ASSURANCE_SCHEMA
 MAX_RECEIPT_BYTES = dr.MAX_RECEIPT_BYTES
 
-PLATFORM_CPU = "intel_tdx_cpu"
+# platform.class — the CPU TEE alone, or a confidential GPU bound to it.
+PLATFORM_CPU = "confidential_cpu"
 PLATFORM_GPU = "confidential_gpu"
 
+# platform.cpu_tee — which confidential CPU TEE the measurement + TCB describe.
+CPU_TEE_TDX = "intel_tdx"
+CPU_TEE_SEV = "amd_sev_snp"
+_CPU_TEES = frozenset({CPU_TEE_TDX, CPU_TEE_SEV})
+
+_SEV_MEASUREMENT_RE = re.compile(r"\Asev-snp-measurement-sha384:[0-9a-f]{96}\Z")
+_SEV_REPORTED_TCB_RE = re.compile(r"\A[0-9a-f]{16}\Z")  # SEV-SNP reported TCB is 8 bytes
+_SEV_SVN_FIELDS = ("boot_loader_svn", "tee_svn", "snp_svn", "microcode_svn")
+
 # The shared body verbatim from the compute receipt, plus the `platform` block
-# that discriminates CPU from the composite GPU attestation.
+# that names the CPU TEE and (for a composite) the confidential GPU.
 _RECEIPT_KEYS = dr._SHARED_KEYS | {"platform"}
-_PLATFORM_CPU_KEYS = frozenset({"class"})
-_PLATFORM_GPU_KEYS = frozenset({"class", "gpu"})
+_PLATFORM_CPU_KEYS = frozenset({"class", "cpu_tee"})
+_PLATFORM_GPU_KEYS = frozenset({"class", "cpu_tee", "gpu"})
 _GPU_KEYS = frozenset(
     {"cc_mode", "vbios_measurement", "attestation_report_digest", "bound_measurement"}
+)
+_SEV_TCB_KEYS = frozenset(
+    {"tee_type", "policy_debug_disabled", "boot_loader_svn", "tee_svn",
+     "snp_svn", "microcode_svn", "reported_tcb", "collateral_current"}
 )
 
 
@@ -68,6 +92,40 @@ class ComputeReceiptError(ValueError):
 # A GPU attestation verifier confirms the GPU report is genuine and in CC mode.
 # Injected (hardware-free tests pass a stub); production swaps in the real check.
 GpuAttestationVerifier = Callable[[Mapping[str, Any]], bool]
+
+
+def _validate_sev_tcb(tcb: Any) -> None:
+    """The AMD SEV-SNP TCB block, verified with the same discipline as the Intel
+    TDX one: the guest-policy DEBUG bit disabled, non-negative versioned SVNs, an
+    8-byte reported TCB, and current collateral."""
+    block = dr.exact_keys(tcb, _SEV_TCB_KEYS, "tcb")
+    if block["tee_type"] != "sev_snp":
+        raise ComputeReceiptError("tcb.tee_type must be sev_snp")
+    if block["policy_debug_disabled"] is not True:
+        raise ComputeReceiptError("SEV-SNP guest-policy DEBUG must be disabled")
+    for svn in _SEV_SVN_FIELDS:
+        value = block[svn]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ComputeReceiptError(f"tcb.{svn} must be a non-negative integer")
+    if not isinstance(block["reported_tcb"], str) or _SEV_REPORTED_TCB_RE.match(block["reported_tcb"]) is None:
+        raise ComputeReceiptError("tcb.reported_tcb must be 16 lowercase hex")
+    if block["collateral_current"] is not True:
+        raise ComputeReceiptError("tcb.collateral_current must be true")
+
+
+def _validate_cpu_tee_body(doc: Mapping[str, Any], cpu_tee: str) -> None:
+    """Validate the shared `measurement` + `tcb` for the receipt's CPU TEE."""
+    measurement = str(doc["measurement"])
+    if cpu_tee == CPU_TEE_TDX:
+        if dr.MEASUREMENT_RE.match(measurement) is None:
+            raise ComputeReceiptError("measurement must be tdx-measurement-sha256:<64 hex>")
+        dr.validate_tcb(doc["tcb"])
+    elif cpu_tee == CPU_TEE_SEV:
+        if _SEV_MEASUREMENT_RE.match(measurement) is None:
+            raise ComputeReceiptError("measurement must be sev-snp-measurement-sha384:<96 hex>")
+        _validate_sev_tcb(doc["tcb"])
+    else:  # unreachable: cpu_tee is validated in _validate_platform first
+        raise ComputeReceiptError("unsupported cpu_tee")
 
 
 def _validate_platform(doc: Mapping[str, Any]) -> str:
@@ -82,14 +140,16 @@ def _validate_platform(doc: Mapping[str, Any]) -> str:
         gpu = dr.exact_keys(platform["gpu"], _GPU_KEYS, "platform.gpu")
         dr.digest_field(gpu["vbios_measurement"], "platform.gpu.vbios_measurement")
         dr.digest_field(gpu["attestation_report_digest"], "platform.gpu.attestation_report_digest")
-        if dr.MEASUREMENT_RE.match(str(gpu["bound_measurement"])) is None:
-            raise ComputeReceiptError(
-                "platform.gpu.bound_measurement must be tdx-measurement-sha256:<64 hex>"
-            )
+        # The GPU binds to the confidential guest by equalling the CPU-TEE
+        # measurement (checked in verify_receipt); here it must simply be present.
+        if not isinstance(gpu["bound_measurement"], str) or not gpu["bound_measurement"]:
+            raise ComputeReceiptError("platform.gpu.bound_measurement must be a non-empty string")
         if gpu["cc_mode"] != "on":
             raise ComputeReceiptError("platform.gpu.cc_mode must be 'on'")
     else:
-        raise ComputeReceiptError("platform.class must be intel_tdx_cpu or confidential_gpu")
+        raise ComputeReceiptError("platform.class must be confidential_cpu or confidential_gpu")
+    if platform.get("cpu_tee") not in _CPU_TEES:
+        raise ComputeReceiptError("platform.cpu_tee must be intel_tdx or amd_sev_snp")
     return platform_class
 
 
@@ -107,10 +167,10 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
         if not dr.TS_RE.match(str(doc["issued_at"])):
             raise ComputeReceiptError("issued_at must be six-fraction-digit UTC")
 
-        # Shared TDX attestation body — identical rules to the Distill receipt.
-        if not dr.MEASUREMENT_RE.match(str(doc["measurement"])):
-            raise ComputeReceiptError("measurement must be tdx-measurement-sha256:<64 hex>")
-        dr.validate_tcb(doc["tcb"])
+        # The platform block names the CPU TEE; the measurement + TCB are then
+        # verified with that TEE's rules (Intel TDX or AMD SEV-SNP).
+        _validate_platform(doc)
+        _validate_cpu_tee_body(doc, str(doc["platform"]["cpu_tee"]))
         channel = dr.exact_keys(doc["channel"], dr.CHANNEL_KEYS, "channel")
         dr.digest_field(channel["binding_digest"], "channel.binding_digest")
         if str(channel["status"]) not in ("passed", "failed", "unknown"):
@@ -137,8 +197,6 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
         for required in ("channel", "hardware", "software", "work"):
             if str(claims[required].get("status")) != "passed":
                 raise ComputeReceiptError(f"assurance {required} claim must be passed")
-
-        _validate_platform(doc)
     except dr.DistillReceiptError as exc:  # shared helpers raise the base error
         raise ComputeReceiptError(str(exc)) from exc
     return doc
@@ -222,13 +280,15 @@ def verify_receipt(
         if now_iso < str(doc["issued_at"]):
             raise ComputeReceiptError("receipt issued in the future")
 
-        # 8. GPU composite: the GPU evidence must bind to THIS TDX quote and be
+        # 8. GPU composite: the GPU evidence must be bound to THIS receipt's
+        # confidential guest (its CPU-TEE measurement — the guest binding) and be
         # confirmed by the injected verifier. GPU alone never admits.
         if doc["platform"]["class"] == PLATFORM_GPU:
             gpu = doc["platform"]["gpu"]
             if gpu["bound_measurement"] != doc["measurement"]:
                 raise ComputeReceiptError(
-                    "GPU attestation is not bound to this receipt's TDX measurement"
+                    "GPU attestation is not bound to this receipt's confidential guest "
+                    "(bound_measurement != CPU-TEE measurement)"
                 )
             if gpu_attestation_verifier is None:
                 raise ComputeReceiptError(
@@ -263,8 +323,13 @@ def platform_class(receipt: Mapping[str, Any]) -> str:
     return str(receipt["platform"]["class"])
 
 
+def cpu_tee(receipt: Mapping[str, Any]) -> str:
+    return str(receipt["platform"]["cpu_tee"])
+
+
 __all__ = [
-    "ComputeReceiptError", "RECEIPT_SCHEMA", "PLATFORM_CPU", "PLATFORM_GPU",
+    "ComputeReceiptError", "RECEIPT_SCHEMA",
+    "PLATFORM_CPU", "PLATFORM_GPU", "CPU_TEE_TDX", "CPU_TEE_SEV",
     "validate_structure", "verify_receipt", "build_receipt", "lane_contribution",
-    "platform_class", "canonical_bytes", "compute_receipt_id",
+    "platform_class", "cpu_tee", "canonical_bytes", "compute_receipt_id",
 ]
