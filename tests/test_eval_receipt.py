@@ -227,3 +227,60 @@ def Decimal_from(text: str):
     from decimal import Decimal
 
     return Decimal(text)
+
+
+# --------------------------------------------------------------------------- #
+# The evaluator authorization — signed grant, bound and verified (issue #1, #15)
+# --------------------------------------------------------------------------- #
+from datetime import UTC, datetime  # noqa: E402
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
+
+from cathedral_distill.receipt_keys import ReceiptKeyRegistry  # noqa: E402
+
+_AUTH_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(9, 41)))
+_AUTH_REG = ReceiptKeyRegistry.from_keys({"eval-authority-1": _AUTH_KEY.public_key().public_bytes_raw()})
+_AT = datetime(2026, 7, 25, 9, 0, tzinfo=UTC)
+
+
+def _authorized(auth_key=_AUTH_KEY, auth_over=None):
+    base = _receipt()
+    auth = er.build_authorization(dict(base, **(auth_over or {})), auth_key,
+                                  signing_key_id="eval-authority-1")
+    return _receipt(eval_authorization=auth)
+
+
+def test_authorization_round_trips_and_binds():
+    receipt = _authorized()
+    auth = er.verify_authorization(receipt, _AUTH_REG, current_block=6_000_100, at=_AT)
+    assert auth["miner_hotkey"] == "5Miner"
+
+
+def test_present_authorization_is_structurally_validated():
+    receipt = _receipt(eval_authorization={"schema": "wrong", "eval_id": "x"})
+    with pytest.raises(er.EvalReceiptError):
+        er.validate_receipt(receipt)
+
+
+def test_missing_authorization_is_refused_on_reward_path():
+    with pytest.raises(er.EvalReceiptError, match="required"):
+        er.verify_authorization(_receipt(), _AUTH_REG, current_block=6_000_100, at=_AT)
+
+
+def test_authorization_for_another_miner_is_refused():
+    receipt = _authorized(auth_over={"miner_hotkey": "5Other"})
+    with pytest.raises(er.EvalReceiptError, match="does not match"):
+        er.verify_authorization(receipt, _AUTH_REG, current_block=6_000_100, at=_AT)
+
+
+def test_forged_authorization_signature_is_refused():
+    rogue = Ed25519PrivateKey.from_private_bytes(bytes(range(50, 82)))
+    receipt = _authorized(auth_key=rogue)
+    with pytest.raises(er.EvalReceiptError, match="signature does not verify"):
+        er.verify_authorization(receipt, _AUTH_REG, current_block=6_000_100, at=_AT)
+
+
+def test_authorization_block_window_is_enforced():
+    receipt = _authorized()
+    with pytest.raises(er.EvalReceiptError, match="block window"):
+        er.verify_authorization(receipt, _AUTH_REG, current_block=7_000_000, at=_AT)
