@@ -93,6 +93,11 @@ class ComputeReceiptError(ValueError):
 # Injected (hardware-free tests pass a stub); production swaps in the real check.
 GpuAttestationVerifier = Callable[[Mapping[str, Any]], bool]
 
+# A CPU-TEE quote verifier independently re-checks the raw Intel TDX / AMD SEV-SNP
+# quote against the receipt's measurement + TCB. Injected; optional (see
+# verify_receipt): absent falls back to the trusted-issuer model.
+CpuQuoteVerifier = Callable[[Mapping[str, Any]], bool]
+
 
 def _validate_sev_tcb(tcb: Any) -> None:
     """The AMD SEV-SNP TCB block, verified with the same discipline as the Intel
@@ -214,6 +219,7 @@ def verify_receipt(
     now_iso: str,
     source_epoch: int,
     gpu_attestation_verifier: GpuAttestationVerifier | None = None,
+    cpu_quote_verifier: CpuQuoteVerifier | None = None,
     allowed_measurements: frozenset[str] | set[str] | None = None,
     allowed_tcb_statuses: frozenset[str] | set[str] | None = None,
     allowed_advisories: frozenset[str] | set[str] | None = None,
@@ -222,8 +228,16 @@ def verify_receipt(
 
     Order: structure, receipt_id, key resolution (anchored registry, never a
     caller-supplied key), signature, policy gating, replay/epoch binding,
-    lifecycle, freshness, and — for a GPU receipt — the composite GPU attestation
-    (CC mode, binding to this TDX quote, and the injected verifier).
+    lifecycle, freshness, the CPU-TEE quote, and — for a GPU receipt — the
+    composite GPU attestation (CC mode, binding to this quote, injected verifier).
+
+    `cpu_quote_verifier` is the independent raw TDX/SEV-SNP quote check, mirroring
+    `gpu_attestation_verifier`. It is OPTIONAL: absent, the receipt is admitted on
+    the anchored signature (the trusted-issuer model — the authorized signer
+    attested the CPU TEE before signing); present, the CPU quote is re-verified
+    from first principles (the trustless model). The GPU verifier, by contrast, is
+    required for a GPU receipt, because a confidential GPU is separate hardware the
+    CPU-TEE signature cannot vouch for.
     """
     doc = validate_structure(receipt)
     try:
@@ -280,7 +294,25 @@ def verify_receipt(
         if now_iso < str(doc["issued_at"]):
             raise ComputeReceiptError("receipt issued in the future")
 
-        # 8. GPU composite: the GPU evidence must be bound to THIS receipt's
+        # 8. CPU-TEE raw quote (optional independent check). When a verifier is
+        # injected, the raw TDX/SEV-SNP quote is re-checked against the receipt's
+        # measurement + TCB; absent, the anchored signature is the proof.
+        if cpu_quote_verifier is not None:
+            evidence = {
+                "cpu_tee": doc["platform"]["cpu_tee"],
+                "measurement": doc["measurement"],
+                "tcb": doc["tcb"],
+                "platform_pseudonym": doc["platform_pseudonym"],
+                "policy_registry_digest": doc["policy_registry_digest"],
+            }
+            try:
+                ok = cpu_quote_verifier(evidence)
+            except Exception as exc:
+                raise ComputeReceiptError(f"CPU quote verifier failed: {exc}") from exc
+            if ok is not True:
+                raise ComputeReceiptError("CPU-TEE quote did not verify")
+
+        # 9. GPU composite: the GPU evidence must be bound to THIS receipt's
         # confidential guest (its CPU-TEE measurement — the guest binding) and be
         # confirmed by the injected verifier. GPU alone never admits.
         if doc["platform"]["class"] == PLATFORM_GPU:

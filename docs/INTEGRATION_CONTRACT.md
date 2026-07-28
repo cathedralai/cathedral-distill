@@ -96,6 +96,18 @@ result while `guest_binding_verified` maps to the `bound_measurement == measurem
 check. The real TDX/SEV/GPU quote check is injected (hardware-free tests pass a
 stub; production swaps in the real verifier) — the contract is unchanged either way.
 
+Two injection seams carry the raw-quote checks, both threaded through
+`integrated_feed.verify_lane_receipt`:
+
+- **`gpu_attestation_verifier`** — *required* for a `confidential_gpu` receipt (a
+  confidential GPU is separate hardware the CPU-TEE signature can't vouch for);
+  absent, the GPU lane is `NOT_PROVEN`.
+- **`cpu_quote_verifier`** — *optional* for the CPU TEE. Absent, the receipt is
+  admitted on the anchored signature (the trusted-issuer model — the authorized
+  signer attested the TEE before signing, which is how the live platform issues
+  receipts); present, the raw TDX/SEV-SNP quote is re-verified independently (the
+  trustless model). It also re-checks the CPU TEE underneath a GPU composite.
+
 ## 4. Remote-controlled signed config (`signed_config.py`)
 
 Two small signed, versioned documents let the validator change economics without a

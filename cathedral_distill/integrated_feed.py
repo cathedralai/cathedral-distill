@@ -82,6 +82,7 @@ def verify_lane_receipt(
     source_epoch: int,
     now_iso: str | None = None,
     gpu_attestation_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
+    cpu_quote_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
     allowed_measurements: frozenset[str] | set[str] | None = None,
     allowed_tcb_statuses: frozenset[str] | set[str] | None = None,
     allowed_advisories: frozenset[str] | set[str] | None = None,
@@ -109,6 +110,7 @@ def verify_lane_receipt(
             doc = _compute.verify_receipt(
                 receipt, key_registry, now_iso=now_iso, source_epoch=source_epoch,
                 gpu_attestation_verifier=gpu_attestation_verifier,
+                cpu_quote_verifier=cpu_quote_verifier,
                 allowed_measurements=allowed_measurements,
                 allowed_tcb_statuses=allowed_tcb_statuses,
                 allowed_advisories=allowed_advisories,

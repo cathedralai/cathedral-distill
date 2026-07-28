@@ -293,3 +293,49 @@ def test_missing_cpu_tee_is_rejected():
     receipt = cr.build_receipt(body, KEY, signing_key_id="compute-test-1")
     with pytest.raises(cr.ComputeReceiptError, match="cpu_tee|unknown keys"):
         cr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+# --------------------------------------------------------------------------- #
+# CPU-TEE raw quote verifier (optional independent check)
+# --------------------------------------------------------------------------- #
+
+def test_cpu_quote_verifier_is_optional_trusted_issuer():
+    # absent -> admitted on the anchored signature (the live trusted-issuer model)
+    cr.verify_receipt(_cpu_receipt(), KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+def test_cpu_quote_verifier_receives_the_tee_evidence_and_admits():
+    seen = {}
+
+    def verify(evidence):
+        seen.update(evidence)
+        return True
+
+    cr.verify_receipt(_cpu_receipt(), KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH,
+                      cpu_quote_verifier=verify)
+    assert seen["cpu_tee"] == cr.CPU_TEE_TDX
+    assert seen["measurement"] == MEASUREMENT
+    assert seen["tcb"]["status"] == "UpToDate"
+
+
+def test_cpu_quote_verifier_rejection_is_refused():
+    with pytest.raises(cr.ComputeReceiptError, match="CPU-TEE quote did not verify"):
+        cr.verify_receipt(_cpu_receipt(), KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH,
+                          cpu_quote_verifier=lambda _e: False)
+
+
+def test_cpu_quote_verifier_exception_is_refused():
+    def boom(_e):
+        raise RuntimeError("no quote")
+
+    with pytest.raises(cr.ComputeReceiptError, match="CPU quote verifier failed"):
+        cr.verify_receipt(_cpu_receipt(), KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH,
+                          cpu_quote_verifier=boom)
+
+
+def test_cpu_quote_verifier_also_covers_the_gpu_composite_cpu_tee():
+    # a GPU receipt carries a CPU TEE too; the cpu verifier re-checks it
+    receipt = _gpu_receipt()
+    with pytest.raises(cr.ComputeReceiptError, match="CPU-TEE quote did not verify"):
+        cr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH,
+                          gpu_attestation_verifier=_accept_gpu, cpu_quote_verifier=lambda _e: False)

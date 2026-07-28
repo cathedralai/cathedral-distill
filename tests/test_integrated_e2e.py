@@ -282,6 +282,19 @@ def test_remote_allocation_change_takes_effect_without_redeploy():
     assert out["audit"]["config_versions"]["allocation"] == 2
 
 
+def test_cpu_quote_verifier_threads_through_the_pipeline():
+    # an injected CPU quote verifier that rejects turns the compute-CPU lane to FAIL
+    d = itf.verify_lane_receipt(
+        itf.KIND_COMPUTE_CPU, cpu_receipt(), lane=LANE_CPU, key_registry=KEYREG,
+        source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO, cpu_quote_verifier=lambda _e: False)
+    assert d.verdict == "FAIL" and "CPU-TEE quote" in d.detail
+    # and admits when it passes
+    d2 = itf.verify_lane_receipt(
+        itf.KIND_COMPUTE_CPU, cpu_receipt(), lane=LANE_CPU, key_registry=KEYREG,
+        source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO, cpu_quote_verifier=lambda _e: True)
+    assert d2.verdict == "PASS"
+
+
 def test_decision_for_an_unconfigured_lane_is_refused():
     resolved = _resolve(burn_config(), allocation_config(_ALLOCATIONS))
     rogue = itf.ReceiptDecision("cathedral_unknown_lane", itf.KIND_DISTILL,
