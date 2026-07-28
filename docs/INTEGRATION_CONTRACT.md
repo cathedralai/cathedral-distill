@@ -104,12 +104,27 @@ optionally, a confidential GPU bound to it:
   must bind to it, **a GPU attestation on its own never admits**. With no verifier
   configured, the GPU lane is `NOT_PROVEN`, never a silent pass.
 
-This matches Cathedral's live confidential-GPU G4 receipt, verified end-to-end on
-2026-07-28 (`gcp-g4-rtx-pro-6000-sev-v1`): its `cpu_tee` is `amd_sev`, and the
-platform receipt's `gpu_attestation_verified` maps to the injected verifier's
-result while `guest_binding_verified` maps to the `bound_measurement == measurement`
-check. The real TDX/SEV/GPU quote check is injected (hardware-free tests pass a
-stub; production swaps in the real verifier) — the contract is unchanged either way.
+> **This does NOT yet match Cathedral's live confidential-GPU G4 profile —
+> corrected 2026-07-28 after re-verification.** An earlier version of this
+> paragraph claimed the live `gcp-g4-rtx-pro-6000-sev-v1` receipt fit this
+> contract; re-fetching that receipt live (read-only) shows it does not.
+> Its `cpu_tee` is the string `amd_sev` (not `amd_sev_snp` — `_CPU_TEES` does
+> not accept it), and, more importantly, the receipt carries **no raw
+> `measurement` or `tcb` at all**, for any `cpu_tee` value: no
+> `sev-snp-measurement-sha384:` string, no SVN/status/advisory data — only
+> `provider`/`profile_id`/`machine_type` and a `verification` block of plain
+> booleans (`gpu_attestation_verified`, `guest_binding_verified`,
+> `runtime_execution_verified`) that Cathedral itself asserts. The `run_url`
+> the receipt references (`/v1/attest/runs/{id}`) 404s, so there is no richer
+> endpoint exposing the raw quote material this section's structural checks
+> require. Populating `measurement`/`tcb` from this API would mean fabricating
+> values to satisfy the regex — exactly the "genuine TEE is not the right
+> proof" failure mode `attestation.py` exists to prevent — so this profile is
+> **not currently creditable** through `compute_receipt.py`. Closing this gap
+> needs either Cathedral exposing real attestation material for this profile,
+> or an explicit decision to add a distinct, honestly-weaker "Cathedral
+> trusted-issuer" receipt path that doesn't claim independently-checkable
+> measurement/TCB evidence — not a silent reuse of the `amd_sev_snp` path.
 
 Two injection seams carry the raw-quote checks, both threaded through
 `integrated_feed.verify_lane_receipt`:
