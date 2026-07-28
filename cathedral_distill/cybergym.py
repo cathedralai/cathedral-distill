@@ -292,6 +292,12 @@ def score_batch(
     score = (earned / max_units) if max_units > 0 else Decimal(0)
     # Quantise to the receipt's 12-dp convention so the number is stable.
     score = score.quantize(Decimal("0.000000000001"))
+    # A zero score quantises to Decimal('0E-12'), whose str is '0E-12' — not the
+    # canonical decimal string the receipt grammar accepts. Normalise it so a
+    # zero-solve batch (a real case: a miner that solves nothing) produces a valid
+    # receipt instead of one that fails its own validation.
+    if score == 0:
+        score = Decimal(0)
     return BatchScore(
         batch_id=batch_id,
         graded_tasks=len(tasks),
