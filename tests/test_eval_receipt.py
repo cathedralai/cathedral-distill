@@ -95,10 +95,11 @@ def test_valid_receipt_round_trips():
 
 
 def test_unattested_receipt_is_valid_but_earns_nothing():
-    # The honest mode: structurally sound, provably worth zero.
+    # The honest mode: structurally sound, provably worth zero — even if the
+    # verifier reports a passing quote, a "none" attestation earns nothing.
     receipt = _receipt()
     assert er.validate_receipt(receipt)
-    assert er.creditable_as_verified_work(receipt) is False
+    assert er.creditable_as_verified_work(receipt, attestation_verified=True) is False
 
 
 def test_score_must_match_item_counts():
@@ -164,7 +165,10 @@ def test_attested_receipt_binds_report_data():
     document["receipt_id"] = er.receipt_id_for(document)
     document["signature"] = {"algorithm": "sr25519", "value_base64": "AA=="}
     assert er.validate_receipt(document)
-    assert er.creditable_as_verified_work(document) is True
+    # A tdx receipt is creditable ONLY when the raw quote actually verified;
+    # the kind alone (a claim) is not enough.
+    assert er.creditable_as_verified_work(document, attestation_verified=True) is True
+    assert er.creditable_as_verified_work(document, attestation_verified=False) is False
 
 
 def test_quote_cannot_be_replayed_onto_another_run():

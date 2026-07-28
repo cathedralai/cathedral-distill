@@ -19,14 +19,22 @@ durable lineage rather than a series of unrelated submissions.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 REGISTRATION_SCHEMA = "cathedral_bundle_registration_v1"
 REGISTRATION_DOMAIN = b"cathedral-bundle-registration-v1\x00"
+
+# Verifies a registration signature: (signing_payload, signature_str, miner_hotkey)
+# -> True iff the signature is a valid signature over signing_payload by the key
+# bound to miner_hotkey. Injected so production wires sr25519 against the ss58
+# hotkey while the hardware-free path uses `ed25519_registration_verifier`.
+SignatureVerifier = Callable[[bytes, str, str], bool]
 
 MAX_TRACK_CHARS = 64
 MAX_VERSION_CHARS = 32
@@ -115,15 +123,31 @@ class BundleRegistry:
         registration: BundleRegistration,
         *,
         verify_signature: bool = True,
+        signature_verifier: SignatureVerifier | None = None,
     ) -> BundleRegistration:
         """Accept a registration, or raise.
 
-        Signature verification is delegated: production wires this to sr25519
-        against `miner_hotkey`. It is a parameter rather than an assumption
-        so the hardware-free path can exercise the ordering rules without keys.
+        When `verify_signature` is true the registration must be signed, and if a
+        `signature_verifier` is supplied the signature is **cryptographically
+        verified** over `signing_payload()` against `miner_hotkey` — a forged or
+        wrong-key signature is rejected. Production wires an sr25519 verifier bound
+        to the ss58 hotkey; the hardware-free path uses
+        `ed25519_registration_verifier`. With no verifier, only the presence of a
+        signature is checked (the ordering-rule path, no keys).
         """
         if verify_signature and not registration.signature:
             raise RegistrationError("registration must be signed")
+        if verify_signature and signature_verifier is not None:
+            try:
+                ok = signature_verifier(
+                    registration.signing_payload(),
+                    registration.signature,
+                    registration.miner_hotkey,
+                )
+            except Exception as exc:  # a verifier failure is a rejection, never a pass
+                raise RegistrationError(f"registration signature check failed: {exc}") from exc
+            if ok is not True:
+                raise RegistrationError("registration signature does not verify")
 
         existing = self._by_digest.get(registration.bundle_digest)
         if existing is not None:
@@ -197,12 +221,43 @@ class BundleRegistry:
         ]
 
 
-def load_registry(rows: Iterable[Mapping[str, Any]]) -> BundleRegistry:
+def ed25519_registration_verifier(keys: Mapping[str, bytes]) -> SignatureVerifier:
+    """A `SignatureVerifier` that checks the Ed25519 signature over the payload
+    against `keys[miner_hotkey]` (32-byte raw public keys). The hardware-free
+    stand-in for production sr25519; a wrong key, wrong signer, or forged
+    signature returns False (fail closed)."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    def verify(payload: bytes, signature: str, miner_hotkey: str) -> bool:
+        public = keys.get(miner_hotkey)
+        if not isinstance(public, bytes) or len(public) != 32:
+            return False
+        try:
+            sig = base64.b64decode(signature, validate=True)
+        except (binascii.Error, ValueError):
+            return False
+        try:
+            Ed25519PublicKey.from_public_bytes(public).verify(sig, payload)
+        except (InvalidSignature, ValueError):
+            return False
+        return True
+
+    return verify
+
+
+def load_registry(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    verify_signature: bool = False,
+    signature_verifier: SignatureVerifier | None = None,
+) -> BundleRegistry:
     """Rebuild a registry from published rows, preserving registration order.
 
     Rows are replayed oldest-first so first-wins resolves exactly as it did
-    live. Any row that would violate a rule is skipped rather than accepted,
-    keeping a corrupted feed from rewriting history.
+    live. Any row that would violate a rule — including a signature that does not
+    verify when a `signature_verifier` is supplied — is skipped rather than
+    accepted, keeping a corrupted or forged feed from rewriting history.
     """
     registry = BundleRegistry()
     ordered = sorted(rows, key=lambda row: str(row.get("registered_at") or ""))
@@ -217,7 +272,9 @@ def load_registry(rows: Iterable[Mapping[str, Any]]) -> BundleRegistry:
                     registered_at=datetime.fromisoformat(str(row["registered_at"])),
                     parent_digest=row.get("parent_digest") or None,
                     signature=str(row.get("signature") or ""),
-                )
+                ),
+                verify_signature=verify_signature,
+                signature_verifier=signature_verifier,
             )
         except (RegistrationError, KeyError, ValueError):
             continue

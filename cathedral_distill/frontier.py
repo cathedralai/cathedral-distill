@@ -329,14 +329,22 @@ class CandidateEvidence:
     # A structurally valid `kind: "tdx"` receipt is not creditable unless the raw
     # quote actually verified; this must be True for the attested gate to pass.
     attestation_verified: bool | None = None
+    # The same raw-verification result for the independent reproduction receipt.
+    # The `reproduced` gate credits a reproduction only if ITS quote also verified,
+    # so an unverified second receipt cannot satisfy reproduction.
+    reproduction_attestation_verified: bool | None = None
 
 
 def _reproduction_ok(
-    receipt: Mapping[str, object], reproduction: Mapping[str, object] | None
+    receipt: Mapping[str, object],
+    reproduction: Mapping[str, object] | None,
+    *,
+    reproduction_attestation_verified: bool,
 ) -> bool:
     """A second, independently-evaluated receipt that reproduces the result:
     same sealed set, same checkpoint, same graded items_root, different
-    evaluator. Anything less does not clear the reproduced gate."""
+    evaluator. Anything less does not clear the reproduced gate — including a
+    reproduction whose own raw quote never verified."""
     from cathedral_distill import eval_receipt as er
 
     if reproduction is None:
@@ -346,7 +354,9 @@ def _reproduction_ok(
         replay = er.validate_receipt(reproduction)
     except er.EvalReceiptError:
         return False
-    if not er.creditable_as_verified_work(reproduction):
+    if not er.creditable_as_verified_work(
+        reproduction, attestation_verified=reproduction_attestation_verified
+    ):
         return False
     return (
         replay["evalset"]["plaintext_digest"] == original["evalset"]["plaintext_digest"]
@@ -383,9 +393,8 @@ def derive_candidate(evidence: CandidateEvidence, policy: TrackPolicy) -> Candid
     # Creditable requires BOTH a non-"none" attested receipt AND the raw quote
     # verification result. A structurally valid tdx receipt whose quote never
     # verified is not attested — the kind is a claim, not a proof.
-    attested = (
-        er.creditable_as_verified_work(evidence.receipt)
-        and evidence.attestation_verified is True
+    attested = er.creditable_as_verified_work(
+        evidence.receipt, attestation_verified=evidence.attestation_verified is True
     )
 
     teacher_permitted = bool(
@@ -393,7 +402,8 @@ def derive_candidate(evidence: CandidateEvidence, policy: TrackPolicy) -> Candid
         and evidence.teacher_id
         and evidence.licence_checked_at is not None
         and evidence.teacher_registry.is_permitted(
-            evidence.teacher_id, purpose=PURPOSE_DISTILLATION, at=evidence.licence_checked_at
+            evidence.teacher_id, purpose=PURPOSE_DISTILLATION,
+            at=evidence.licence_checked_at, require_commercial=True,
         )
     )
     registered_bundle = bool(
@@ -410,7 +420,10 @@ def derive_candidate(evidence: CandidateEvidence, policy: TrackPolicy) -> Candid
             evidence.training_participant, evidence.evaluator_participant
         )
     )
-    reproduced = _reproduction_ok(evidence.receipt, evidence.reproduction_receipt)
+    reproduced = _reproduction_ok(
+        evidence.receipt, evidence.reproduction_receipt,
+        reproduction_attestation_verified=evidence.reproduction_attestation_verified is True,
+    )
     contamination_detected = _canary_contaminated(evidence)
 
     return Candidate(

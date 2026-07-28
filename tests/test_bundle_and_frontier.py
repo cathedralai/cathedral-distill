@@ -573,3 +573,69 @@ def test_champion_manifest_carries_batch_id():
     f = fr.Frontier([POLICY])
     f.submit(POLICY.track, _cand(score="0.70", batch_id="epoch-1"))
     assert f.champion(POLICY.track).as_manifest()["batch_id"] == "epoch-1"
+
+
+# --------------------------------------------------------------------------- #
+# Real (injected) registration-signature verification — issue #1 gate #14
+# --------------------------------------------------------------------------- #
+
+def _signed_reg(key, hotkey="5Alice", digest=None):
+    import base64
+    unsigned = br.BundleRegistration(
+        miner_hotkey=hotkey, track="hermes-extract-v0",
+        bundle_digest=digest or br.bundle_digest(b"recipe-signed"),
+        version="1.0.0", registered_at=NOW, signature="",
+    )
+    sig = base64.b64encode(key.sign(unsigned.signing_payload())).decode()
+    return br.BundleRegistration(
+        miner_hotkey=hotkey, track="hermes-extract-v0",
+        bundle_digest=unsigned.bundle_digest, version="1.0.0",
+        registered_at=NOW, signature=sig,
+    )
+
+
+def test_registration_signature_is_cryptographically_verified():
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    key = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    verifier = br.ed25519_registration_verifier(
+        {"5Alice": key.public_key().public_bytes_raw()})
+    registry = br.BundleRegistry()
+    # a correctly-signed registration is accepted
+    reg = _signed_reg(key)
+    assert registry.register(reg, signature_verifier=verifier) is reg
+
+
+def test_forged_registration_signature_is_rejected():
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    key = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    other = Ed25519PrivateKey.from_private_bytes(bytes(range(32, 64)))
+    # registry anchors 5Alice to `key`, but the registration is signed by `other`
+    verifier = br.ed25519_registration_verifier(
+        {"5Alice": key.public_key().public_bytes_raw()})
+    forged = _signed_reg(other, hotkey="5Alice")
+    with pytest.raises(br.RegistrationError, match="signature does not verify"):
+        br.BundleRegistry().register(forged, signature_verifier=verifier)
+
+
+def test_unknown_hotkey_and_tampered_payload_fail_closed():
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    key = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    verifier = br.ed25519_registration_verifier({})  # no key for 5Alice
+    with pytest.raises(br.RegistrationError, match="signature does not verify"):
+        br.BundleRegistry().register(_signed_reg(key), signature_verifier=verifier)
+
+
+def test_commercial_use_is_enforced_when_required():
+    reg = tr.TeacherRegistry()
+    reg.add(_record(commercial_use=False))  # reviewed, but not for commercial use
+    # a reward-bearing (commercial) distillation is refused
+    assert reg.is_permitted("moonshot/kimi/k3", purpose=tr.PURPOSE_DISTILLATION,
+                            at=NOW, require_commercial=True) is False
+    with pytest.raises(tr.TeacherNotPermitted, match="commercial_use_not_permitted"):
+        reg.assert_permitted("moonshot/kimi/k3", purpose=tr.PURPOSE_DISTILLATION,
+                             at=NOW, require_commercial=True)
+    # non-commercial callers are unaffected; and a commercial-reviewed teacher passes
+    assert reg.is_permitted("moonshot/kimi/k3", purpose=tr.PURPOSE_DISTILLATION, at=NOW) is True
+    reg2 = tr.TeacherRegistry(); reg2.add(_record(commercial_use=True))
+    assert reg2.is_permitted("moonshot/kimi/k3", purpose=tr.PURPOSE_DISTILLATION,
+                            at=NOW, require_commercial=True) is True

@@ -446,14 +446,22 @@ def validate_receipt(document: Any) -> Mapping[str, Any]:
     return receipt
 
 
-def creditable_as_verified_work(document: Mapping[str, Any]) -> bool:
+def creditable_as_verified_work(
+    document: Mapping[str, Any], *, attestation_verified: bool
+) -> bool:
     """Whether this receipt may contribute verified work units.
 
     Deliberately conservative and deliberately separate from `validate_receipt`:
-    a structurally perfect receipt with no quote is still worth zero. This is
-    the same stance VerifyML takes, and it is the line that keeps the trust
-    claim honest.
+    a structurally perfect receipt with no quote is still worth zero. It requires
+    BOTH a non-"none" attestation kind AND a **successful raw-quote verification
+    result** (`attestation_verified`) supplied by the verifier — the receipt's
+    `attestation.kind` is a claim, not a proof, so a structurally valid `tdx`
+    receipt whose quote never verified is not creditable. `attestation_verified`
+    is the injected Polaris/TDX verifier's actual result, never inferred from the
+    receipt. This is the line that keeps the trust claim honest.
     """
+    if attestation_verified is not True:
+        return False
     try:
         receipt = validate_receipt(document)
     except EvalReceiptError:

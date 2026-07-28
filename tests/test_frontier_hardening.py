@@ -112,6 +112,7 @@ def _full_evidence(**over):
         reproduction_receipt=repro,
         canary_passed=1, canary_total=8, canary_chance_rate=Decimal("0.25"),
         attestation_verified=True,  # the raw Polaris/TDX quote verified
+        reproduction_attestation_verified=True,  # the reproduction's quote verified too
     )
     ev.update(over)
     return fr.CandidateEvidence(**ev)
@@ -252,6 +253,15 @@ def test_same_evaluator_reproduction_does_not_count():
     # A "reproduction" from the SAME validator is not independent.
     ev = _full_evidence(reproduction_receipt=_creditable_receipt())  # same validator_hotkey
     assert fr.derive_candidate(ev, POLICY).reproduced is False
+
+
+def test_reproduction_with_unverified_quote_does_not_count():
+    # A structurally valid, independent reproduction whose RAW quote never verified
+    # must not clear the reproduced gate (issue #1: no trust from attestation.kind).
+    ev = _full_evidence(reproduction_attestation_verified=False)
+    assert fr.derive_candidate(ev, POLICY).reproduced is False
+    # and it does clear when the reproduction's quote verified
+    assert fr.derive_candidate(_full_evidence(), POLICY).reproduced is True
 
 
 def test_canary_contamination_derives_contamination_true():

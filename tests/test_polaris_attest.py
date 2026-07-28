@@ -118,7 +118,9 @@ def test_honest_run_verifies():
 
 def test_attested_receipt_is_creditable():
     receipt, _ = _attested()
-    assert er.creditable_as_verified_work(receipt) is True
+    assert er.creditable_as_verified_work(receipt, attestation_verified=True) is True
+    # ...but only when the raw quote verified — the attestation kind is a claim.
+    assert er.creditable_as_verified_work(receipt, attestation_verified=False) is False
 
 
 def test_stdout_is_stable_and_excludes_attestation():

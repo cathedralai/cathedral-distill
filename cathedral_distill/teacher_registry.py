@@ -112,12 +112,17 @@ class TeacherRegistry:
         purpose: str,
         at: datetime,
         published_licence: bytes | None = None,
+        require_commercial: bool = False,
     ) -> TeacherRecord:
         """Authorise a teacher for a purpose, or raise.
 
         `published_licence`, when supplied, is the licence text as fetched today.
         Passing it turns the pinned digest from documentation into an enforced
         check, and callers on the training path should always pass it.
+
+        `require_commercial` gates on `record.commercial_use`: a reward-bearing
+        SN39 distillation is a commercial use, so the reward path passes True and
+        a teacher only reviewed for non-commercial use is refused.
         """
         if purpose not in PURPOSES:
             raise TeacherNotPermitted("unknown_purpose", teacher_id)
@@ -140,15 +145,22 @@ class TeacherRegistry:
             # what the restrictive clauses in these licences target.
             raise TeacherNotPermitted("competing_model_training_forbidden", teacher_id)
 
+        if require_commercial and not record.commercial_use:
+            raise TeacherNotPermitted("commercial_use_not_permitted", teacher_id)
+
         if published_licence is not None:
             if licence_digest(published_licence) != record.licence_digest:
                 raise TeacherNotPermitted("licence_text_changed_since_review", teacher_id)
 
         return record
 
-    def is_permitted(self, teacher_id: str, *, purpose: str, at: datetime) -> bool:
+    def is_permitted(
+        self, teacher_id: str, *, purpose: str, at: datetime, require_commercial: bool = False
+    ) -> bool:
         try:
-            self.assert_permitted(teacher_id, purpose=purpose, at=at)
+            self.assert_permitted(
+                teacher_id, purpose=purpose, at=at, require_commercial=require_commercial
+            )
         except TeacherNotPermitted:
             return False
         return True
