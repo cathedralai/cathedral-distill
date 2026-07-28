@@ -77,6 +77,7 @@ def _pre_attestation():
             "work_units": "10",
         },
         "eval_authorization": None,
+        "signing_key_id": "eval-polaris-1",
         "attestation": dict(pa._BLANK_ATTESTATION),
     }
 

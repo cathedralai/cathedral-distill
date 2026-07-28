@@ -109,7 +109,11 @@ def test_cybergym_rejected_outside_the_block_window():
 # --------------------------------------------------------------------------- #
 
 _AUTH_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(9, 41)))
-_EVAL_REG = ReceiptKeyRegistry.from_keys({"eval-authority-1": _AUTH_KEY.public_key().public_bytes_raw()})
+_RECEIPT_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(41, 73)))
+_EVAL_REG = ReceiptKeyRegistry.from_keys({
+    "eval-authority-1": _AUTH_KEY.public_key().public_bytes_raw(),
+    "eval-receipt-1": _RECEIPT_KEY.public_key().public_bytes_raw(),
+})
 _AUTH_AT = datetime(2026, 7, 25, 9, 0, tzinfo=UTC)
 
 
@@ -145,9 +149,7 @@ def _eval_receipt(*, attestation_kind="polaris_tdx", authorize=True, auth_over=N
         auth = er.build_authorization(dict(doc, **(auth_over or {})), auth_key,
                                       signing_key_id="eval-authority-1")
         doc["eval_authorization"] = auth
-    doc["receipt_id"] = er.receipt_id_for(doc)
-    doc["signature"] = {"algorithm": "sr25519", "value_base64": "AA=="}
-    return doc
+    return er.build_receipt(doc, _RECEIPT_KEY, signing_key_id="eval-receipt-1")
 
 
 def _admit_eval(receipt, *, attestation_verified=True, current_block=6_000_100, at=_AUTH_AT,
@@ -161,6 +163,18 @@ def _admit_eval(receipt, *, attestation_verified=True, current_block=6_000_100, 
 def test_eval_admits_with_verified_authorization_and_quote():
     a = _admit_eval(_eval_receipt())
     assert a.verdict == adm.ADMIT and a.work_units == Decimal(10) and a.creditable
+
+
+def test_eval_rejected_when_receipt_signature_is_forged():
+    # a receipt whose own body is signed by an unanchored key — the exact
+    # self-consistency forgery a receipt-only structural check could never catch.
+    rogue = Ed25519PrivateKey.from_private_bytes(bytes(range(150, 182)))
+    receipt = _eval_receipt()
+    body = {k: v for k, v in receipt.items()
+            if k not in ("receipt_id", "signing_key_id", "signature")}
+    forged = er.build_receipt(body, rogue, signing_key_id="eval-receipt-1")  # claims eval-receipt-1
+    a = _admit_eval(forged)
+    assert a.verdict == adm.REJECT and "signature does not verify" in a.detail
 
 
 def test_eval_not_proven_without_an_attestation_result():

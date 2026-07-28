@@ -12,10 +12,15 @@ import sys
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cathedral_distill import eval_receipt as er  # noqa: E402
+from cathedral_distill.receipt_keys import ReceiptKeyRegistry  # noqa: E402
+
+KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+KEYREG = ReceiptKeyRegistry.from_keys({"eval-1": KEY.public_key().public_bytes_raw()})
 
 
 def _digest(seed: str) -> str:
@@ -84,9 +89,7 @@ def _receipt(**overrides):
     }
     for key, value in overrides.items():
         document[key] = value
-    document["receipt_id"] = er.receipt_id_for(document)
-    document["signature"] = {"algorithm": "sr25519", "value_base64": "AA=="}
-    return document
+    return er.build_receipt(document, KEY, signing_key_id="eval-1")
 
 
 def test_valid_receipt_round_trips():
@@ -234,10 +237,6 @@ def Decimal_from(text: str):
 # --------------------------------------------------------------------------- #
 from datetime import UTC, datetime  # noqa: E402
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
-
-from cathedral_distill.receipt_keys import ReceiptKeyRegistry  # noqa: E402
-
 _AUTH_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(9, 41)))
 _AUTH_REG = ReceiptKeyRegistry.from_keys({"eval-authority-1": _AUTH_KEY.public_key().public_bytes_raw()})
 _AT = datetime(2026, 7, 25, 9, 0, tzinfo=UTC)
@@ -284,3 +283,65 @@ def test_authorization_block_window_is_enforced():
     receipt = _authorized()
     with pytest.raises(er.EvalReceiptError, match="block window"):
         er.verify_authorization(receipt, _AUTH_REG, current_block=7_000_000, at=_AT)
+
+
+# --------------------------------------------------------------------------- #
+# The receipt's OWN signature — build_receipt / verify_receipt (issue #1 gap)
+# --------------------------------------------------------------------------- #
+
+def test_genuinely_signed_receipt_verifies():
+    receipt = _receipt()
+    verified = er.verify_receipt(receipt, KEYREG, source_epoch=4211)
+    assert verified["receipt_id"] == receipt["receipt_id"]
+
+
+def test_receipt_id_commits_to_signing_key_id():
+    # signing_key_id is part of the signed body: swapping it (even to another
+    # otherwise-valid key id) must break receipt_id, not silently re-attribute.
+    receipt = _receipt()
+    tampered = dict(receipt, signing_key_id="a-different-key")
+    with pytest.raises(er.EvalReceiptError, match="receipt_id does not match"):
+        er.validate_receipt(tampered)
+
+
+def test_signing_key_not_in_registry_is_refused():
+    receipt = _receipt()
+    other = ReceiptKeyRegistry.from_keys({})
+    with pytest.raises(er.EvalReceiptError, match="signing key could not be resolved"):
+        er.verify_receipt(receipt, other, source_epoch=4211)
+
+
+def test_forged_receipt_signature_is_refused():
+    # a receipt signed by a DIFFERENT key than the one the registry resolves for
+    # its own signing_key_id — the exact self-consistency forgery the module
+    # previously had no way to catch (nothing resolved a key to check against).
+    receipt = _receipt()
+    body = {k: v for k, v in receipt.items() if k not in ("receipt_id", "signing_key_id", "signature")}
+    rogue = Ed25519PrivateKey.from_private_bytes(bytes(range(96, 128)))
+    forged = er.build_receipt(body, rogue, signing_key_id="eval-1")  # signed by rogue, claims eval-1
+    with pytest.raises(er.EvalReceiptError, match="signature does not verify"):
+        er.verify_receipt(forged, KEYREG, source_epoch=4211)
+
+
+def test_tampered_score_breaks_the_signature():
+    receipt = _receipt()
+    tampered = copy.deepcopy(receipt)
+    tampered["score"]["passed_items"] = 10
+    tampered["score"]["score"] = "1"
+    tampered["score"]["work_units"] = "10"
+    tampered["receipt_id"] = er.receipt_id_for(tampered)
+    with pytest.raises(er.EvalReceiptError, match="signature does not verify"):
+        er.verify_receipt(tampered, KEYREG, source_epoch=4211)
+
+
+def test_verify_receipt_binds_the_authorized_epoch():
+    receipt = _receipt()
+    with pytest.raises(er.EvalReceiptError, match="source_epoch"):
+        er.verify_receipt(receipt, KEYREG, source_epoch=4212)
+
+
+def test_verify_receipt_without_source_epoch_skips_the_epoch_check():
+    # frontier.derive_candidate has no epoch concept; omitting source_epoch is a
+    # deliberate opt-out of that one check, not a weaker signature check.
+    receipt = _receipt()
+    assert er.verify_receipt(receipt, KEYREG)["source_epoch"] == 4211

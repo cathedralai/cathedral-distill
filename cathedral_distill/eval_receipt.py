@@ -35,6 +35,7 @@ import base64
 import hashlib
 import json
 import re
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
@@ -44,7 +45,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-SCHEMA = "cathedral_ml_eval_receipt_v1"
+# v2 adds `signing_key_id` so the receipt's own signature can be cryptographically
+# verified (issue #1): v1 carried a `signature` object but no way to resolve WHICH
+# key to check it against, so nothing ever verified it — a forged signature and a
+# genuine one were structurally indistinguishable. The bump means a stray v1
+# receipt fails loudly (missing key) instead of being silently accepted unsigned.
+SCHEMA = "cathedral_ml_eval_receipt_v2"
 AUTHORIZATION_SCHEMA = "cathedral_ml_eval_authorization_v1"
 
 RECEIPT_DOMAIN = b"cathedral-ml-eval-receipt-v1\x00"
@@ -82,6 +88,7 @@ MAX_ITEMS = 65_536
 _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 _DECIMAL_RE = re.compile(r"\A(?:0|[1-9][0-9]{0,29})(?:\.[0-9]{1,12})?\Z")
 _REPORT_DATA_RE = re.compile(r"\A[0-9a-f]{128}\Z")
+_ISSUED_AT_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 
 _RECEIPT_KEYS = frozenset(
     {
@@ -105,6 +112,7 @@ _RECEIPT_KEYS = frozenset(
         "eval_authorization",
         "attestation",
         "receipt_id",
+        "signing_key_id",
         "signature",
     }
 )
@@ -435,6 +443,8 @@ def validate_receipt(document: Any) -> Mapping[str, Any]:
     receipt = _exact_keys(document, _RECEIPT_KEYS, "eval receipt")
     if receipt["schema"] != SCHEMA:
         raise EvalReceiptError("unsupported eval receipt schema")
+    if not isinstance(receipt["signing_key_id"], str) or not receipt["signing_key_id"]:
+        raise EvalReceiptError("signing_key_id must be a non-empty string")
     encoded = canonical_json(receipt)
     if len(encoded) > MAX_RECEIPT_BYTES:
         raise EvalReceiptError("eval receipt exceeds maximum size")
@@ -469,6 +479,81 @@ def validate_receipt(document: Any) -> Mapping[str, Any]:
     _exact_keys(receipt["signature"], _SIGNATURE_KEYS, "signature")
     if receipt["receipt_id"] != receipt_id_for(receipt):
         raise EvalReceiptError("receipt_id does not match receipt contents")
+    return receipt
+
+
+# --------------------------------------------------------------------------- #
+# Build + sign, and independent signature verification (issue #1)
+# --------------------------------------------------------------------------- #
+
+def build_receipt(
+    body: Mapping[str, Any], private_key: Ed25519PrivateKey, *, signing_key_id: str
+) -> dict[str, Any]:
+    """Assemble and sign a receipt from a body that omits receipt_id and signature.
+
+    Mirrors compute/distill/cybergym's `build_receipt`: adds `signing_key_id`,
+    computes `receipt_id` over the body (which now includes `signing_key_id`),
+    then Ed25519-signs everything except `signature` itself — domain-separated
+    under `RECEIPT_DOMAIN` so this signature can never be replayed as a signed
+    object of another kind (an authorization, a key registry, ...).
+    """
+    doc = {k: v for k, v in body.items() if k not in ("receipt_id", "signing_key_id", "signature")}
+    doc["signing_key_id"] = signing_key_id
+    doc["receipt_id"] = receipt_id_for(doc)
+    signed = {k: v for k, v in doc.items() if k != "signature"}
+    signature = private_key.sign(RECEIPT_DOMAIN + canonical_json(signed))
+    doc["signature"] = {
+        "algorithm": "ed25519",
+        "value_base64": base64.b64encode(signature).decode("ascii"),
+    }
+    return doc
+
+
+def verify_receipt(
+    document: Any, key_registry: Any, *, source_epoch: int | None = None
+) -> Mapping[str, Any]:
+    """Independently verify a receipt's own signature. Fails closed on any check.
+
+    Structure -> receipt_id recomputation (inside `validate_receipt`) -> key
+    resolution -> Ed25519 signature, mirroring compute/distill/cybergym's
+    discipline. `key_registry` resolves `signing_key_id` to the anchored public
+    key (`key_registry.resolve(key_id, at=issued_at)`); the verifier never takes
+    a caller-supplied key, so a receipt can never carry its own verifying key.
+
+    `source_epoch`, when supplied, additionally binds the receipt to the
+    authorized epoch (the same replay discipline the other lanes apply); omitted
+    by callers that verify below the epoch layer (e.g. `frontier.derive_candidate`,
+    which has no epoch concept — epoch replay-binding is enforced upstream, in
+    `admission.verify_admission`, before evidence reaches the frontier).
+
+    This proves only that the receipt BODY was genuinely signed by the anchored
+    evaluator key. The evaluator authorization, the raw attestation quote, and
+    eval-id replay are separate checks (`verify_authorization`, the injected
+    attestation result, the consumption ledger).
+    """
+    receipt = validate_receipt(document)
+    issued_at = str(receipt["issued_at"])
+    if _ISSUED_AT_RE.fullmatch(issued_at) is None:
+        raise EvalReceiptError("issued_at must be canonical UTC time")
+    at = datetime.strptime(issued_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    try:
+        public_key = key_registry.resolve(receipt["signing_key_id"], at=at)
+    except EvalReceiptError:
+        raise
+    except Exception as exc:
+        raise EvalReceiptError(f"signing key could not be resolved: {exc}") from exc
+    sig = receipt["signature"]
+    if sig["algorithm"] != "ed25519":
+        raise EvalReceiptError("unsupported signature algorithm")
+    signed = {k: v for k, v in receipt.items() if k != "signature"}
+    try:
+        public_key.verify(
+            base64.b64decode(sig["value_base64"]), RECEIPT_DOMAIN + canonical_json(signed)
+        )
+    except (InvalidSignature, ValueError, TypeError) as exc:
+        raise EvalReceiptError("signature does not verify") from exc
+    if source_epoch is not None and int(receipt["source_epoch"]) != int(source_epoch):
+        raise EvalReceiptError("receipt source_epoch does not match the authorized epoch")
     return receipt
 
 

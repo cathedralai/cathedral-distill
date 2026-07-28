@@ -15,6 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -23,10 +24,14 @@ from cathedral_distill import eval_receipt as er  # noqa: E402
 from cathedral_distill import frontier as fr  # noqa: E402
 from cathedral_distill import roles as ro  # noqa: E402
 from cathedral_distill import teacher_registry as tr  # noqa: E402
+from cathedral_distill.receipt_keys import ReceiptKeyRegistry  # noqa: E402
 
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
 POLICY = fr.TrackPolicy(track="hermes", min_score_to_crown=Decimal("0.05"),
                         crown_ttl_s=3600)
+
+EVAL_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+EVAL_KEYREG = ReceiptKeyRegistry.from_keys({"eval-1": EVAL_KEY.public_key().public_bytes_raw()})
 
 
 def _digest(seed: str) -> str:
@@ -59,21 +64,18 @@ def _base_receipt(**overrides):
                         "policy_digest": "", "report_data_hex": ""},
     }
     doc.update(overrides)
-    doc["receipt_id"] = er.receipt_id_for(doc)
-    doc["signature"] = {"algorithm": "sr25519", "value_base64": "AA=="}
-    return doc
+    return er.build_receipt(doc, EVAL_KEY, signing_key_id="eval-1")
 
 
 def _creditable_receipt(**overrides):
     """A tdx receipt whose report_data binding validates — so it is creditable."""
     doc = _base_receipt(**overrides)
+    doc = {k: v for k, v in doc.items() if k not in ("receipt_id", "signing_key_id", "signature")}
     report_data = er.expected_report_data(doc).hex()
     doc["attestation"] = {"kind": "tdx", "evidence_digest": _digest("evidence"),
                           "evidence_uri": "", "policy_digest": _digest("policy"),
                           "report_data_hex": report_data}
-    doc["receipt_id"] = er.receipt_id_for(doc)
-    doc["signature"] = {"algorithm": "sr25519", "value_base64": "AA=="}
-    return doc
+    return er.build_receipt(doc, EVAL_KEY, signing_key_id="eval-1")
 
 
 def _teacher_registry():
@@ -113,6 +115,7 @@ def _full_evidence(**over):
         canary_passed=1, canary_total=8, canary_chance_rate=Decimal("0.25"),
         attestation_verified=True,  # the raw Polaris/TDX quote verified
         reproduction_attestation_verified=True,  # the reproduction's quote verified too
+        key_registry=EVAL_KEYREG,  # resolves both receipts' signing_key_id
     )
     ev.update(over)
     return fr.CandidateEvidence(**ev)
@@ -221,6 +224,29 @@ def test_unattested_receipt_derives_attested_false():
     candidate = fr.derive_candidate(ev, POLICY)
     assert candidate.attested is False
     assert fr.GATE_ATTESTED_RECEIPT in fr.evaluate_gates(candidate, POLICY).failures
+
+
+def test_missing_key_registry_derives_attested_false():
+    # A structurally perfect, kind=tdx, quote-verified receipt is still not
+    # attested if there is no way to check its OWN signature (issue #1: a
+    # structurally valid receipt is not the same as a genuinely signed one).
+    ev = _full_evidence(key_registry=None)
+    assert fr.derive_candidate(ev, POLICY).attested is False
+
+
+def test_receipt_signed_by_an_unanchored_key_derives_attested_false():
+    forged_key = Ed25519PrivateKey.from_private_bytes(bytes(range(200, 232)))
+    receipt = _creditable_receipt()
+    body = {k: v for k, v in receipt.items()
+            if k not in ("receipt_id", "signing_key_id", "signature")}
+    forged = er.build_receipt(body, forged_key, signing_key_id="eval-1")  # claims eval-1
+    ev = _full_evidence(receipt=forged)
+    assert fr.derive_candidate(ev, POLICY).attested is False
+
+
+def test_missing_key_registry_derives_reproduced_false():
+    ev = _full_evidence(key_registry=None)
+    assert fr.derive_candidate(ev, POLICY).reproduced is False
 
 
 def test_self_evaluation_derives_independent_false():

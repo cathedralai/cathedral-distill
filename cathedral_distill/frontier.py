@@ -333,6 +333,13 @@ class CandidateEvidence:
     # The `reproduced` gate credits a reproduction only if ITS quote also verified,
     # so an unverified second receipt cannot satisfy reproduction.
     reproduction_attestation_verified: bool | None = None
+    # Resolves `receipt`/`reproduction_receipt`'s `signing_key_id` to the anchored
+    # evaluator key (`cathedral_distill.receipt_keys.ReceiptKeyRegistry` or
+    # equivalent) — NEVER a key either receipt supplies. Absent -> the receipt's
+    # own signature cannot be checked, so `attested`/`reproduced` fail closed
+    # regardless of what the receipt's attestation.kind claims (issue #1: a
+    # structurally valid receipt is not the same as a genuinely signed one).
+    key_registry: object | None = None
 
 
 def _reproduction_ok(
@@ -340,18 +347,21 @@ def _reproduction_ok(
     reproduction: Mapping[str, object] | None,
     *,
     reproduction_attestation_verified: bool,
+    key_registry: object | None,
 ) -> bool:
     """A second, independently-evaluated receipt that reproduces the result:
     same sealed set, same checkpoint, same graded items_root, different
     evaluator. Anything less does not clear the reproduced gate — including a
-    reproduction whose own raw quote never verified."""
+    reproduction whose own raw quote never verified, or whose receipt body was
+    never genuinely signed by an anchored evaluator key (issue #1: no key
+    registry means the signature cannot be checked, so this fails closed)."""
     from cathedral_distill import eval_receipt as er
 
-    if reproduction is None:
+    if reproduction is None or key_registry is None:
         return False
     try:
-        original = er.validate_receipt(receipt)
-        replay = er.validate_receipt(reproduction)
+        original = er.verify_receipt(receipt, key_registry)
+        replay = er.verify_receipt(reproduction, key_registry)
     except er.EvalReceiptError:
         return False
     if not er.creditable_as_verified_work(
@@ -390,10 +400,22 @@ def derive_candidate(evidence: CandidateEvidence, policy: TrackPolicy) -> Candid
     receipt = er.validate_receipt(evidence.receipt)  # raises on malformed -> fail closed
     score_block = receipt["score"]
 
-    # Creditable requires BOTH a non-"none" attested receipt AND the raw quote
-    # verification result. A structurally valid tdx receipt whose quote never
-    # verified is not attested — the kind is a claim, not a proof.
-    attested = er.creditable_as_verified_work(
+    # The receipt body must be genuinely signed by the anchored evaluator key —
+    # a structurally valid receipt with no key registry, or one signed by a key
+    # nobody anchored, is not attested regardless of its attestation.kind
+    # (issue #1: a structurally valid receipt is not a genuinely signed one).
+    signature_verified = False
+    if evidence.key_registry is not None:
+        try:
+            er.verify_receipt(evidence.receipt, evidence.key_registry)
+            signature_verified = True
+        except er.EvalReceiptError:
+            signature_verified = False
+
+    # Creditable requires the verified signature, a non-"none" attested receipt,
+    # AND the raw quote verification result. A structurally valid tdx receipt
+    # whose quote never verified is not attested — the kind is a claim, not proof.
+    attested = signature_verified and er.creditable_as_verified_work(
         evidence.receipt, attestation_verified=evidence.attestation_verified is True
     )
 
@@ -423,6 +445,7 @@ def derive_candidate(evidence: CandidateEvidence, policy: TrackPolicy) -> Candid
     reproduced = _reproduction_ok(
         evidence.receipt, evidence.reproduction_receipt,
         reproduction_attestation_verified=evidence.reproduction_attestation_verified is True,
+        key_registry=evidence.key_registry,
     )
     contamination_detected = _canary_contaminated(evidence)
 

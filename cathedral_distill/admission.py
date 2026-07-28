@@ -186,9 +186,10 @@ def _admit_eval(
     def not_proven(detail: str) -> Admission:
         return Admission(KIND_EVAL, lane, receipt_id, miner, NOT_PROVEN, Decimal(0), detail)
 
-    # (1) receipt body — structure + receipt_id + present-authorization shape.
+    # (1)+(4): receipt body — structure + receipt_id + signature, resolved against
+    # the anchored key registry (never a caller-supplied key) + finalized epoch.
     try:
-        doc = _eval.validate_receipt(receipt)
+        doc = _eval.verify_receipt(receipt, key_registry, source_epoch=chain.source_epoch)
     except _eval.EvalReceiptError as exc:
         return reject(str(exc))
     miner = str(doc["miner_hotkey"])
@@ -213,10 +214,6 @@ def _admit_eval(
         )
     except _eval.EvalReceiptError as exc:
         return reject(str(exc))
-
-    # Bind to the finalized epoch, mirroring the other lanes' replay discipline.
-    if int(doc["source_epoch"]) != int(chain.source_epoch):
-        return reject("receipt source_epoch does not match the finalized epoch")
 
     # (4) replay: consume the eval id exactly once.
     if consumption_ledger is not None:
