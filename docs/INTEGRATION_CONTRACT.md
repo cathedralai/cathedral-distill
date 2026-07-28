@@ -49,6 +49,21 @@ policy_registry_release · policy_registry_digest · policy_profile_ids ·
 channel · work · assurance · lifecycle
 ```
 
+> **Cross-repo status — not yet reconciled.** "The same base receipt" above is true
+> *within this repo*: `compute_receipt.py` and `distill_receipt.py` share one set of
+> validation functions over this exact field list. It is **not yet true against
+> `cathedralai/cathedralconfidential`**, the authoritative issuer of
+> `cathedral_assurance_receipt_v2`. That repo's parser requires an **exact** top-level
+> key match with no extension point; `compute_receipt.py` adds a required `platform`
+> key that the real issuer never emits and always rejects, and `distill_receipt.py`
+> adds `evaluation` the same way. Concretely: a receipt this repo builds is refused by
+> `cathedralconfidential`'s own parser, and a receipt `cathedralconfidential` actually
+> issues is refused here (`platform` is required). `tests/test_receipt_v2_cross_repo_contract.py`
+> pins the real upstream key set and asserts this divergence explicitly, so it stays a
+> tracked fact rather than a silent one. Resolving it — extending the upstream schema
+> to accept these extensions, or giving the extended receipts their own schema name —
+> is an owner decision, not something this repo can close unilaterally.
+
 Shared disciplines (identical across all receipt families):
 
 - **Canonical bytes** — JSON, sorted keys, ASCII, `,`/`:` separators, no whitespace,

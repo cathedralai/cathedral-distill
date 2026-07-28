@@ -22,7 +22,10 @@ ENV PYTHONPATH=/opt/cathedral PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 # The CyberGym reproduce runner + binary corpus are provisioned into the image
 # (or a read-only mount) and pinned by digest. Placeholder path; the real corpus
-# is staged at build time.
+# is staged at build time. CYBERGYM_RUN_HW gates the hardware-bound backend in
+# cybergym_verifier.backend_from_env() — always on inside this dedicated image,
+# unlike the general test/dev environment where it stays off by default.
+ENV CYBERGYM_RUN_HW=1
 ENV CYBERGYM_REPRODUCE_CMD="reproduce --mode {mode} --task {task_id}"
 
 USER verifier
