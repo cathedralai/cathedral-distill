@@ -60,6 +60,38 @@ transport, and nothing else changes.
    composes into the one signed SN39 vector alongside the compute lane, with the
    contractual 10% burn.
 
+## The miner↔validator protocol
+
+`cybergym_protocol.py` is the delivery loop — pure and transport-agnostic, so a
+real HTTP/axon shim is a thin wrapper over these functions and the binaries plug
+in behind the injected backend.
+
+1. **Dispatch** — `dispatch → DispatchMessage` (validator → miner). Draws the
+   miner's sealed batch (nonce bound to its committed model) and serves only the
+   **level-appropriate context**: level 0 gets the vulnerable build alone, level 3
+   also gets the patch (`LEVEL_CONTEXT_FIELDS`). Deterministic and identical
+   across validators.
+2. **Submit** — `SubmissionEnvelope` (miner → validator). `{batch_id, task_id,
+   poc_base64, trace}`, where `trace` is a `cathedral_trace_submission_v1`
+   document. `from_json` validates it fail-closed.
+3. **Verify + score** — `process_submission`. Binds the trace to the exact PoC and
+   the challenged task, runs the differential crash test (`solved` ⟺ crashes the
+   vulnerable build, not the patched one), applies the structural trace floor, and
+   scores: level-weighted `derived_work_units` (validator-derived, never
+   miner-claimed) plus the trace/seal bonus. Off-batch, wrong-batch,
+   digest-mismatch, and malformed traces are refused; an unsolved PoC earns zero;
+   a solved-but-thin trace scores the exploit but earns no trace bonus and never
+   enters the corpus.
+4. **Corpus** — `CyberGymCorpusStore`. A verified + trainable + licenced + sealed
+   row is written as the trajectory **verbatim** — the submission format *is* the
+   dataset format, so a verified solution compounds into training data with no
+   transformation.
+
+The trace floor (`trace_submission.check_trace_quality`) is structural and
+model-free: ≥ 5 steps, `read_file` + `write_poc`, ≥ 200 reasoning tokens, ≥ 2
+`file:line` references, and no padded loops — cheap on every submission and
+un-gameable by spending compute.
+
 ## Auditing a receipt
 
 Any validator, given a `cathedral_cybergym_receipt_v1`, checks — before it
@@ -86,13 +118,17 @@ above is its writer.
 ## Implemented vs. tracked (issue #4)
 
 **Implemented and tested** (hardware-free): the chain-anchored nonce, sealed
-batch draw + commitment, differential-crash verification, level-weighted scoring,
-the signed receipt (build/verify/tamper), the durable score store, and the full
-epoch loop into the feed.
+batch draw + commitment, the **level-gated dispatch**, the **submission
+envelope**, differential-crash verification + the **structural trace floor**,
+level-weighted scoring with the trace/seal bonus, the **verified-solution corpus
+writer**, the signed receipt (build/verify/tamper) resolved through an anchored
+key registry, the durable score store, `derive_cybergym_candidate` (gates from a
+verified receipt, never asserted booleans), and the full epoch loop into the feed.
 
 **Tracked** (needs infrastructure, not code): the real vul/fix binary backend +
 the ~130 GB CyberGym dataset (behind `CYBERGYM_RUN_HW=1`, kept out of the
-hardware-free suite), the network transport for task dispatch and PoC intake, the
-holdout ingestion/refill pipeline, and merging PR #409 so persisted scores set
-weights. Frontier candidate gate derivation (`frontier.derive_candidate`) is the
-remaining wiring on the scoring side.
+hardware-free suite); the network/axon **shim** that serves `DispatchMessage` and
+feeds a POSTed `SubmissionEnvelope` into `process_submission` (the protocol itself
+is built — only the wire binding remains); the holdout ingestion/refill pipeline;
+and merging `cathedralai/cathedral` PR #409 plus a live weight-set caller so
+persisted scores set weights.
