@@ -252,16 +252,43 @@ def test_both_lanes_produce_contributions_in_one_feed():
                for w in feed["weights"])
 
 
-def test_empty_lane_leaves_pre_burn_supply_at_one():
+def test_missing_lane_share_goes_to_burn_not_the_other_lane():
+    # Safe composition (issue #1, Req 6): a missing/invalid lane's allocation is
+    # forfeited to BURN, never redistributed to the surviving lane.
     compute = lf.Lane("cathedral_confidential_tdx", Decimal("0.45"),
                       [_compute_contribution()])
     empty_distill = lf.Lane("cathedral_distill", Decimal("0.45"), [])  # no solves
     feed = lf.compose_vector([compute, empty_distill], burn_hotkey="5Burn")
-    # Pre-burn contract: rows sum to 1.0 among miners with verified work; the
-    # fixed 10% burn is applied downstream, never expressed as a variable burn %.
-    assert feed["burn_snapshot"]["forced_burn_percentage"] == pytest.approx(10.0)
+    # Distill's 0.45 rolls into burn: effective burn = base 0.10 + orphaned 0.45.
+    assert feed["burn_snapshot"]["forced_burn_percentage"] == pytest.approx(55.0)
+    assert feed["policy_metadata"]["effective_burn_allocation"] == "0.55"
+    # The compute lane keeps exactly its configured 0.45 (not the inflated 0.90):
+    # the pre-burn rows still normalize to 1.0 among miners with verified work,
+    # and the extra burn — not the compute earners — absorbs the empty lane.
     assert {w["miner_hotkey"] for w in feed["weights"]} == {"5ComputeMiner"}
     assert sum(w["weight"] for w in feed["weights"]) == pytest.approx(1.0, abs=1e-9)
+    lanes = {ln["lane"]: ln for ln in feed["lanes"]}
+    assert lanes["cathedral_distill"]["contributing"] is False
+    assert lanes["cathedral_distill"]["burned_allocation"] == "0.45"
+    assert lanes["cathedral_confidential_tdx"]["burned_allocation"] == "0"
+
+
+def test_all_lanes_missing_burns_everything():
+    # Every lane empty -> no rows, 100% burn (deterministic fail-closed).
+    feed = lf.compose_vector(
+        [lf.Lane("cathedral_confidential_tdx", Decimal("0.45"), []),
+         lf.Lane("cathedral_distill", Decimal("0.45"), [])],
+        burn_hotkey="5Burn")
+    assert feed["weights"] == []
+    assert feed["burn_snapshot"]["forced_burn_percentage"] == pytest.approx(100.0)
+
+
+def test_incoherent_allocation_config_fails_closed():
+    # allocations + burn must sum to exactly 1; a gap is a malformed config.
+    with pytest.raises(lf.LaneFeedError, match="sum to exactly 1"):
+        lf.compose_vector([lf.Lane("cathedral_confidential_tdx", Decimal("0.45"),
+                                   [_compute_contribution()])],
+                          burn_hotkey="5Burn")  # 0.45 + 0.10 != 1
 
 
 # --------------------------------------------------------------------------- #
