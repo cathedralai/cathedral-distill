@@ -89,6 +89,30 @@ def subprocess_backend(
     return run
 
 
+def backend_from_env() -> VerifierBackend | None:
+    """Select the real differential backend, gated by `CYBERGYM_RUN_HW`.
+
+    The hardware path (the ~130 GB dataset + prebuilt vul/fix binaries) is kept
+    out of the hardware-free suite: it runs only when `CYBERGYM_RUN_HW` is set.
+    Then this reads `CYBERGYM_REPRODUCE_CMD` (the `{mode}`/`{task_id}` template)
+    and optional `CYBERGYM_REPRODUCE_TIMEOUT_S`, and returns `subprocess_backend`.
+    Returns `None` when `CYBERGYM_RUN_HW` is unset, so callers keep their injected
+    (test/stub) backend and nothing hardware-bound runs by accident.
+    """
+    import os
+
+    if not os.environ.get("CYBERGYM_RUN_HW"):
+        return None
+    cmd = os.environ.get("CYBERGYM_REPRODUCE_CMD")
+    if not cmd:
+        raise VerifierError(
+            "CYBERGYM_RUN_HW is set but CYBERGYM_REPRODUCE_CMD (the reproduce "
+            "command template) is not"
+        )
+    timeout = float(os.environ.get("CYBERGYM_REPRODUCE_TIMEOUT_S", "120"))
+    return subprocess_backend(cmd, timeout_s=timeout)
+
+
 def crash_summary(result: DifferentialResult) -> str:
     """One line for an operator log. Never used for scoring — that is `solved`."""
     vul_crash = result.vul_exit_code not in CRASH_CLEAN_CODES

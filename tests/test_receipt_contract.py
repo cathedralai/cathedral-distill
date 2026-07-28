@@ -366,3 +366,19 @@ def test_regenerate_fixtures():
     (FIXTURES / "multi-lane-feed.json").write_text(json.dumps(feed, indent=2, sort_keys=True))
     assert (FIXTURES / "distill-receipt-v1.json").exists()
     assert (FIXTURES / "multi-lane-feed.json").exists()
+
+
+def test_committed_receipt_fixture_verifies_from_disk():
+    # Guard against drift: the committed fixture must still verify through the
+    # real anchored path (issue #3 — a concrete, independently-verifiable fixture).
+    receipt = json.loads((FIXTURES / "distill-receipt-v1.json").read_text())
+    verified = dr.verify_receipt(receipt, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+    assert verified["receipt_id"] == receipt["receipt_id"]
+    assert dr.lane_contribution(verified)["miner_hotkey"] == receipt["subject_hotkey"]
+
+
+def test_committed_multi_lane_feed_fixture_has_both_lanes():
+    feed = json.loads((FIXTURES / "multi-lane-feed.json").read_text())
+    lanes = {ln["lane"] for ln in feed["lanes"]}
+    assert lanes == {"cathedral_confidential_tdx", "cathedral_distill"}
+    assert sum(w["weight"] for w in feed["weights"]) == pytest.approx(1.0, abs=1e-9)
