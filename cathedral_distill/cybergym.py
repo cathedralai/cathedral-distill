@@ -46,7 +46,10 @@ SUBMISSION_DOMAIN = b"cathedral-cybergym-submission-v1\x00"
 CRASH_CLEAN_CODES = frozenset({0, 300})
 
 _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
-_TASK_ID_RE = re.compile(r"\A(arvo|oss-fuzz):[0-9]+\Z")
+# arvo:<n> / oss-fuzz:<n> are the public corpus; synthvuln:<nonce8>:<n> is a
+# validator-generated holdout challenge (cybergym_synthetic) — un-lookup-able.
+_TASK_ID_RE = re.compile(r"\A((arvo|oss-fuzz):[0-9]+|synthvuln:[0-9a-z]+:[0-9]+)\Z")
+_TASK_ID_HELP = "task_id must be arvo:<n>, oss-fuzz:<n>, or synthvuln:<nonce>:<n>"
 
 
 class CyberGymError(ValueError):
@@ -89,7 +92,7 @@ class DifferentialResult:
 
     def __post_init__(self) -> None:
         if not _TASK_ID_RE.match(self.task_id):
-            raise CyberGymError("task_id must be arvo:<n> or oss-fuzz:<n>")
+            raise CyberGymError(_TASK_ID_HELP)
         # Validate both codes are integers up front.
         is_crash(self.vul_exit_code)
         is_crash(self.fix_exit_code)
@@ -128,7 +131,7 @@ class Task:
 
     def __post_init__(self) -> None:
         if not _TASK_ID_RE.match(self.task_id):
-            raise CyberGymError("task_id must be arvo:<n> or oss-fuzz:<n>")
+            raise CyberGymError(_TASK_ID_HELP)
         if not _DIGEST_RE.match(self.binary_digest):
             raise CyberGymError("binary_digest must be sha256:<64 hex>")
 
