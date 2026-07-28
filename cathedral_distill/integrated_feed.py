@@ -83,6 +83,7 @@ def verify_lane_receipt(
     now_iso: str | None = None,
     gpu_attestation_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
     cpu_quote_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
+    consumption_ledger: Any = None,
     allowed_measurements: frozenset[str] | set[str] | None = None,
     allowed_tcb_statuses: frozenset[str] | set[str] | None = None,
     allowed_advisories: frozenset[str] | set[str] | None = None,
@@ -141,6 +142,23 @@ def verify_lane_receipt(
     ) as exc:
         miner = _raw(receipt, "subject_hotkey", "miner_hotkey")
         return ReceiptDecision(lane, kind, receipt_id, miner, FAIL, Decimal(0), str(exc))
+
+    # Replay: consume the receipt_id exactly once. A receipt is derived from its
+    # canonical body (nonce + epoch), so consuming its id once consumes the nonce
+    # once — a resubmission of an already-credited receipt fails closed as FAIL.
+    if consumption_ledger is not None:
+        from cathedral_distill.consumption_ledger import ReplayError
+
+        try:
+            consumption_ledger.consume(
+                contribution["receipt_id"], kind=f"{kind}_receipt_id",
+                source_epoch=source_epoch,
+            )
+        except ReplayError as exc:
+            return ReceiptDecision(
+                lane, kind, contribution["receipt_id"], contribution["miner_hotkey"],
+                FAIL, Decimal(0), str(exc),
+            )
 
     return ReceiptDecision(
         lane, kind,
