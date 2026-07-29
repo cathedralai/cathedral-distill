@@ -89,6 +89,92 @@ def subprocess_backend(
     return run
 
 
+def sandboxed_subprocess_backend(
+    reproduce_cmd: str,
+    *,
+    timeout_s: float = 120.0,
+    cpu_seconds: int = 60,
+    memory_bytes: int = 2 * 1024 * 1024 * 1024,
+) -> VerifierBackend:
+    """`subprocess_backend` hardened for running adversarial PoCs against a
+    deliberately-crashing binary. The PoC is attacker input, so the child runs:
+
+      * with a **scrubbed environment** — only a minimal PATH and the CUDA/TRITON
+        vars a toolchain needs, never the validator's secrets (SparkProof SEC-4:
+        untrusted candidate code must not read `os.environ`);
+      * under **resource limits** — CPU time, address space, and no core dumps, so
+        a runaway or memory-bomb PoC cannot exhaust the host;
+      * with a **wall-clock timeout** mapped to the clean timeout code.
+
+    Network isolation (no egress) is the remaining control and is enforced at the
+    container/namespace layer around this process (run it inside `--network none`
+    / a seccomp-net-denied sandbox); it is documented here as required, not
+    something a bare subprocess can guarantee.
+    """
+    import os
+    import resource
+    import shlex
+
+    safe_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    for keep in ("LANG", "LC_ALL"):
+        if keep in os.environ:
+            safe_env[keep] = os.environ[keep]
+    for prefix in ("CUDA_", "TRITON_"):
+        for k, v in os.environ.items():
+            if k.startswith(prefix):
+                safe_env[k] = v
+
+    def _limits() -> None:  # pragma: no cover - runs in the child, before exec
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        os.setsid()  # own session/process group so a timeout kills the whole tree
+
+    def run(task_id: str, poc_bytes: bytes, mode: str) -> int:  # pragma: no cover
+        if mode not in ("vul", "fix"):
+            raise VerifierError(f"unknown mode {mode!r}")
+        argv = shlex.split(reproduce_cmd.format(mode=mode, task_id=task_id))
+        try:
+            proc = subprocess.run(
+                argv, input=poc_bytes, capture_output=True, timeout=timeout_s,
+                env=safe_env, preexec_fn=_limits, close_fds=True,
+            )
+        except subprocess.TimeoutExpired:
+            return TIMEOUT_CLEAN_CODE
+        return proc.returncode
+
+    return run
+
+
+def backend_from_env() -> VerifierBackend | None:
+    """Select the real differential backend, gated by `CYBERGYM_RUN_HW`.
+
+    The hardware path (the ~130 GB dataset + prebuilt vul/fix binaries) is kept
+    out of the hardware-free suite: it runs only when `CYBERGYM_RUN_HW` is set.
+    Then this reads `CYBERGYM_REPRODUCE_CMD` (the `{mode}`/`{task_id}` template)
+    and optional `CYBERGYM_REPRODUCE_TIMEOUT_S`, and returns `subprocess_backend`.
+    Returns `None` when `CYBERGYM_RUN_HW` is unset, so callers keep their injected
+    (test/stub) backend and nothing hardware-bound runs by accident.
+    """
+    import os
+
+    if not os.environ.get("CYBERGYM_RUN_HW"):
+        return None
+    cmd = os.environ.get("CYBERGYM_REPRODUCE_CMD")
+    if not cmd:
+        raise VerifierError(
+            "CYBERGYM_RUN_HW is set but CYBERGYM_REPRODUCE_CMD (the reproduce "
+            "command template) is not"
+        )
+    timeout = float(os.environ.get("CYBERGYM_REPRODUCE_TIMEOUT_S", "120"))
+    # Default to the hardened sandbox for the real adversarial path; an operator
+    # can opt out with CYBERGYM_SANDBOX=0 (e.g. when an outer container already
+    # provides isolation).
+    if os.environ.get("CYBERGYM_SANDBOX", "1") not in ("0", "false", "no", ""):
+        return sandboxed_subprocess_backend(cmd, timeout_s=timeout)
+    return subprocess_backend(cmd, timeout_s=timeout)
+
+
 def crash_summary(result: DifferentialResult) -> str:
     """One line for an operator log. Never used for scoring — that is `solved`."""
     vul_crash = result.vul_exit_code not in CRASH_CLEAN_CODES

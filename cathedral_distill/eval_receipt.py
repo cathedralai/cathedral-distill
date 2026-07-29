@@ -31,13 +31,26 @@ eval set's job, and it is why the set is sealed rather than merely hashed.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
-SCHEMA = "cathedral_ml_eval_receipt_v1"
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
+
+# v2 adds `signing_key_id` so the receipt's own signature can be cryptographically
+# verified (issue #1): v1 carried a `signature` object but no way to resolve WHICH
+# key to check it against, so nothing ever verified it — a forged signature and a
+# genuine one were structurally indistinguishable. The bump means a stray v1
+# receipt fails loudly (missing key) instead of being silently accepted unsigned.
+SCHEMA = "cathedral_ml_eval_receipt_v2"
 AUTHORIZATION_SCHEMA = "cathedral_ml_eval_authorization_v1"
 
 RECEIPT_DOMAIN = b"cathedral-ml-eval-receipt-v1\x00"
@@ -75,6 +88,7 @@ MAX_ITEMS = 65_536
 _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 _DECIMAL_RE = re.compile(r"\A(?:0|[1-9][0-9]{0,29})(?:\.[0-9]{1,12})?\Z")
 _REPORT_DATA_RE = re.compile(r"\A[0-9a-f]{128}\Z")
+_ISSUED_AT_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 
 _RECEIPT_KEYS = frozenset(
     {
@@ -98,6 +112,7 @@ _RECEIPT_KEYS = frozenset(
         "eval_authorization",
         "attestation",
         "receipt_id",
+        "signing_key_id",
         "signature",
     }
 )
@@ -147,8 +162,21 @@ _ATTESTATION_KEYS = frozenset(
     {"kind", "evidence_digest", "evidence_uri", "policy_digest", "report_data_hex"}
 )
 _SIGNATURE_KEYS = frozenset({"algorithm", "value_base64"})
+# The authorization is the evaluator's signed grant. It must bind, and be verified
+# against, every identity + freshness field the run claims — evaluator, miner, eval
+# id, run nonce, source epoch, and a bounded block window — so a receipt cannot
+# borrow an authorization issued for a different miner, epoch, or window (issue #1).
 _AUTHORIZATION_KEYS = frozenset(
-    {"schema", "eval_id", "validator_hotkey", "miner_hotkey", "signature"}
+    {
+        "schema", "eval_id", "validator_hotkey", "miner_hotkey",
+        "nonce_base64", "source_epoch", "valid_from_block", "valid_until_block",
+        "signing_key_id", "signature",
+    }
+)
+# The fields whose authorization value must equal the receipt's own value.
+AUTHORIZATION_BOUND_FIELDS = (
+    "eval_id", "validator_hotkey", "miner_hotkey", "nonce_base64",
+    "source_epoch", "valid_from_block", "valid_until_block",
 )
 
 
@@ -415,6 +443,8 @@ def validate_receipt(document: Any) -> Mapping[str, Any]:
     receipt = _exact_keys(document, _RECEIPT_KEYS, "eval receipt")
     if receipt["schema"] != SCHEMA:
         raise EvalReceiptError("unsupported eval receipt schema")
+    if not isinstance(receipt["signing_key_id"], str) or not receipt["signing_key_id"]:
+        raise EvalReceiptError("signing_key_id must be a non-empty string")
     encoded = canonical_json(receipt)
     if len(encoded) > MAX_RECEIPT_BYTES:
         raise EvalReceiptError("eval receipt exceeds maximum size")
@@ -440,22 +470,215 @@ def validate_receipt(document: Any) -> Mapping[str, Any]:
                 "attestation report_data does not bind this receipt"
             )
 
+    # The authorization is optional structurally (a `none`-attestation harness run
+    # carries no grant), but when present it must be well-formed. Its signature and
+    # binding are verified on the reward-bearing path by `verify_authorization`.
+    if receipt["eval_authorization"] is not None:
+        validate_authorization(receipt["eval_authorization"])
+
     _exact_keys(receipt["signature"], _SIGNATURE_KEYS, "signature")
     if receipt["receipt_id"] != receipt_id_for(receipt):
         raise EvalReceiptError("receipt_id does not match receipt contents")
     return receipt
 
 
-def creditable_as_verified_work(document: Mapping[str, Any]) -> bool:
+# --------------------------------------------------------------------------- #
+# Build + sign, and independent signature verification (issue #1)
+# --------------------------------------------------------------------------- #
+
+def build_receipt(
+    body: Mapping[str, Any], private_key: Ed25519PrivateKey, *, signing_key_id: str
+) -> dict[str, Any]:
+    """Assemble and sign a receipt from a body that omits receipt_id and signature.
+
+    Mirrors compute/distill/cybergym's `build_receipt`: adds `signing_key_id`,
+    computes `receipt_id` over the body (which now includes `signing_key_id`),
+    then Ed25519-signs everything except `signature` itself — domain-separated
+    under `RECEIPT_DOMAIN` so this signature can never be replayed as a signed
+    object of another kind (an authorization, a key registry, ...).
+    """
+    doc = {k: v for k, v in body.items() if k not in ("receipt_id", "signing_key_id", "signature")}
+    doc["signing_key_id"] = signing_key_id
+    doc["receipt_id"] = receipt_id_for(doc)
+    signed = {k: v for k, v in doc.items() if k != "signature"}
+    signature = private_key.sign(RECEIPT_DOMAIN + canonical_json(signed))
+    doc["signature"] = {
+        "algorithm": "ed25519",
+        "value_base64": base64.b64encode(signature).decode("ascii"),
+    }
+    return doc
+
+
+def verify_receipt(
+    document: Any, key_registry: Any, *, source_epoch: int | None = None
+) -> Mapping[str, Any]:
+    """Independently verify a receipt's own signature. Fails closed on any check.
+
+    Structure -> receipt_id recomputation (inside `validate_receipt`) -> key
+    resolution -> Ed25519 signature, mirroring compute/distill/cybergym's
+    discipline. `key_registry` resolves `signing_key_id` to the anchored public
+    key (`key_registry.resolve(key_id, at=issued_at)`); the verifier never takes
+    a caller-supplied key, so a receipt can never carry its own verifying key.
+
+    `source_epoch`, when supplied, additionally binds the receipt to the
+    authorized epoch (the same replay discipline the other lanes apply); omitted
+    by callers that verify below the epoch layer (e.g. `frontier.derive_candidate`,
+    which has no epoch concept — epoch replay-binding is enforced upstream, in
+    `admission.verify_admission`, before evidence reaches the frontier).
+
+    This proves only that the receipt BODY was genuinely signed by the anchored
+    evaluator key. The evaluator authorization, the raw attestation quote, and
+    eval-id replay are separate checks (`verify_authorization`, the injected
+    attestation result, the consumption ledger).
+    """
+    receipt = validate_receipt(document)
+    issued_at = str(receipt["issued_at"])
+    if _ISSUED_AT_RE.fullmatch(issued_at) is None:
+        raise EvalReceiptError("issued_at must be canonical UTC time")
+    at = datetime.strptime(issued_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    try:
+        public_key = key_registry.resolve(receipt["signing_key_id"], at=at)
+    except EvalReceiptError:
+        raise
+    except Exception as exc:
+        raise EvalReceiptError(f"signing key could not be resolved: {exc}") from exc
+    sig = receipt["signature"]
+    if sig["algorithm"] != "ed25519":
+        raise EvalReceiptError("unsupported signature algorithm")
+    signed = {k: v for k, v in receipt.items() if k != "signature"}
+    try:
+        public_key.verify(
+            base64.b64decode(sig["value_base64"]), RECEIPT_DOMAIN + canonical_json(signed)
+        )
+    except (InvalidSignature, ValueError, TypeError) as exc:
+        raise EvalReceiptError("signature does not verify") from exc
+    if source_epoch is not None and int(receipt["source_epoch"]) != int(source_epoch):
+        raise EvalReceiptError("receipt source_epoch does not match the authorized epoch")
+    return receipt
+
+
+def creditable_as_verified_work(
+    document: Mapping[str, Any], *, attestation_verified: bool
+) -> bool:
     """Whether this receipt may contribute verified work units.
 
     Deliberately conservative and deliberately separate from `validate_receipt`:
-    a structurally perfect receipt with no quote is still worth zero. This is
-    the same stance VerifyML takes, and it is the line that keeps the trust
-    claim honest.
+    a structurally perfect receipt with no quote is still worth zero. It requires
+    BOTH a non-"none" attestation kind AND a **successful raw-quote verification
+    result** (`attestation_verified`) supplied by the verifier — the receipt's
+    `attestation.kind` is a claim, not a proof, so a structurally valid `tdx`
+    receipt whose quote never verified is not creditable. `attestation_verified`
+    is the injected Polaris/TDX verifier's actual result, never inferred from the
+    receipt. This is the line that keeps the trust claim honest.
     """
+    if attestation_verified is not True:
+        return False
     try:
         receipt = validate_receipt(document)
     except EvalReceiptError:
         return False
     return str(receipt["attestation"]["kind"]) != "none"
+
+
+# --------------------------------------------------------------------------- #
+# The evaluator authorization — a signed grant, verified and bound (issue #1)
+# --------------------------------------------------------------------------- #
+
+def validate_authorization(value: Any) -> Mapping[str, Any]:
+    """Structural validation of an `eval_authorization` grant. Fails closed."""
+    auth = _exact_keys(value, _AUTHORIZATION_KEYS, "eval_authorization")
+    if auth["schema"] != AUTHORIZATION_SCHEMA:
+        raise EvalReceiptError("unsupported eval_authorization schema")
+    for key in ("eval_id", "validator_hotkey", "miner_hotkey", "nonce_base64", "signing_key_id"):
+        if not isinstance(auth[key], str) or not auth[key]:
+            raise EvalReceiptError(f"eval_authorization.{key} must be a non-empty string")
+    _count(auth["source_epoch"], "eval_authorization.source_epoch", maximum=2**53)
+    first = _count(auth["valid_from_block"], "eval_authorization.valid_from_block", maximum=2**53)
+    last = _count(auth["valid_until_block"], "eval_authorization.valid_until_block", maximum=2**53)
+    if last <= first:
+        raise EvalReceiptError("eval_authorization.valid_until_block must exceed valid_from_block")
+    _exact_keys(auth["signature"], _SIGNATURE_KEYS, "eval_authorization.signature")
+    return auth
+
+
+def authorization_signing_bytes(auth: Mapping[str, Any]) -> bytes:
+    """The exact bytes the evaluator signs: the grant minus its signature, under
+    the authorization domain separator (so it can never be replayed as any other
+    signed object)."""
+    body = {k: v for k, v in auth.items() if k != "signature"}
+    return AUTHORIZATION_DOMAIN + canonical_json(body)
+
+
+def sign_authorization(
+    body: Mapping[str, Any], private_key: Ed25519PrivateKey, *, signing_key_id: str
+) -> dict[str, Any]:
+    """Sign an authorization grant (evaluator / operator tooling). `body` carries
+    every field except `signing_key_id` and `signature`, which are added here."""
+    doc = {k: v for k, v in body.items() if k not in ("signing_key_id", "signature")}
+    doc["signing_key_id"] = signing_key_id
+    signature = private_key.sign(AUTHORIZATION_DOMAIN + canonical_json(doc))
+    doc["signature"] = {
+        "algorithm": "ed25519",
+        "value_base64": base64.b64encode(signature).decode("ascii"),
+    }
+    return doc
+
+
+def build_authorization(
+    receipt: Mapping[str, Any], private_key: Ed25519PrivateKey, *, signing_key_id: str
+) -> dict[str, Any]:
+    """Build and sign the grant that authorizes exactly this receipt's run — its
+    bound fields are copied from the receipt, so a well-formed grant binds by
+    construction. For tests and the evaluator that issues authorizations."""
+    body = {"schema": AUTHORIZATION_SCHEMA}
+    body.update({field: receipt[field] for field in AUTHORIZATION_BOUND_FIELDS})
+    return sign_authorization(body, private_key, signing_key_id=signing_key_id)
+
+
+def verify_authorization(
+    receipt: Mapping[str, Any],
+    key_registry: Any,
+    *,
+    current_block: int,
+    at: Any,
+) -> Mapping[str, Any]:
+    """Verify the receipt's evaluator authorization. Fails closed on any check.
+
+    A creditable eval run must carry a grant that (a) binds every identity and
+    freshness field to this exact receipt, (b) is Ed25519-signed by the evaluator
+    key the anchored registry resolves — never a key the grant supplies — and (c)
+    authorizes the *finalized* block, i.e. `current_block` lies inside the signed
+    `[valid_from_block, valid_until_block)` window. The signing key is resolved via
+    `key_registry.resolve(signing_key_id, at=at)`.
+    """
+    auth = receipt.get("eval_authorization") if isinstance(receipt, Mapping) else None
+    if auth is None:
+        raise EvalReceiptError("eval_authorization is required on the reward-bearing path")
+    auth = validate_authorization(auth)
+
+    # Bind every field to the receipt — a grant for another miner/epoch/window is refused.
+    for field in AUTHORIZATION_BOUND_FIELDS:
+        if auth[field] != receipt.get(field):
+            raise EvalReceiptError(f"eval_authorization.{field} does not match the receipt")
+
+    # Resolve the evaluator's key from the anchored registry (never grant-supplied).
+    try:
+        public_key = key_registry.resolve(auth["signing_key_id"], at=at)
+    except Exception as exc:
+        raise EvalReceiptError(f"authorization signing key could not be resolved: {exc}") from exc
+    sig = auth["signature"]
+    if sig["algorithm"] != "ed25519":
+        raise EvalReceiptError("unsupported eval_authorization signature algorithm")
+    try:
+        public_key.verify(
+            base64.b64decode(sig["value_base64"]), authorization_signing_bytes(auth)
+        )
+    except (InvalidSignature, ValueError, TypeError) as exc:
+        raise EvalReceiptError("eval_authorization signature does not verify") from exc
+
+    # Finalized chain context: the run must fall inside the authorized block window.
+    if isinstance(current_block, bool) or not isinstance(current_block, int) or current_block < 0:
+        raise EvalReceiptError("current_block must be a non-negative integer")
+    if not (auth["valid_from_block"] <= current_block < auth["valid_until_block"]):
+        raise EvalReceiptError("current_block is outside the authorized block window")
+    return auth

@@ -1,0 +1,216 @@
+"""A runnable CyberGym validator service — the transport-agnostic delivery loop.
+
+`cybergym_protocol` is pure functions; `cybergym_validator.run_epoch` is the pure
+scorer. This is the missing stateful glue that makes them a *running* validator: it
+serves each miner its sealed batch, accepts POSTed submissions, verifies them into
+the corpus, and — at epoch close — scores the collected solves through `run_epoch`,
+persists them to the `cybergym_scores` table, and composes the lane contribution.
+
+    validator.dispatch_for(miner, commitment)  → DispatchMessage   (serve a batch)
+    validator.submit(envelope)                 → SubmissionOutcome  (verify → corpus)
+    validator.score_epoch(issued_at)           → [MinerResult]      (score → persist)
+    validator.compose_lane(allocation)         → Lane               (→ compose_vector)
+
+`handle_dispatch` / `handle_submit` are transport-agnostic (dict in, dict out) so
+any wire binding is a thin wrapper — `cybergym_http` is the stdlib one. The crash
+backend is injected, so the whole service runs end-to-end with no CyberGym binaries.
+"""
+from __future__ import annotations
+
+import base64
+from dataclasses import dataclass, field
+from decimal import Decimal
+from typing import Any, Mapping
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level
+from cathedral_distill.cybergym_holdout import Holdout
+from cathedral_distill.cybergym_protocol import (
+    DispatchMessage,
+    ProtocolError,
+    SubmissionEnvelope,
+    SubmissionOutcome,
+    dispatch,
+    process_submission,
+)
+from cathedral_distill.cybergym_scores import CyberGymScoreStore
+from cathedral_distill.cybergym_validator import ChainContext, MinerCommit, MinerResult, run_epoch
+from cathedral_distill.lane_feed import Lane, LaneContribution
+from cathedral_distill.trace_submission import TraceQualityPolicy
+
+CYBERGYM_LANE = "cathedral_cybergym"
+
+
+@dataclass
+class _MinerState:
+    model_commitment: str
+    dispatch: DispatchMessage
+    pocs: dict[str, bytes] = field(default_factory=dict)  # task_id -> solved PoC bytes
+
+
+class CyberGymService:
+    """A running CyberGym validator over one holdout + finalized chain context.
+
+    Transport-free: call the methods directly, or mount `handle_dispatch`/
+    `handle_submit` behind any HTTP/axon shim. State is per-epoch and in memory —
+    a production deployment persists the dispatched batches; here they live for the
+    life of the service, which is one epoch.
+    """
+
+    def __init__(
+        self,
+        holdout: Holdout,
+        chain: ChainContext,
+        *,
+        backend,
+        corpus_store,
+        score_store: CyberGymScoreStore,
+        validator_hotkey: str,
+        private_key: Ed25519PrivateKey,
+        signing_key_id: str,
+        batch_size: int,
+        cutoff,
+        as_of,
+        level_weights: Mapping[Level, Decimal] = DEFAULT_LEVEL_WEIGHTS,
+        trace_policy: TraceQualityPolicy = TraceQualityPolicy(),
+    ) -> None:
+        self.holdout = holdout
+        self.chain = chain
+        self._backend = backend
+        self._corpus = corpus_store
+        self._scores = score_store
+        self._validator_hotkey = validator_hotkey
+        self._private_key = private_key
+        self._signing_key_id = signing_key_id
+        self._batch_size = batch_size
+        self._cutoff = cutoff
+        self._as_of = as_of
+        self._weights = level_weights
+        self._trace_policy = trace_policy
+        self._miners: dict[str, _MinerState] = {}
+        self._by_batch: dict[str, str] = {}  # batch_id -> miner_hotkey
+        self._results: list[MinerResult] = []
+
+    # -- dispatch (validator -> miner) ------------------------------------- #
+    def dispatch_for(self, miner_hotkey: str, model_commitment: str) -> DispatchMessage:
+        """Draw and serve this miner's sealed batch, remembering it for `submit`."""
+        message = dispatch(
+            self.holdout.pool, self.chain,
+            miner_hotkey=miner_hotkey, model_commitment=model_commitment,
+            cutoff=self._cutoff, as_of=self._as_of, batch_size=self._batch_size,
+            context_provider=self.holdout.context_provider,
+        )
+        self._miners[miner_hotkey] = _MinerState(model_commitment, message)
+        self._by_batch[message.batch_id] = miner_hotkey
+        return message
+
+    # -- submit (miner -> validator) --------------------------------------- #
+    def submit(self, envelope: SubmissionEnvelope) -> SubmissionOutcome:
+        """Verify one submission against the batch we dispatched, and corpus it."""
+        miner_hotkey = self._by_batch.get(envelope.batch_id)
+        if miner_hotkey is None:
+            raise ProtocolError("submission references an unknown or expired batch")
+        if envelope.miner_hotkey != miner_hotkey:
+            raise ProtocolError("submission hotkey does not own this batch")
+        state = self._miners[miner_hotkey]
+        outcome = process_submission(
+            envelope, state.dispatch, self._backend,
+            trace_policy=self._trace_policy, weights=self._weights,
+        )
+        self._corpus.record(outcome)
+        if outcome.solved:
+            # keep the solved PoC bytes so score_epoch can score the batch
+            try:
+                state.pocs[envelope.task_id] = base64.b64decode(envelope.poc_base64, validate=True)
+            except (ValueError, TypeError) as exc:  # pragma: no cover - process_submission already checked
+                raise ProtocolError("PoC is not valid base64") from exc
+        return outcome
+
+    # -- transport-agnostic handlers --------------------------------------- #
+    def handle_dispatch(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """{miner_hotkey, model_commitment} -> DispatchMessage dict (or {error})."""
+        if not isinstance(request, Mapping):
+            return {"error": "dispatch request must be an object"}
+        miner = request.get("miner_hotkey")
+        commitment = request.get("model_commitment")
+        if not isinstance(miner, str) or not miner:
+            return {"error": "miner_hotkey is required"}
+        if not isinstance(commitment, str) or not commitment:
+            return {"error": "model_commitment is required"}
+        try:
+            return self.dispatch_for(miner, commitment).to_dict()
+        except (ProtocolError, ValueError) as exc:
+            return {"error": str(exc)}
+
+    def handle_submit(self, body: bytes | str) -> dict[str, Any]:
+        """A POSTed SubmissionEnvelope -> a verdict dict (never raises)."""
+        try:
+            envelope = SubmissionEnvelope.from_json(body)
+            outcome = self.submit(envelope)
+        except (ProtocolError, ValueError) as exc:
+            return {"accepted": False, "error": str(exc)}
+        return {
+            "accepted": True,
+            "task_id": outcome.task_id,
+            "solved": outcome.solved,
+            "trainable": outcome.trainable,
+            "reason": outcome.reason,
+            "work_units": str(outcome.work_units),
+            "bonus": outcome.bonus,
+            "poc_sha256": outcome.poc_sha256,
+        }
+
+    # -- scoring + composition (epoch close) ------------------------------- #
+    def score_epoch(self, *, issued_at: str) -> list[MinerResult]:
+        """Score every dispatched miner on its collected solves and persist.
+
+        Reuses the canonical `run_epoch` scorer (it re-draws each miner's batch
+        from the same chain-anchored nonce and re-verifies, so the persisted score
+        is the one any peer validator would derive). Records to `cybergym_scores`.
+        """
+        # Only miners with at least one verified solve are scored — a miner that
+        # solved nothing has no rewardable units and no receipt to persist.
+        miners = [
+            MinerCommit(miner_hotkey=hk, model_commitment=st.model_commitment, pocs=dict(st.pocs))
+            for hk, st in self._miners.items() if st.pocs
+        ]
+        self._results = run_epoch(
+            miners, self.holdout.pool, self.chain,
+            validator_hotkey=self._validator_hotkey, private_key=self._private_key,
+            signing_key_id=self._signing_key_id, backend=self._backend,
+            score_store=self._scores, cutoff=self._cutoff, as_of=self._as_of,
+            issued_at=issued_at, batch_size=self._batch_size, level_weights=self._weights,
+        )
+        return self._results
+
+    def compose_lane(self, *, allocation: Decimal, lane_id: str = CYBERGYM_LANE) -> Lane:
+        """Build this epoch's lane from the persisted verified scores."""
+        return compose_scores_lane(
+            self._scores, self.chain.source_epoch, allocation=allocation, lane_id=lane_id
+        )
+
+
+def compose_scores_lane(
+    score_store: CyberGymScoreStore,
+    epoch: int,
+    *,
+    allocation: Decimal,
+    lane_id: str = CYBERGYM_LANE,
+) -> Lane:
+    """Turn the persisted `cybergym_scores` for an epoch into a `lane_feed.Lane`.
+
+    This is the store->compose bridge: `score_store` is the durable writer the
+    external mechanism adapter reads; this reads the same rows into the in-repo
+    `compose_vector` path, so a validator can compose the signed vector directly
+    from what it persisted. A miner with zero verified units contributes nothing.
+    """
+    contributions = [
+        LaneContribution(row["miner_hotkey"], row["receipt_id"], Decimal(row["earned_units"]))
+        for row in score_store.contributions(epoch)
+        if Decimal(row["earned_units"]) > 0
+    ]
+    return Lane(lane_id, allocation, contributions)
+
+
+__all__ = ["CyberGymService", "compose_scores_lane", "CYBERGYM_LANE"]

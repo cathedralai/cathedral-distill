@@ -8,6 +8,18 @@ SN39 feed. This is not a separate publishing system: the Distill receipt is a
 **versioned extension** of `cathedral_assurance_receipt_v2`, and Distill
 contributions compose into the one signed vector alongside compute.
 
+> **Cross-repo status — not yet reconciled.** The field-by-field mapping below
+> (§1) is real: every shared field carries the same name and meaning as
+> `cathedralai/cathedralconfidential`'s actual `cathedral_assurance_receipt_v2`
+> (`tests/test_receipt_v2_cross_repo_contract.py` pins and checks this). What is
+> **not yet true** is that a Distill receipt, as a whole document, passes that
+> repo's own parser: its `evaluation` block is an additive top-level key, and
+> `cathedralconfidential`'s parser requires an exact top-level key match with no
+> extension point — so it rejects any receipt carrying `evaluation`, the same way
+> it rejects the Compute receipt's `platform` key (see `docs/INTEGRATION_CONTRACT.md`
+> §"Cross-repo status"). "The same assurance receipt" is the shared-field design,
+> not (yet) a receipt that validates against both implementations.
+
 Reference artifacts (`cathedralai/cathedralconfidential`):
 
 - compute receipt fixture — `tests/fixtures/assurance-receipt-v2.json`

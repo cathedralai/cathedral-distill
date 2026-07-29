@@ -8,6 +8,7 @@
     {
       "allocation": "0.45",
       "audit_root": "sha256:6ea3827f29eadcedc858b148c71a934b4f142493f34792fb2350ee30d88b3988",
+      "burned_allocation": "0",
       "contributing": true,
       "contributions": [
         {
@@ -21,6 +22,7 @@
     {
       "allocation": "0.45",
       "audit_root": "sha256:9e1c4b880de034a2d1eabea37bc9f00bb6b345e840bf0bb48868060479c30670",
+      "burned_allocation": "0",
       "contributing": true,
       "contributions": [
         {
@@ -33,13 +35,14 @@
     }
   ],
   "policy_metadata": {
+    "base_burn_allocation": "0.10",
     "composer": "cathedral_distill.lane_feed",
-    "fixed_burn_allocation": "0.10",
+    "effective_burn_allocation": "0.10",
     "pre_burn_supply": "1.0",
     "signed_by_publisher": false
   },
   "pre_burn": true,
-  "schema": "cathedral_lane_feed_v1",
+  "schema": "cathedral_lane_feed_v2",
   "weights": [
     {
       "base_component": 0.0,

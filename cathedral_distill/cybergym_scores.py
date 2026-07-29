@@ -34,7 +34,9 @@ class CyberGymScoreStore:
 
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
-        self._connection = sqlite3.connect(db_path)
+        # check_same_thread=False so a server thread can persist scores; the
+        # single-threaded service serialises access (no concurrent writers).
+        self._connection = sqlite3.connect(db_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA foreign_keys=ON")
@@ -106,6 +108,20 @@ class CyberGymScoreStore:
                 (epoch,),
             )
         }
+
+    def contributions(self, epoch: int) -> list[dict[str, object]]:
+        """Verified rows for an epoch, carrying the receipt_id — the in-repo
+        `compose_vector` bridge needs `(miner_hotkey, receipt_id, earned_units)`
+        to build lane contributions auditable back to receipts."""
+        return [
+            {"miner_hotkey": row["miner_hotkey"], "receipt_id": row["receipt_id"],
+             "earned_units": row["earned_units"]}
+            for row in self._connection.execute(
+                "SELECT miner_hotkey, receipt_id, earned_units FROM cybergym_scores "
+                "WHERE epoch=? ORDER BY miner_hotkey",
+                (epoch,),
+            )
+        ]
 
     def close(self) -> None:
         self._connection.close()

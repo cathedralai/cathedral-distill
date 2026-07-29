@@ -125,10 +125,18 @@ writer**, the signed receipt (build/verify/tamper) resolved through an anchored
 key registry, the durable score store, `derive_cybergym_candidate` (gates from a
 verified receipt, never asserted booleans), and the full epoch loop into the feed.
 
-**Tracked** (needs infrastructure, not code): the real vul/fix binary backend +
-the ~130 GB CyberGym dataset (behind `CYBERGYM_RUN_HW=1`, kept out of the
-hardware-free suite); the network/axon **shim** that serves `DispatchMessage` and
-feeds a POSTed `SubmissionEnvelope` into `process_submission` (the protocol itself
-is built — only the wire binding remains); the holdout ingestion/refill pipeline;
-and merging `cathedralai/cathedral` PR #409 plus a live weight-set caller so
-persisted scores set weights.
+The lane now also **runs end to end as a service**: `cybergym_holdout.load_holdout`
+ingests a disclosed-vulnerability manifest into the drawable `TaskPool` (with the
+level-gated context), `cybergym_service.CyberGymService` serves each miner its
+sealed batch and accepts POSTed submissions (dispatch → verify → corpus → score →
+persist), `cybergym_http` is a dependency-free stdlib HTTP binding of the two
+routes, and `cybergym_service.compose_scores_lane` turns the persisted
+`cybergym_scores` into a `lane_feed` contribution. The whole loop is exercised over
+a live HTTP server against the injected crash backend in `tests/test_cybergym_service.py`.
+
+**Tracked** (needs infrastructure or a cross-repo decision, not local code): the
+real vul/fix binary backend + the ~130 GB CyberGym dataset (plugs in behind the
+injected `cybergym_verifier.subprocess_backend`; only binaries/dataset remain); the
+production holdout **refill** feed of fresh disclosures (the ingestion loader is
+built; the source of new vulns is infrastructure); and merging `cathedralai/cathedral`
+PR #409 plus a live weight-set caller so persisted scores set weights on chain.

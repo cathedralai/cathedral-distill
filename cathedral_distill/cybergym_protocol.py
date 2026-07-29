@@ -300,7 +300,10 @@ class CyberGymCorpusStore:
     def __init__(self, db_path: str) -> None:
         import sqlite3
         self._sqlite = sqlite3
-        self._connection = sqlite3.connect(db_path)
+        # check_same_thread=False so the store is usable from a server thread that
+        # did not open it; requests are serialised by the single-threaded shim, so
+        # there is no concurrent-write hazard.
+        self._connection = sqlite3.connect(db_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute(

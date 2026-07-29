@@ -331,3 +331,36 @@ def test_raw_candidate_is_refused_by_submit():
     policy = cv.cybergym_track_policy()
     dec = fr.Frontier([policy]).submit(policy.track, raw)
     assert not dec.crowned and dec.reason == "unverified_candidate"
+
+
+def test_full_epoch_is_byte_identical_on_re_run(tmp_path):
+    import json
+
+    def _epoch(tag):
+        store = CyberGymScoreStore(str(tmp_path / f"scores-{tag}.sqlite"))
+        chain = cv.ChainContext(block=100, block_hash=BLOCK_HASH, network="finney", netuid=39,
+                                source_epoch=SOURCE_EPOCH, valid_from_block=100, valid_until_block=460)
+        miners = [
+            cv.MinerCommit(miner_hotkey="5Alice", model_commitment=_digest("alice"),
+                           pocs={"arvo:1": b"a1", "arvo:2": b"a2"}),
+            cv.MinerCommit(miner_hotkey="5Bob", model_commitment=_digest("bob"),
+                           pocs={"arvo:1": b"b1"}),
+        ]
+        results = cv.run_epoch(
+            miners, _pool(), chain, validator_hotkey="5Validator", private_key=KEY,
+            signing_key_id="cybergym-test-1", backend=_backend({"arvo:1", "arvo:2"}),
+            score_store=store, cutoff=CUTOFF, as_of=NOW, issued_at=ISSUED, batch_size=3)
+        cyber = lf.Lane("cathedral_cybergym", Decimal("0.90"), [
+            lf.LaneContribution(miner_hotkey=r.contribution["miner_hotkey"],
+                                receipt_id=r.contribution["receipt_id"],
+                                work_units=Decimal(r.contribution["work_units"]))
+            for r in results])
+        feed = lf.compose_vector([cyber], burn_hotkey="5Burn")
+        return json.dumps(feed, sort_keys=True), [r.receipt["receipt_id"] for r in results]
+
+    feed_a, ids_a = _epoch("a")
+    feed_b, ids_b = _epoch("b")
+    # commit -> draw -> verify -> sign -> persist -> compose is fully deterministic:
+    # the same chain state + commitments reproduce byte-identical receipts and vector.
+    assert feed_a == feed_b
+    assert ids_a == ids_b
