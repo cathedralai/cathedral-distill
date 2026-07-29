@@ -220,8 +220,8 @@ def test_eval_not_proven_without_authorization_resolve_time():
     assert a.verdict == adm.NOT_PROVEN
 
 
-def test_eval_replay_is_consumed_once():
-    ledger = ConsumptionLedger()
+def test_eval_replay_is_consumed_once(tmp_path):
+    ledger = ConsumptionLedger(str(tmp_path / "ledger.sqlite"))
     first = _admit_eval(_eval_receipt(), ledger=ledger)
     second = _admit_eval(_eval_receipt(), ledger=ledger)
     assert first.verdict == adm.ADMIT and second.verdict == adm.REJECT

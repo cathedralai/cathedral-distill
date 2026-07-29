@@ -2,13 +2,16 @@
 
 Proves a token is consumed exactly once and a replay fails closed — both the
 primitive and its use in the admission pipeline (a resubmitted receipt becomes
-FAIL, not a second credit).
+FAIL, not a second credit) — including under real concurrency, where the pre-fix
+shared-connection ledger handed "success" to 5-13 of 24 racing threads for one
+token while inserting a single row.
 """
 from __future__ import annotations
 
 import base64
 import hashlib
 import sys
+import threading
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -26,8 +29,12 @@ SOURCE_EPOCH = 11
 LANE_CPU = "cathedral_confidential_tdx"
 
 
-def test_token_consumed_exactly_once():
-    ledger = ConsumptionLedger()
+def _ledger(tmp_path, name: str = "ledger.sqlite") -> ConsumptionLedger:
+    return ConsumptionLedger(str(tmp_path / name))
+
+
+def test_token_consumed_exactly_once(tmp_path):
+    ledger = _ledger(tmp_path)
     ledger.consume("receipt-sha256:" + "aa" * 32)
     assert ledger.is_consumed("receipt-sha256:" + "aa" * 32)
     with pytest.raises(ReplayError, match="already consumed"):
@@ -36,9 +43,62 @@ def test_token_consumed_exactly_once():
     assert ledger.size() == 2
 
 
-def test_empty_token_is_refused():
+def test_empty_token_is_refused(tmp_path):
     with pytest.raises(ReplayError, match="non-empty"):
-        ConsumptionLedger().consume("")
+        _ledger(tmp_path).consume("")
+
+
+def test_a_ledger_with_no_path_is_refused():
+    # No default path: a non-durable ledger forgets consumed tokens on restart,
+    # which fails OPEN (an already-credited receipt becomes creditable again).
+    with pytest.raises(ReplayError, match="durable database path"):
+        ConsumptionLedger()
+
+
+@pytest.mark.parametrize("path", [":memory:", "file:x?mode=memory&cache=shared"])
+def test_an_in_memory_ledger_is_refused(path):
+    with pytest.raises(ReplayError, match="not durable"):
+        ConsumptionLedger(path)
+
+
+def test_concurrent_consumption_of_one_token_succeeds_exactly_once(tmp_path):
+    """The once-only guarantee has to hold under real concurrency.
+
+    24 threads release off a barrier and consume the SAME token. Exactly one may
+    succeed; the rest must fail closed with ReplayError, and the table must hold
+    one row. Pre-fix (one shared connection, implicit deferred transaction) this
+    reported 5-13 successes for one inserted row — i.e. up to 13 credits for one
+    receipt.
+    """
+    ledger = _ledger(tmp_path)
+    threads_count = 24
+    barrier = threading.Barrier(threads_count)
+    lock = threading.Lock()
+    successes: list[str] = []
+    unexpected: list[str] = []
+
+    def worker() -> None:
+        barrier.wait()
+        try:
+            ledger.consume("receipt-sha256:" + "cc" * 32)
+        except ReplayError:
+            return
+        except Exception as exc:  # noqa: BLE001 - any other escape is a failure
+            with lock:
+                unexpected.append(f"{type(exc).__name__}: {exc}")
+            return
+        with lock:
+            successes.append("ok")
+
+    threads = [threading.Thread(target=worker) for _ in range(threads_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert unexpected == []
+    assert len(successes) == 1, f"{len(successes)} threads credited one token"
+    assert ledger.size() == 1
 
 
 def test_ledger_persists_across_reopen(tmp_path):
@@ -51,9 +111,9 @@ def test_ledger_persists_across_reopen(tmp_path):
         reopened.consume("t1")
 
 
-def test_replayed_receipt_becomes_fail_in_the_pipeline():
+def test_replayed_receipt_becomes_fail_in_the_pipeline(tmp_path):
     fx = IntegrationFixtures()
-    ledger = ConsumptionLedger()
+    ledger = _ledger(tmp_path)
     first = itf.verify_lane_receipt(
         itf.KIND_COMPUTE_CPU, fx.cpu_receipt(), lane=LANE_CPU, key_registry=fx.registry,
         source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO, consumption_ledger=ledger)
