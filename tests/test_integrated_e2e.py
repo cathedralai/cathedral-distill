@@ -299,7 +299,7 @@ def test_decision_for_an_unconfigured_lane_earns_nothing_without_aborting():
     """An unknown lane is refused *for that decision only*.
 
     It used to raise, which meant one mislabelled decision destroyed the whole
-    epoch's vector — every lane, every miner. The unknown lane now simply earns
+    epoch's vector: every lane, every miner. The unknown lane now simply earns
     nothing (its would-be share stays in burn) and the audit says why, while the
     legitimate contributions in the same composition still compose.
     """

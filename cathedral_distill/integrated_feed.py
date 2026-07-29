@@ -22,11 +22,11 @@ one that makes the two epoch-level invariants real:
   * **One bad receipt fails only itself.** Every per-receipt failure is contained,
     including the failures a typed verifier does not raise (a `KeyError` from an
     unexpected receipt shape used to escape every caller's `except` and abort the
-    whole vector — every lane, every miner). A contained receipt is `FAIL` with the
+    whole vector: every lane, every miner). A contained receipt is `FAIL` with the
     exception in its audit detail; the rest of the epoch composes normally.
   * **A replay decision is explicit.** The ledger argument is required: pass a
     `ConsumptionLedger`, or type `NO_REPLAY_LEDGER` to accept no replay
-    protection. Forgetting the keyword is an error, not a silent fail-open — the
+    protection. Forgetting the keyword is an error, not a silent fail-open. The
     state before this was that `ConsumptionLedger` had zero production
     instantiations while `source_epoch` equality was the only replay defense.
 
@@ -87,7 +87,7 @@ class ReceiptDecision:
 
 @dataclass(frozen=True)
 class LaneSubmission:
-    """One receipt offered to one lane — the batch verifier's unit of work."""
+    """One receipt offered to one lane: the batch verifier's unit of work."""
 
     kind: str
     receipt: Mapping[str, Any]
@@ -215,7 +215,7 @@ def verify_lane_receipt(
     except Exception as exc:  # noqa: BLE001 - see below
         # Containment. The typed verifiers raise typed errors for the receipt
         # shapes they anticipated, but an unanticipated shape raises whatever
-        # Python raises — a bare KeyError on a TCB variant, a TypeError on a
+        # Python raises: a bare KeyError on a TCB variant, a TypeError on a
         # wrong-typed field, an InvalidOperation on a malformed decimal. None of
         # those are receipt errors, so they escaped every caller's `except` and
         # aborted the entire epoch: every lane, every miner, over ONE receipt.
@@ -289,11 +289,11 @@ def verify_lane_receipts(
     This is the entry an epoch loop should call, rather than looping over
     `verify_lane_receipt` itself, because it owns the two epoch-level rules:
 
-      * **containment** — nothing a single receipt can do aborts the batch, not
+      * **containment**: nothing a single receipt can do aborts the batch, not
         even an unknown `kind` or a missing `now_iso` (those are `FAIL` here with
         the reason in the detail, instead of an exception that takes the vector
         down with it);
-      * **global once-only** — a `receipt_id` is credited at most once across the
+      * **global once-only**: a `receipt_id` is credited at most once across the
         whole batch, so one signed receipt tagged into two lanes cannot earn twice
         (and cannot keep a lane "contributing" that had no work of its own, which
         would capture the share that should have gone to burn).
@@ -356,11 +356,11 @@ def compose_integrated(
     raising and taking every lane and every miner with it:
 
       1. a lane the signed allocation config does not know;
-      2. a `receipt_id` already credited in this composition — GLOBALLY, across
+      2. a `receipt_id` already credited in this composition, GLOBALLY, across
          lanes, so one signed receipt tagged into two lanes earns once, and the
          second lane does not become "contributing" on borrowed work;
       3. a miner already credited in the same lane;
-      4. the burn hotkey as a reward subject — burn is a destination, never an
+      4. the burn hotkey as a reward subject: burn is a destination, never an
          earner, so a receipt whose subject is the configured burn address is
          never a contribution.
     """
@@ -422,7 +422,7 @@ def compose_integrated(
                 final_weight.get(d.miner_hotkey, 0.0) if credited(position, d) else 0.0
             ),
             # a PASS that was not credited, and why (duplicate receipt_id, unknown
-            # lane, duplicate miner, burn subject) — the operator's record of a
+            # lane, duplicate miner, burn subject), the operator's record of a
             # verified receipt that still earned nothing.
             "credited": credited(position, d),
             "drop_reason": drop_reason.get(position, ""),

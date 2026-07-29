@@ -2,7 +2,7 @@
 
 Proves a token is consumed exactly once and a replay fails closed — both the
 primitive and its use in the admission pipeline (a resubmitted receipt becomes
-FAIL, not a second credit) — including under real concurrency, where the pre-fix
+FAIL, not a second credit), including under real concurrency, where the pre-fix
 shared-connection ledger handed "success" to 5-13 of 24 racing threads for one
 token while inserting a single row.
 """

@@ -274,7 +274,7 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
         if str(claim.get("status")) not in ("passed", "failed", "unknown"):
             raise DistillReceiptError(f"assurance claim {name} has an invalid status")
     # A creditable receipt asserts the confidential channel, the hardware, the
-    # software, AND the work itself actually verified — the exact set
+    # software, AND the work itself actually verified: the exact set
     # `compute_receipt.validate_structure` requires. Gating only hardware and
     # software meant a receipt could carry a FAILED channel or work claim and
     # still be admitted as verified work.

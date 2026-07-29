@@ -128,7 +128,7 @@ class CyberGymScoreStore:
 
 
 class CyberGymSolveStore:
-    """Durable per-(epoch, miner, task) accepted solves — the crash-recovery store.
+    """Durable per-(epoch, miner, task) accepted solves: the crash-recovery store.
 
     `CyberGymScoreStore` persists the epoch's OUTCOME, but only at epoch close.
     Between the first accepted submission and `score_epoch` the epoch's entire
@@ -139,8 +139,8 @@ class CyberGymSolveStore:
     restart, silently.
 
     This is the missing durable half. It stores exactly what `run_epoch` needs to
-    re-derive the same scores — the miner's committed model and its accepted PoC
-    bytes, keyed by (epoch, miner_hotkey, task_id) — because `run_epoch` re-draws
+    re-derive the same scores: the miner's committed model and its accepted PoC
+    bytes, keyed by (epoch, miner_hotkey, task_id), because `run_epoch` re-draws
     each batch from the chain-anchored nonce rather than from any dispatch state.
     Recovery is therefore byte-identical scoring, not an approximation.
     """

@@ -161,7 +161,7 @@ def verify_admission(
         )
 
     # (1)+(2)+(4)+(5): the typed verifier owns receipt body, hardware quote, the
-    # finalized block window, and replay — in that order, so the window is a gate
+    # finalized block window, and replay, in that order, so the window is a gate
     # BEFORE the ledger is touched. `current_block` must be passed for that to be
     # true: without it the verifier consumed the token and the window was checked
     # here afterwards, so a receipt submitted outside its window still burned its
@@ -245,7 +245,7 @@ def _admit_eval(
     except _eval.EvalReceiptError as exc:
         return reject(str(exc))
 
-    # (4) replay: consume the eval id exactly once — LAST, after the receipt body,
+    # (4) replay: consume the eval id exactly once, LAST, after the receipt body,
     # the injected attestation result, and the signed authorization (which carries
     # the finalized block window) have all passed, so a rejected submission never
     # burns the token the legitimate one needs.

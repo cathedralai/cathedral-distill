@@ -2,7 +2,7 @@
 
 Two jobs, both about keeping a future change deliberate rather than accidental.
 
-1. **Compute `work_units` are asserted, not derived** — pinned here as a
+1. **Compute `work_units` are asserted, not derived**, pinned here as a
    DOCUMENTING test, named after the gap it documents rather than a property it
    proves. Distill derives units from `passed_items` and CyberGym derives them from
    the level weights, both re-checkable by any validator. Compute validates its
@@ -14,7 +14,7 @@ Two jobs, both about keeping a future change deliberate rather than accidental.
    without either a contract change or an invented economic cap. This test exists
    so the behaviour cannot change silently while that decision is open.
 
-2. **The launch path is exactly four receipt kinds** — fuzz-harness generation
+2. **The launch path is exactly four receipt kinds**. Fuzz-harness generation
    (`harness_gen.py`) is standalone: no receipt family, no dispatch, no lane, and
    nothing in the package imports it. And this package never writes weights to a
    chain at all: it composes a pre-burn vector and hands it over. Both are pinned

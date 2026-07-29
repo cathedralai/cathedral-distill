@@ -1,6 +1,6 @@
 """A validator restart must not turn a solved epoch into a silent 100% burn.
 
-The crash point that matters is not "after epoch close" — that state was already
+The crash point that matters is not "after epoch close"; that state was already
 durable. It is the whole scoring window: from the first accepted submission until
 `score_epoch` runs, every miner's accepted PoCs lived only in
 `CyberGymService._miners`. A restart there (SIGKILL, redeploy, OOM) lost all of

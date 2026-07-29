@@ -4,14 +4,14 @@ Four ways a single submission used to be able to reach past itself, all exercise
 here in ONE composition:
 
   1. a receipt whose verification raises something the typed verifiers do not
-     (a bare `KeyError`) — it escaped every caller's `except` and aborted every
+     (a bare `KeyError`): it escaped every caller's `except` and aborted every
      lane and every miner;
-  2. one signed receipt tagged into two lanes — it earned twice, and made the
+  2. one signed receipt tagged into two lanes: it earned twice, and made the
      second lane "contributing" on work it did not do, capturing the share that
      should have gone to burn;
-  3. a decision naming a lane the signed allocation config does not know — it
+  3. a decision naming a lane the signed allocation config does not know: it
      raised out of `compose_integrated`, taking the whole vector with it;
-  4. the burn hotkey as a reward subject — burn is a destination, never an earner.
+  4. the burn hotkey as a reward subject: burn is a destination, never an earner.
 
 Plus the replay-decision rule: the batch verifier requires either a real
 `ConsumptionLedger` or the typed `NO_REPLAY_LEDGER` opt-out, because the state

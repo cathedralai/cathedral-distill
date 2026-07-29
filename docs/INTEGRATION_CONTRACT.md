@@ -21,8 +21,28 @@ a verified result to the same contribution tuple:
 { "miner_hotkey": "5…", "receipt_id": "receipt-sha256:…", "work_units": "42" }
 ```
 
-`work_units` is a canonical decimal string (no floats) that the **validator derives**
-from the receipt — never a number the miner or signer asserts.
+`work_units` is a canonical decimal string (no floats).
+
+> **Correction (2026-07-29): this is only true for two of the three lanes.** An
+> earlier version of this line claimed `work_units` is "derived by the validator,
+> never a number the miner or signer asserts". That holds for **Distill** (the
+> verifier requires `work_units == evaluation.passed_items`, so an inflated number
+> is a `FAIL`) and for **CyberGym** (units are re-derived from
+> `per_level_solved x level_weights` by the validator that scored the batch). It
+> does **not** hold for **Compute**: `compute_receipt` validates `work_units` as a
+> canonical decimal and forwards it unchanged into normalization, so whoever holds
+> the anchored signing key sets the number, and no quantity in the receipt body
+> (`challenge_id`, `manifest_digest`, `result_digest`, `status`) lets a validator
+> re-derive the work to check it against. The only bound today is the decimal
+> grammar (at most 30 digits), which is input sanity, not a work bound: one receipt
+> at that limit takes essentially the whole Compute lane after normalization.
+> `tests/test_launch_surface.py` pins this behaviour as a documented gap.
+>
+> Closing it is an **owner decision on the signed receipt contract**, not something
+> this repo can fix locally: either the issuer declares a per-challenge maximum (or
+> a re-derivable quantity) in the receipt body, or the operator accepts that the
+> Compute signer is trusted for the magnitude of its own claim. Inventing a cap here
+> would be inventing economics.
 
 | Lane id (example)            | Receipt schema                       | Module                        |
 |------------------------------|--------------------------------------|-------------------------------|
@@ -177,17 +197,45 @@ miner's share of the **total** emission equals its configured allocation.
 ## 6. One pipeline + audit trail (`integrated_feed.py`)
 
 `verify_lane_receipt(kind, receipt, …)` is the single verification entry for all four
-receipt kinds and returns a `PASS` / `FAIL` / `NOT_PROVEN` decision. `compose_integrated`
-takes a resolved config + the decisions and returns `{feed, audit}`, where the audit
-ties each step:
+receipt kinds and returns a `PASS` / `FAIL` / `NOT_PROVEN` decision.
+`verify_lane_receipts(...)` (plural) is the entry an **epoch loop** should call, and
+`compose_integrated` takes a resolved config + the decisions and returns
+`{feed, audit}`, where the audit ties each step:
 
 ```
 receipt_id → verdict → lane contribution → configured allocation → final weight
 ```
 
 plus per-lane `contributing`/`burned_allocation`, the burn `base`/`effective` fraction,
-and the applied `config_version`s. This is the operator's "why did this miner get this
-weight" record.
+the applied `config_version`s, and per receipt a `credited` flag with a `drop_reason`.
+This is the operator's "why did this miner get this weight" record.
+
+**Epoch-level rules the plural entry and the composer enforce** (each one exists
+because the alternative was observed):
+
+- **A replay decision is required, not defaulted.** `verify_lane_receipts` and
+  `admission.verify_admission` take `consumption_ledger` as a required argument:
+  either a `ConsumptionLedger` (durable path; an in-memory or pathless ledger is
+  refused, because forgetting a consumed token on restart fails OPEN) or the typed
+  `NO_REPLAY_LEDGER` opt-out. Before this, the ledger was optional and nothing in
+  production ever constructed one, so `source_epoch` equality was the only replay
+  defense.
+- **Consumption is the last step.** A `receipt_id` is consumed only after every
+  non-mutating gate has passed, including the finalized block window. Consuming
+  before the window check let anyone submit a receipt outside its window, burn its
+  one-time token, and leave the legitimate in-window submission to be rejected as a
+  replay.
+- **One receipt earns at most once, globally.** Enforced in the batch verifier and
+  again in `compose_integrated`, across lanes. One signed receipt tagged into two
+  lanes would otherwise earn twice and keep the second lane "contributing" on work
+  it did not do, capturing the share that should have gone to burn.
+- **One bad receipt fails only itself.** Every per-receipt failure is contained,
+  including exceptions the typed verifiers do not raise (a bare `KeyError` on an
+  unexpected shape used to abort every lane and every miner). Composition does not
+  raise on an unknown lane or a duplicate miner either: those decisions become
+  uncredited with an audited `drop_reason`.
+- **Burn is never an earner.** A receipt whose subject is the configured burn hotkey
+  is refused as a contribution.
 
 ## 7. PASS / FAIL / NOT_PROVEN matrix
 
@@ -199,7 +247,7 @@ fail-open). Every row below is exercised by the test suite.
 |------------------|-------------------------------------------------------------|---------------------------------------------------------------|---------------------------------------------------|
 | **Compute CPU**  | valid TDX body, sig, epoch, freshness → contribution         | bad sig / `debug_enabled` / `Revoked` / wrong epoch / expired  | — (CPU evidence is self-contained)                |
 | **Compute GPU**  | composite bound to TDX + verifier admits                     | `cc_mode≠on` / unbound to TDX / verifier rejects               | no GPU attestation verifier configured            |
-| **Distill**      | counts cross-check, sig, epoch, freshness → contribution     | `work_units≠passed_items` / bad sig / stale / wrong epoch      | — (evaluation evidence is in the receipt)         |
+| **Distill**      | counts cross-check, sig, epoch, freshness, evaluation succeeded → contribution | `work_units≠passed_items` / failed `channel.status` or `work.status` / unpassed channel-hardware-software-work claim / bad sig / stale / wrong epoch | n/a (evaluation evidence is in the receipt) |
 | **Remote burn**  | signer + target + fresh + version ≥ fence + destination pin  | bad signer / wrong subnet / stale / rollback / wrong dest.     | registry unreachable (operator keeps last-applied) |
 | **Remote alloc** | signer + target + fresh + `Σ+burn==1`                        | bad signer / wrong subnet / stale / rollback / incoherent sum  | registry unreachable (operator keeps last-applied) |
 

@@ -94,18 +94,18 @@ class EmissionGatePolicy:
     Each gate has an evidence source, and a gate with no evidence FAILS (it is
     never skipped):
 
-      * `registered_bundle` — `bundle_registry.is_registered_by(commitment, miner)`.
+      * `registered_bundle`: `bundle_registry.is_registered_by(commitment, miner)`.
         No registry means no miner can prove its model is registered, so all fail.
-      * `no_contamination` — the committed model must have been registered before
+      * `no_contamination`: the committed model must have been registered before
         the batch was drawn (`registered_at <= commitment_deadline`, defaulting to
         the epoch's `as_of` draw time). A commitment made after the draw cannot be
         proven to pre-date the drawn set.
-      * `reproduced` — a peer validator's receipt for the same `batch_id` with the
+      * `reproduced`: a peer validator's receipt for the same `batch_id` with the
         same `items_root` and a DIFFERENT `validator_hotkey`, verified against the
         anchored key registry. Off by default: a single-validator deployment has no
         peer to reproduce with, so requiring it would zero every miner. Turning it
         on is an owner decision about what a reward requires.
-      * `independent_evaluator` — the miner's coldkey must differ from the
+      * `independent_evaluator`: the miner's coldkey must differ from the
         evaluator's. Off by default, and structurally unsatisfiable while the
         operator IS the evaluator; recorded as an owner trust-model decision rather
         than silently claimed.
