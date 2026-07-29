@@ -42,7 +42,7 @@
     "signed_by_publisher": false
   },
   "pre_burn": true,
-  "schema": "cathedral_lane_feed_v1",
+  "schema": "cathedral_lane_feed_v2",
   "weights": [
     {
       "base_component": 0.0,

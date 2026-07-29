@@ -22,7 +22,14 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Mapping, Sequence
 
-LANE_FEED_SCHEMA = "cathedral_lane_feed_v1"
+# v2: safe composition (#8928a23, issue #1 Req 6) added per-lane
+# `burned_allocation` and populated `burn_snapshot.forced_burn_percentage` /
+# `policy_metadata.effective_burn_allocation` from the actual composed mass —
+# fields v1 either lacked or always emitted as a fixed placeholder. No known
+# consumer parses this by exact key set today (unlike the receipt schemas), but
+# the shape genuinely changed, so the version says so rather than a `_v1` label
+# silently drifting.
+LANE_FEED_SCHEMA = "cathedral_lane_feed_v2"
 _QUANT = Decimal("0.000000000000000001")  # 18 dp, well inside float weight precision
 
 
