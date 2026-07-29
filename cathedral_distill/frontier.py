@@ -340,6 +340,14 @@ class CandidateEvidence:
     # regardless of what the receipt's attestation.kind claims (issue #1: a
     # structurally valid receipt is not the same as a genuinely signed one).
     key_registry: object | None = None
+    # The finalized block height at candidacy, for the evaluator-authorization
+    # window check. A creditable eval run must carry an authorization the
+    # evaluator signed (binding evaluator/miner/eval_id/nonce/epoch/block-window),
+    # and `current_block` must fall inside that window — the same gate
+    # `admission.verify_admission` applies to the eval lane. Absent (or no
+    # key_registry) -> the authorization cannot be verified, so `attested` fails
+    # closed, exactly like a missing signature.
+    current_block: int | None = None
 
 
 def _reproduction_ok(
@@ -412,10 +420,29 @@ def derive_candidate(evidence: CandidateEvidence, policy: TrackPolicy) -> Candid
         except er.EvalReceiptError:
             signature_verified = False
 
-    # Creditable requires the verified signature, a non-"none" attested receipt,
-    # AND the raw quote verification result. A structurally valid tdx receipt
-    # whose quote never verified is not attested — the kind is a claim, not proof.
-    attested = signature_verified and er.creditable_as_verified_work(
+    # The evaluator authorization must also verify: a creditable eval run carries
+    # a grant the evaluator signed, bound to this receipt's identity + a block
+    # window that covers the finalized block. Without a key registry or the
+    # finalized block, it cannot be checked -> fail closed. This is the same gate
+    # admission.verify_admission applies to the eval lane; the frontier (which
+    # crowns champions and sets emission weight) must not be weaker.
+    authorized = False
+    if evidence.key_registry is not None and evidence.current_block is not None:
+        try:
+            er.verify_authorization(
+                evidence.receipt, evidence.key_registry,
+                current_block=evidence.current_block, at=evidence.submitted_at,
+            )
+            authorized = True
+        except er.EvalReceiptError:
+            authorized = False
+
+    # Creditable requires the verified signature, the verified authorization, a
+    # non-"none" attested receipt, AND the raw quote verification result. A
+    # structurally valid tdx receipt whose quote never verified — or whose run
+    # the evaluator never authorized — is not attested; the kind is a claim, not
+    # proof.
+    attested = signature_verified and authorized and er.creditable_as_verified_work(
         evidence.receipt, attestation_verified=evidence.attestation_verified is True
     )
 
