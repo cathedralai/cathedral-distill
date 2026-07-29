@@ -62,43 +62,68 @@ def test_an_in_memory_ledger_is_refused(path):
 
 
 def test_concurrent_consumption_of_one_token_succeeds_exactly_once(tmp_path):
-    """The once-only guarantee has to hold under real concurrency.
+    """The once-only guarantee has to hold across ledger OBJECTS, not just threads.
 
-    24 threads release off a barrier and consume the SAME token. Exactly one may
-    succeed; the rest must fail closed with ReplayError, and the table must hold
-    one row. Pre-fix (one shared connection, implicit deferred transaction) this
-    reported 5-13 successes for one inserted row — i.e. up to 13 credits for one
-    receipt.
+    24 consumers, spread over two separate `ConsumptionLedger` instances on one
+    database file, release off a barrier and consume the SAME token. That is the
+    case that matters: replay protection has to survive two validator components
+    (or two processes) holding their own ledger over shared storage, which is
+    exactly what one shared in-process connection cannot give you. Exactly one
+    consumer may succeed, 23 must fail closed with ReplayError, the table must
+    hold one row, and no SQLite operational error may surface at all.
+
+    Pre-fix (one connection with check_same_thread=False and an implicit deferred
+    transaction) this reported 5-13 successes for one inserted row, plus
+    "cannot start a transaction within a transaction" and a bare SystemError.
+
+    Structure note: every ledger is constructed here, in the main thread, and the
+    barrier surrounds `consume()` alone. A barrier wait must never be gated on a
+    constructor succeeding, or a constructor failure leaves the other threads
+    waiting forever and a real failure looks like a hang.
     """
-    ledger = _ledger(tmp_path)
     threads_count = 24
+    ledgers = [_ledger(tmp_path), _ledger(tmp_path)]  # two instances, one file
     barrier = threading.Barrier(threads_count)
     lock = threading.Lock()
     successes: list[str] = []
+    replays: list[str] = []
     unexpected: list[str] = []
 
-    def worker() -> None:
-        barrier.wait()
+    def worker(ledger: ConsumptionLedger) -> None:
+        try:
+            barrier.wait(timeout=30)
+        except threading.BrokenBarrierError:
+            with lock:
+                unexpected.append("BrokenBarrierError")
+            return
         try:
             ledger.consume("receipt-sha256:" + "cc" * 32)
         except ReplayError:
+            with lock:
+                replays.append("replay")
             return
-        except Exception as exc:  # noqa: BLE001 - any other escape is a failure
+        except BaseException as exc:  # noqa: BLE001 - classify, never swallow
+            barrier.abort()
             with lock:
                 unexpected.append(f"{type(exc).__name__}: {exc}")
             return
         with lock:
             successes.append("ok")
 
-    threads = [threading.Thread(target=worker) for _ in range(threads_count)]
+    threads = [
+        threading.Thread(target=worker, args=(ledgers[i % len(ledgers)],), daemon=True)
+        for i in range(threads_count)
+    ]
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join()
+        thread.join(timeout=60)
 
+    assert not any(thread.is_alive() for thread in threads), "a consumer never finished"
     assert unexpected == []
-    assert len(successes) == 1, f"{len(successes)} threads credited one token"
-    assert ledger.size() == 1
+    assert len(successes) == 1, f"{len(successes)} consumers credited one token"
+    assert len(replays) == threads_count - 1
+    assert ledgers[0].size() == 1 and ledgers[1].size() == 1
 
 
 def test_ledger_persists_across_reopen(tmp_path):

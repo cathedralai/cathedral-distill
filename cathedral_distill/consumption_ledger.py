@@ -42,6 +42,24 @@ class ReplayError(RuntimeError):
     """Raised when a token has already been consumed. Fails closed."""
 
 
+class _NoReplayLedger:
+    """The explicit "run without replay protection" marker.
+
+    The admission and composition entries take a *required* ledger argument, so
+    running without replay protection has to be typed out rather than obtained by
+    forgetting a keyword. `NO_REPLAY_LEDGER` is that opt-out: greppable in a
+    production configuration, and impossible to pass by accident.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "NO_REPLAY_LEDGER"
+
+
+NO_REPLAY_LEDGER = _NoReplayLedger()
+
+
 class ConsumptionLedger:
     """Durable once-only ledger for replay tokens. Safe for concurrent callers."""
 
@@ -155,4 +173,4 @@ class ConsumptionLedger:
         return None
 
 
-__all__ = ["ConsumptionLedger", "ReplayError"]
+__all__ = ["ConsumptionLedger", "ReplayError", "NO_REPLAY_LEDGER"]
