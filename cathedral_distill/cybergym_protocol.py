@@ -32,7 +32,7 @@ from cathedral_distill.cybergym import (
     Task,
     derived_work_units,
 )
-from cathedral_distill.cybergym_batch import Batch, TaskPool, derive_batch_nonce, draw_batch
+from cathedral_distill.cybergym_batch import Batch, TaskPool, derive_batch_nonce
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
 from cathedral_distill.trace_submission import (
     TraceQualityPolicy,
@@ -127,13 +127,18 @@ def dispatch(
     validator dispatches the identical batch. `context_provider(task_id)` returns
     the full task context; only the fields `LEVEL_CONTEXT_FIELDS[level]` allows are
     revealed — a level-0 miner gets nothing but the vulnerable build.
+
+    `pool` is any draw-capable source exposing `.draw(size=, nonce=, as_of=,
+    cutoff=) -> Batch` — a real `TaskPool` (disclosure-timed corpus) or
+    `cybergym_synthetic.SyntheticTaskSource` (nonce-generated, unlimited,
+    never in any public dataset) both satisfy it identically.
     """
     nonce = derive_batch_nonce(
         block=chain.block, block_hash=chain.block_hash, network=chain.network,
         netuid=chain.netuid, source_epoch=chain.source_epoch,
         miner_hotkey=miner_hotkey, model_commitment=model_commitment,
     )
-    batch = draw_batch(pool, size=batch_size, nonce=nonce, as_of=as_of, cutoff=cutoff)
+    batch = pool.draw(size=batch_size, nonce=nonce, as_of=as_of, cutoff=cutoff)
     tasks: list[DispatchedTask] = []
     for task in batch.tasks:
         allowed = LEVEL_CONTEXT_FIELDS.get(int(task.level), ())

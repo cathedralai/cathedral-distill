@@ -169,8 +169,82 @@ def generate_holdout(nonce: str, size: int, *, levels: Sequence[int] = (0, 1, 2,
     return bugs, synthetic_backend(bugs), context_provider(bugs)
 
 
+class SyntheticTaskSource:
+    """The nonce-seeded generator, wired to the same draw/context/backend
+    interface a real `TaskPool` + corpus binaries provide — a drop-in
+    replacement for `cybergym_service.CyberGymService`'s task source.
+
+    Unlike `TaskPool.draw` (which *selects* `size` tasks from a pre-existing,
+    disclosure-timed corpus), `.draw` here *generates* `size` brand-new bugs
+    for exactly this nonce — nothing is chosen from a set that existed before
+    the draw, so there is no disclosure timing, no exhaustion, and no public
+    dataset a miner could ever have looked the answer up in. Supply is
+    unlimited: every distinct nonce (every miner, every epoch — see
+    `cybergym_batch.derive_batch_nonce`) yields its own fresh batch.
+
+    Generated bugs accumulate in memory across every `.draw` call on one
+    instance, so `context_provider`/`.backend` can answer for any task this
+    instance has ever drawn — correct for `CyberGymService`'s own lifetime,
+    which is one epoch (see its docstring), not for a longer-lived instance.
+    """
+
+    def __init__(self, *, levels: Sequence[int] = (0, 1, 2, 3)) -> None:
+        self._levels = levels
+        self._bugs: dict[str, SyntheticBug] = {}
+
+    def draw(self, *, size: int, nonce: str, as_of=None, cutoff=None):
+        """Same signature `TaskPool.draw` has (`as_of`/`cutoff` accepted for
+        interface parity with the disclosure-timed corpus path; unused here —
+        a synthetic bug has no disclosure date, it never existed before this
+        nonce generated it)."""
+        from cathedral_distill.cybergym_batch import Batch, batch_id_for
+
+        bugs = [
+            generate_bug(nonce, i, level=self._levels[i % len(self._levels)])
+            for i in range(size)
+        ]
+        for bug in bugs:
+            self._bugs[bug.task_id] = bug
+        tasks = tuple(bug.to_task() for bug in bugs)
+        return Batch(
+            batch_id=batch_id_for(nonce, [t.task_id for t in tasks]),
+            nonce=nonce,
+            tasks=tasks,
+        )
+
+    def context_provider(self, task_id: str) -> Mapping[str, str]:
+        bug = self._bugs.get(task_id)
+        if bug is None:
+            return {}
+        return {
+            "description": render_source(bug, patched=False),
+            "sanitizer_trace": f"AddressSanitizer: heap-buffer-overflow — {bug.bug_class}",
+            "patch": render_source(bug, patched=True),
+        }
+
+    def backend(self, task_id: str, poc: bytes, mode: str) -> int:
+        """A `cybergym_verifier.VerifierBackend` over every bug drawn so far."""
+        bug = self._bugs.get(task_id)
+        if bug is None:
+            return CLEAN_EXIT
+        return execute(bug, poc, patched=(mode == "fix"))
+
+
+def synthetic_holdout(*, levels: Sequence[int] = (0, 1, 2, 3)):
+    """A `cybergym_holdout.Holdout` backed entirely by the synthetic generator
+    — no corpus, no disclosure timing, unlimited un-cheatable supply. Drop-in
+    for `cybergym_service.CyberGymService(holdout=..., backend=...)`; pass the
+    returned source's `.backend` as the service's differential-check backend.
+    """
+    from cathedral_distill.cybergym_holdout import Holdout
+
+    source = SyntheticTaskSource(levels=levels)
+    return Holdout(pool=source, _context={}), source.backend
+
+
 __all__ = [
     "SyntheticBug", "BUG_CLASSES", "CLEAN_EXIT", "CRASH_EXIT",
     "generate_bug", "execute", "render_source", "synthetic_backend",
     "context_provider", "generate_holdout",
+    "SyntheticTaskSource", "synthetic_holdout",
 ]

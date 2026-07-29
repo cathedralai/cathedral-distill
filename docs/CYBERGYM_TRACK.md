@@ -27,10 +27,31 @@ transport, and nothing else changes.
    block. So the miner cannot have trained on the drawn set, and every validator
    reproduces the identical nonce.
 
-2. **Draw the sealed batch from the private holdout.**
-   `cybergym_batch.draw_batch` selects `size` tasks disclosed after the cutoff
-   the committed model predates, ranked by a nonce-keyed hash. Same pool + nonce
-   → same batch; an exhausted holdout refuses rather than recycles.
+2. **Draw the sealed batch from a fresh, un-cheatable source.**
+   Every source exposes one `.draw(size, nonce, …) → Batch` interface, so the
+   epoch loop is source-agnostic:
+   - `cybergym_batch.TaskPool` — real ARVO/OSS-Fuzz tasks from the **private
+     holdout** (disclosed after the cutoff the committed model predates), ranked
+     by a nonce-keyed hash; an exhausted holdout refuses rather than recycles.
+     Its answers are public once disclosed, so freshness depends on an external
+     disclosure feed.
+   - `cybergym_synthetic.SyntheticTaskSource` — bugs **generated from the nonce**,
+     so a challenge did not exist in *any* public dataset until the nonce created
+     it: no lookup, no disclosure lag, unlimited supply.
+   - `cybergym_mix.MixedTaskSource` — a **deterministic weighted blend** of the
+     above (e.g. 75% generated + 25% recent-real), apportioned and sub-nonced from
+     the batch nonce so two validators still draw the byte-identical mixed batch.
+
+   Whatever the source, the nonce binds the miner's committed model, so the miner
+   cannot have trained on the drawn set and every validator reproduces it.
+
+   *Public canaries* (whose answers are public, hence lookup-farmable) never enter
+   this scored batch. `cybergym_mix.probe_liveness` dispatches them on a **separate,
+   off-reward channel** (`PublicCanarySource` draws a pool's *public* set, never the
+   private holdout) that returns a `LivenessReport` — no receipt, no work units. A
+   public task can therefore prove a miner is alive/configured but can never move a
+   reward, and a lookup-database miner reveals itself by acing canaries while failing
+   the generated batch.
 
 3. **Verify each PoC.** `cybergym_verifier.verify_poc` runs the PoC against both
    builds and reads the exit codes (`{0,300}` = clean, anything else = a
@@ -133,6 +154,14 @@ persist), `cybergym_http` is a dependency-free stdlib HTTP binding of the two
 routes, and `cybergym_service.compose_scores_lane` turns the persisted
 `cybergym_scores` into a `lane_feed` contribution. The whole loop is exercised over
 a live HTTP server against the injected crash backend in `tests/test_cybergym_service.py`.
+
+The **task-source layer** is also complete and un-cheatable by construction: the
+nonce-seeded `SyntheticTaskSource` is wired into the live service
+(`tests/test_cybergym_synthetic_service.py`), and `cybergym_mix` adds the
+deterministic weighted blend + the off-reward public-canary channel
+(`tests/test_cybergym_mix.py`), so a validator can run generated + recent-real in a
+configured ratio and probe liveness on public tasks without ever letting a
+lookup-farmable task earn a reward.
 
 **Tracked** (needs infrastructure or a cross-repo decision, not local code): the
 real vul/fix binary backend + the ~130 GB CyberGym dataset (plugs in behind the

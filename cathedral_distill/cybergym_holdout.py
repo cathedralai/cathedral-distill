@@ -66,7 +66,18 @@ class Holdout:
     _context: Mapping[str, Mapping[str, str]]
 
     def context_provider(self, task_id: str) -> Mapping[str, str]:
-        """Full context for a task; `dispatch` reveals only its level's fields."""
+        """Full context for a task; `dispatch` reveals only its level's fields.
+
+        Delegates to the pool's own `context_provider` when it has one — the
+        synthetic source (`cybergym_synthetic.SyntheticTaskSource`) generates
+        context per draw rather than from a fixed manifest, so there is no
+        static dict to read here for it. A plain `TaskPool` has no such
+        method, so the fixed `_context` this holdout was loaded with is used
+        unchanged for the real-corpus path.
+        """
+        provider = getattr(self.pool, "context_provider", None)
+        if provider is not None:
+            return dict(provider(task_id))
         return dict(self._context.get(task_id, {}))
 
 

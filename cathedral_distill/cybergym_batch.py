@@ -168,11 +168,43 @@ class TaskPool:
             key=lambda t: t.task_id,
         )
 
+    def draw(self, *, size: int, nonce: str, as_of: datetime, cutoff: datetime) -> "Batch":
+        """The uniform draw interface `dispatch`/`run_epoch` call. Delegates to
+        the free `draw_batch` function — same behavior, just callable
+        polymorphically alongside any other draw-capable source (e.g.
+        `cybergym_synthetic.SyntheticTaskSource`) without either caller needing
+        to know which kind of source it has."""
+        return draw_batch(self, size=size, nonce=nonce, as_of=as_of, cutoff=cutoff)
+
+    def draw_public(self, *, size: int, nonce: str, cutoff: datetime) -> "Batch":
+        """Draw from the PUBLIC (retired, freely-trainable) set — the same
+        deterministic nonce-ranked selection as `draw`, but over tasks whose
+        answers are already public. This is the source a liveness canary draws
+        from: solving these proves a miner is alive and configured without
+        touching the reward-eligible private holdout (see
+        `cybergym_mix.PublicCanarySource`)."""
+        if size <= 0 or size > MAX_BATCH:
+            raise BatchError("batch size out of range")
+        if not nonce:
+            raise BatchError("a batch draw requires a nonce")
+        eligible = self.public(cutoff=cutoff)
+        if len(eligible) < size:
+            raise BatchError(
+                f"only {len(eligible)} public tasks available; need {size}."
+            )
+        return _select_ranked(eligible, size, nonce)
+
 
 def _batch_id(nonce: str, task_ids: Sequence[str]) -> str:
     """Commitment over the drawn set. Order-independent (ids are sorted)."""
     body = (nonce + "\x00" + "\x00".join(sorted(task_ids))).encode("utf-8")
     return "sha256:" + hashlib.sha256(BATCH_DOMAIN + body).hexdigest()
+
+
+# Public alias: other draw-capable sources (e.g. the synthetic generator) reuse
+# the same commitment scheme so a batch_id means the same thing regardless of
+# which source produced the tasks.
+batch_id_for = _batch_id
 
 
 def draw_batch(
@@ -200,10 +232,17 @@ def draw_batch(
             f"only {len(eligible)} private tasks available; need {size}. "
             "The holdout is exhausted — ingest fresh disclosures before drawing."
         )
+    return _select_ranked(eligible, size, nonce)
 
-    # Deterministic selection: rank each eligible task by a nonce-keyed hash and
-    # take the lowest `size`. Uniform, reproducible, and unpredictable before the
-    # nonce is known.
+
+def _select_ranked(eligible: Sequence[PooledTask], size: int, nonce: str) -> Batch:
+    """Deterministic selection: rank each eligible task by a nonce-keyed hash and
+    take the lowest `size`. Uniform, reproducible, and unpredictable before the
+    nonce is known — the one selection scheme both the private and the public
+    (canary) draws share, so a `batch_id` means the same thing either way."""
+    if len(eligible) < size:  # pragma: no cover - callers check with tailored messages
+        raise BatchError(f"only {len(eligible)} tasks available; need {size}")
+
     def rank(task: PooledTask) -> bytes:
         return hashlib.sha256(
             BATCH_DOMAIN + nonce.encode() + b"\x00" + task.task_id.encode()
