@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cathedral_distill import lane_feed as lf  # noqa: E402
 from cathedral_distill.cybergym_protocol import CyberGymCorpusStore, ProtocolError, SubmissionEnvelope  # noqa: E402
-from cathedral_distill.cybergym_scores import CyberGymScoreStore  # noqa: E402
+from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore  # noqa: E402
 from cathedral_distill.cybergym_service import CyberGymService  # noqa: E402
 from cathedral_distill.cybergym_synthetic import SyntheticTaskSource, synthetic_holdout  # noqa: E402
 from cathedral_distill.cybergym_validator import ChainContext  # noqa: E402
@@ -58,6 +58,7 @@ def _service(tmp_path, *, batch_size: int = 2, chain=None):
         backend=backend,
         corpus_store=CyberGymCorpusStore(str(tmp_path / "corpus.sqlite")),
         score_store=CyberGymScoreStore(str(tmp_path / "scores.sqlite")),
+        solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
         batch_size=batch_size, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
     )

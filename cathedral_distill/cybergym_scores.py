@@ -125,3 +125,89 @@ class CyberGymScoreStore:
 
     def close(self) -> None:
         self._connection.close()
+
+
+class CyberGymSolveStore:
+    """Durable per-(epoch, miner, task) accepted solves — the crash-recovery store.
+
+    `CyberGymScoreStore` persists the epoch's OUTCOME, but only at epoch close.
+    Between the first accepted submission and `score_epoch` the epoch's entire
+    state lived in `CyberGymService._miners`, in memory. A restart in that window
+    (the whole scoring window, hours on a live subnet) lost every miner's accepted
+    PoCs while the corpus rows survived on disk, and the lane then composed empty
+    and published a forced-burn vector: every miner paid for the validator's
+    restart, silently.
+
+    This is the missing durable half. It stores exactly what `run_epoch` needs to
+    re-derive the same scores — the miner's committed model and its accepted PoC
+    bytes, keyed by (epoch, miner_hotkey, task_id) — because `run_epoch` re-draws
+    each batch from the chain-anchored nonce rather than from any dispatch state.
+    Recovery is therefore byte-identical scoring, not an approximation.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        self._db_path = db_path
+        self._connection = sqlite3.connect(db_path, check_same_thread=False)
+        self._connection.row_factory = sqlite3.Row
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS cybergym_solves ("
+            "  epoch INTEGER NOT NULL,"
+            "  miner_hotkey TEXT NOT NULL,"
+            "  task_id TEXT NOT NULL,"
+            "  model_commitment TEXT NOT NULL,"
+            "  poc BLOB NOT NULL,"
+            "  PRIMARY KEY (epoch, miner_hotkey, task_id))"
+        )
+        self._connection.commit()
+
+    def record(
+        self, *, epoch: int, miner_hotkey: str, model_commitment: str, task_id: str, poc: bytes
+    ) -> None:
+        """Persist one accepted solve. Re-submitting the same task replaces it."""
+        if not isinstance(poc, (bytes, bytearray)) or not poc:
+            raise CyberGymScoreError("a solve must carry non-empty PoC bytes")
+        try:
+            with self._connection:
+                self._connection.execute(
+                    "INSERT INTO cybergym_solves"
+                    "(epoch, miner_hotkey, task_id, model_commitment, poc) VALUES (?,?,?,?,?)"
+                    " ON CONFLICT(epoch, miner_hotkey, task_id) DO UPDATE SET"
+                    "  model_commitment=excluded.model_commitment, poc=excluded.poc",
+                    (int(epoch), str(miner_hotkey), str(task_id), str(model_commitment),
+                     bytes(poc)),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError("failed to record cybergym solve") from exc
+
+    def forget_miner(self, *, epoch: int, miner_hotkey: str) -> None:
+        """Drop a miner's solves for an epoch (it re-committed a different model)."""
+        try:
+            with self._connection:
+                self._connection.execute(
+                    "DELETE FROM cybergym_solves WHERE epoch=? AND miner_hotkey=?",
+                    (int(epoch), str(miner_hotkey)),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError("failed to clear cybergym solves") from exc
+
+    def commits(self, epoch: int) -> dict[str, tuple[str, dict[str, bytes]]]:
+        """`{miner_hotkey: (model_commitment, {task_id: poc})}` for one epoch."""
+        out: dict[str, tuple[str, dict[str, bytes]]] = {}
+        for row in self._connection.execute(
+            "SELECT miner_hotkey, task_id, model_commitment, poc FROM cybergym_solves "
+            "WHERE epoch=? ORDER BY miner_hotkey, task_id",
+            (int(epoch),),
+        ):
+            commitment, pocs = out.setdefault(row["miner_hotkey"], (row["model_commitment"], {}))
+            pocs[row["task_id"]] = bytes(row["poc"])
+        return out
+
+    def size(self) -> int:
+        return self._connection.execute("SELECT COUNT(*) FROM cybergym_solves").fetchone()[0]
+
+    def close(self) -> None:
+        self._connection.close()
+
+
+__all__ = ["CyberGymScoreError", "CyberGymScoreStore", "CyberGymSolveStore"]

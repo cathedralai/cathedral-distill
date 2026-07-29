@@ -36,7 +36,7 @@ from cathedral_distill.cybergym_protocol import (
     dispatch,
     process_submission,
 )
-from cathedral_distill.cybergym_scores import CyberGymScoreStore
+from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore
 from cathedral_distill.cybergym_validator import ChainContext, MinerCommit, MinerResult, run_epoch
 from cathedral_distill.lane_feed import Lane, LaneContribution
 from cathedral_distill.trace_submission import TraceQualityPolicy
@@ -47,7 +47,10 @@ CYBERGYM_LANE = "cathedral_cybergym"
 @dataclass
 class _MinerState:
     model_commitment: str
-    dispatch: DispatchMessage
+    # None for state recovered from the solve store after a restart: the dispatch
+    # message itself is not needed to score (run_epoch re-draws the batch from the
+    # chain-anchored nonce), only to accept NEW submissions.
+    dispatch: DispatchMessage | None
     pocs: dict[str, bytes] = field(default_factory=dict)  # task_id -> solved PoC bytes
 
 
@@ -55,9 +58,16 @@ class CyberGymService:
     """A running CyberGym validator over one holdout + finalized chain context.
 
     Transport-free: call the methods directly, or mount `handle_dispatch`/
-    `handle_submit` behind any HTTP/axon shim. State is per-epoch and in memory —
-    a production deployment persists the dispatched batches; here they live for the
-    life of the service, which is one epoch.
+    `handle_submit` behind any HTTP/axon shim.
+
+    Durability: accepted solves are written through to `solve_store` as they are
+    accepted and rehydrated at construction, so a restart mid-epoch resumes with
+    the same scoring input (`run_epoch` re-draws each batch from the chain-anchored
+    nonce, so the commitment plus the PoC bytes are all it needs). The *dispatch*
+    messages are still in-memory only: after a restart a miner must re-request its
+    batch (same commitment, same nonce, same batch) before it can submit again.
+    `compose_lane` refuses to publish while durable evidence shows solves this run
+    did not score, so a lost epoch is loud instead of a silent forced burn.
     """
 
     def __init__(
@@ -68,6 +78,8 @@ class CyberGymService:
         backend,
         corpus_store,
         score_store: CyberGymScoreStore,
+        solve_store: CyberGymSolveStore | None = None,
+        solve_durability_required: bool = True,
         validator_hotkey: str,
         private_key: Ed25519PrivateKey,
         signing_key_id: str,
@@ -99,11 +111,34 @@ class CyberGymService:
                 "attestation. Dev/test only — never in production.",
                 stacklevel=2,
             )
+        # Fail closed on durability too. Accepted solves lived only in memory
+        # until epoch close, so a restart mid-epoch lost them all while the corpus
+        # rows survived, and the lane published a forced-burn vector: every miner
+        # paid for the validator's restart. A running service therefore needs a
+        # solve store, or an explicit opt-out that says what is being given up.
+        if solve_store is None:
+            if solve_durability_required:
+                raise ProtocolError(
+                    "CyberGym requires a durable solve store: pass "
+                    "solve_store=CyberGymSolveStore(path), or "
+                    "solve_durability_required=False for the ephemeral dev/test path "
+                    "(a restart before epoch close then loses every accepted solve, and "
+                    "the service will REFUSE to compose the lane rather than publish a "
+                    "silent forced burn)."
+                )
+            import warnings
+            warnings.warn(
+                "CyberGymService running WITHOUT a durable solve store "
+                "(solve_durability_required=False): accepted solves live in memory "
+                "only, so a restart before epoch close loses them. Dev/test only.",
+                stacklevel=2,
+            )
         self.holdout = holdout
         self.chain = chain
         self._backend = backend
         self._corpus = corpus_store
         self._scores = score_store
+        self._solves = solve_store
         self._validator_hotkey = validator_hotkey
         self._private_key = private_key
         self._signing_key_id = signing_key_id
@@ -120,6 +155,24 @@ class CyberGymService:
         self._by_batch: dict[str, str] = {}  # batch_id -> miner_hotkey
         self._dispatched: set[str] = set()   # task_ids actually served this epoch
         self._results: list[MinerResult] = []
+        self._scored_miners: set[str] = set()  # miners this process actually scored
+        self._restore_solves()
+
+    # -- crash recovery ---------------------------------------------------- #
+    def _restore_solves(self) -> None:
+        """Rehydrate this epoch's accepted solves from the durable solve store.
+
+        Byte-identical recovery: `run_epoch` re-draws each miner's batch from the
+        chain-anchored nonce (derived from its hotkey and committed model), so the
+        model commitment plus the accepted PoC bytes are the complete input. A
+        restarted service scores exactly what the killed one would have.
+        """
+        if self._solves is None:
+            return
+        for miner_hotkey, (commitment, pocs) in self._solves.commits(
+            self.chain.source_epoch
+        ).items():
+            self._miners[miner_hotkey] = _MinerState(commitment, None, dict(pocs))
 
     # -- dispatch (validator -> miner) ------------------------------------- #
     def dispatch_for(self, miner_hotkey: str, model_commitment: str) -> DispatchMessage:
@@ -130,7 +183,22 @@ class CyberGymService:
             cutoff=self._cutoff, as_of=self._as_of, batch_size=self._batch_size,
             context_provider=self.holdout.context_provider,
         )
-        self._miners[miner_hotkey] = _MinerState(model_commitment, message)
+        # A repeat dispatch must not silently erase accepted solves. Same committed
+        # model -> same nonce -> same batch, so the solves already accepted this
+        # epoch still belong to it and are kept. A different commitment is a
+        # different batch, so the old solves are for other tasks: drop them, and
+        # drop them durably, or a later restart would resurrect them.
+        previous = self._miners.get(miner_hotkey)
+        if previous is not None and previous.model_commitment == model_commitment:
+            self._miners[miner_hotkey] = _MinerState(
+                model_commitment, message, dict(previous.pocs)
+            )
+        else:
+            if previous is not None and self._solves is not None:
+                self._solves.forget_miner(
+                    epoch=self.chain.source_epoch, miner_hotkey=miner_hotkey
+                )
+            self._miners[miner_hotkey] = _MinerState(model_commitment, message)
         self._by_batch[message.batch_id] = miner_hotkey
         self._dispatched.update(t.task_id for t in message.tasks)
         return message
@@ -155,9 +223,18 @@ class CyberGymService:
             # each miner's units from exactly these PoCs, so an unattested (or
             # unverifiable-attestation) solve earns nothing even though it crashed.
             try:
-                state.pocs[envelope.task_id] = base64.b64decode(envelope.poc_base64, validate=True)
+                poc = base64.b64decode(envelope.poc_base64, validate=True)
             except (ValueError, TypeError) as exc:  # pragma: no cover - process_submission already checked
                 raise ProtocolError("PoC is not valid base64") from exc
+            state.pocs[envelope.task_id] = poc
+            # Durable before acknowledged: the miner is told this solve counted, so
+            # it has to survive a restart between now and epoch close.
+            if self._solves is not None:
+                self._solves.record(
+                    epoch=self.chain.source_epoch, miner_hotkey=miner_hotkey,
+                    model_commitment=state.model_commitment,
+                    task_id=envelope.task_id, poc=poc,
+                )
         return outcome
 
     # -- artifact (validator -> miner): the vulnerable program to analyse --- #
@@ -252,10 +329,59 @@ class CyberGymService:
             score_store=self._scores, cutoff=self._cutoff, as_of=self._as_of,
             issued_at=issued_at, batch_size=self._batch_size, level_weights=self._weights,
         )
+        self._scored_miners.update(m.miner_hotkey for m in miners)
         return self._results
 
+    def lost_durable_solvers(self) -> set[str]:
+        """Miners with durable evidence of accepted solves this process cannot score.
+
+        The corpus rows and the solve store outlive the process; the in-memory
+        scoring state does not. A miner that appears in durable evidence but has
+        neither a persisted score nor recoverable in-memory solves has had its
+        epoch's work destroyed by the restart, and composing would burn its share.
+        """
+        epoch = self.chain.source_epoch
+        durable_solvers = {row["miner_hotkey"] for row in self._corpus.rows(source_epoch=epoch)}
+        if self._solves is not None:
+            durable_solvers |= set(self._solves.commits(epoch))
+        recoverable = {hk for hk, st in self._miners.items() if st.pocs}
+        return durable_solvers - recoverable - set(self._scores.epoch_scores(epoch))
+
+    def pending_solvers(self) -> set[str]:
+        """Miners holding accepted solves that this run has not scored yet."""
+        return {
+            hk for hk, st in self._miners.items()
+            if st.pocs and hk not in self._scored_miners
+        }
+
     def compose_lane(self, *, allocation: Decimal, lane_id: str = CYBERGYM_LANE) -> Lane:
-        """Build this epoch's lane from the persisted verified scores."""
+        """Build this epoch's lane from the persisted verified scores.
+
+        Refuses rather than publishing an under-credited vector. Two ways the lane
+        would otherwise be quietly wrong, both of which look identical to "nobody
+        solved anything" once the vector is published:
+
+          * solves destroyed by a restart (no durable solve store), and
+          * accepted solves that were never scored (composing before `score_epoch`).
+
+        Silence is the failure being fixed, so this raises and the operator decides.
+        """
+        lost = self.lost_durable_solvers()
+        if lost:
+            raise ProtocolError(
+                "refusing to compose the CyberGym lane: durable evidence shows "
+                f"{len(lost)} miner(s) solved epoch {self.chain.source_epoch} but this "
+                f"run cannot score them ({', '.join(sorted(lost))}). Restart with the same "
+                "solve_store to recover the epoch; publishing now would forcibly burn "
+                "their share."
+            )
+        pending = self.pending_solvers()
+        if pending:
+            raise ProtocolError(
+                "refusing to compose the CyberGym lane: "
+                f"{len(pending)} miner(s) have accepted solves that were never scored "
+                f"({', '.join(sorted(pending))}). Call score_epoch first."
+            )
         return compose_scores_lane(
             self._scores, self.chain.source_epoch, allocation=allocation, lane_id=lane_id
         )
