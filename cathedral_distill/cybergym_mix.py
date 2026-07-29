@@ -236,6 +236,17 @@ class MixedTaskSource:
             return {}
         return dict(provider(task_id))
 
+    def artifact(self, task_id: str):
+        """Route the vulnerable-program artifact to the owning sub-source. Returns
+        None for an unknown task or a source that delivers no inline artifact (a
+        corpus source, whose binary is fetched out of band by its digest)."""
+        key = self._origin.get(task_id)
+        if key is None:
+            return None
+        source = self._by_key[key].source
+        provider = getattr(source, "artifact", None)
+        return provider(task_id) if provider is not None else None
+
     def backend(self, task_id: str, poc: bytes, mode: str) -> int:
         """Route the differential check to the owning sub-source's backend.
 
@@ -287,6 +298,12 @@ class CorpusSource:
     def context_provider(self, task_id: str) -> Mapping[str, str]:
         return dict(self._context.get(task_id, {}))
 
+    def artifact(self, task_id: str):
+        """A real corpus task's program is its prebuilt binary, fetched out of band
+        by `binary_digest` (the ~130 GB dataset) — not delivered inline. Returns
+        None so the mix reports "no inline artifact" rather than inventing one."""
+        return None
+
     def backend(self, task_id: str, poc: bytes, mode: str) -> int:
         if self._backend is None:
             raise MixError("CorpusSource was constructed without a differential backend")
@@ -319,6 +336,11 @@ class PublicCanarySource:
 
     def context_provider(self, task_id: str) -> Mapping[str, str]:
         return dict(self._context.get(task_id, {}))
+
+    def artifact(self, task_id: str):
+        """Public canary tasks are real: their binary is fetched out of band by
+        digest, not delivered inline (see `CorpusSource.artifact`)."""
+        return None
 
     def backend(self, task_id: str, poc: bytes, mode: str) -> int:
         if self._backend is None:

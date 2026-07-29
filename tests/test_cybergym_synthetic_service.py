@@ -68,7 +68,7 @@ def _craft_overflow(source: str) -> bytes:
     size, and overflow by exactly one byte beyond the buffer — this crashes
     both synthetic bug classes (missing_bounds_check needs n>buf; off_by_one
     needs n>=buf; n=buf+1 satisfies both), matching cg_demo_synthetic.py."""
-    magic = bytes.fromhex(re.search(r'memcmp\(in, "\\x([0-9a-f]+)", 4\)', source).group(1))
+    magic = bytes(int(h, 16) for h in re.findall(r'\\x([0-9a-f]{2})', source))
     buf = int(re.search(r"char buf\[(\d+)\]", source).group(1))
     n = buf + 1
     return magic + n.to_bytes(2, "big") + b"A" * n
@@ -109,11 +109,10 @@ def test_synthetic_dispatch_submit_score_compose_end_to_end(tmp_path):
     task_id = d.tasks[0].task_id
     assert task_id.startswith("synthvuln:")
 
-    # A blind miner needs the revealed source to solve — pull it straight from
-    # the source's own context provider (level 0 reveals none via dispatch, so
-    # use the underlying source directly, mirroring how a level>=1 miner would
-    # read `context.description` from the dispatch message itself).
-    revealed = svc.holdout.pool.context_provider(task_id)["description"]
+    # The miner analyses the vulnerable program — the always-available ARTIFACT
+    # (what CyberGym hands a miner as the vulnerable build), fetched by task id
+    # regardless of level; the level-gated context carries only hints.
+    revealed = svc.holdout.pool.artifact(task_id)
     poc = _craft_overflow(revealed)
 
     outcome = svc.submit(_envelope(d, task_id, poc))
@@ -132,6 +131,77 @@ def test_synthetic_dispatch_submit_score_compose_end_to_end(tmp_path):
     feed = lf.compose_vector([lane], burn_hotkey="5Burn")
     assert {w["miner_hotkey"] for w in feed["weights"]} == {"5Miner"}
     assert feed["burn_snapshot"]["forced_burn_percentage"] == pytest.approx(10.0)
+
+
+def test_artifact_delivers_the_vulnerable_program_for_a_dispatched_task(tmp_path):
+    # A wire-only miner has no program otherwise — the artifact route delivers the
+    # 'vulnerable build' it analyses, for every dispatched task INCLUDING blind L0.
+    svc = _service(tmp_path)
+    d = svc.dispatch_for("5Miner", MODEL)
+    for dt in d.tasks:
+        program = svc.artifact_for(dt.task_id)
+        assert "memcpy" in program and "char buf[" in program        # the real program
+        # a blind L0 task carries no context hint, but the program is still delivered
+        if dt.level == 0:
+            assert dt.context == {}
+    # and via the transport-agnostic handler
+    got = svc.handle_artifact({"task_id": d.tasks[0].task_id})
+    assert "memcpy" in got["program"] and got["task_id"] == d.tasks[0].task_id
+
+
+def test_artifact_route_is_not_a_holdout_oracle(tmp_path):
+    # The holdout is secret: the service must NEVER generate-and-reveal a program
+    # for a task it did not dispatch (else the route leaks arbitrary challenges).
+    svc = _service(tmp_path)
+    svc.dispatch_for("5Miner", MODEL)
+    with pytest.raises(ProtocolError, match="no such dispatched task"):
+        svc.artifact_for("synthvuln:deadbeef:0")             # never dispatched
+    assert svc.handle_artifact({"task_id": "synthvuln:deadbeef:0"}) == {"error": "no such dispatched task"}
+    assert "error" in svc.handle_artifact({})                # missing task_id
+
+
+def test_artifact_delivered_over_the_http_wire(tmp_path):
+    import json
+    import threading
+    import urllib.request
+
+    from cathedral_distill import cybergym_http as chttp
+
+    svc = _service(tmp_path)
+    server = chttp.make_server(svc, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+
+        def post(path, obj):
+            req = urllib.request.Request(base + path, data=json.dumps(obj).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read())
+
+        _, d = post(chttp.DISPATCH_PATH, {"miner_hotkey": "5Miner", "model_commitment": MODEL})
+        tid = d["tasks"][0]["task_id"]
+        status, art = post(chttp.ARTIFACT_PATH, {"task_id": tid})
+        assert status == 200 and "memcpy" in art["program"] and art["task_id"] == tid
+        # un-dispatched task refused over the wire (no holdout oracle)
+        assert post(chttp.ARTIFACT_PATH, {"task_id": "synthvuln:ffff:9"})[0] == 400
+    finally:
+        server.shutdown()
+
+
+def test_artifact_is_solvable_blind_end_to_end(tmp_path):
+    # The gap this closes: a level-0 (blind) task, unsolvable over the wire before
+    # because no program was delivered, is now solvable from the artifact alone.
+    svc = _service(tmp_path)
+    d = svc.dispatch_for("5Miner", MODEL)
+    l0 = next(t for t in d.tasks if t.level == 0)
+    program = svc.artifact_for(l0.task_id)                   # fetched, no hint
+    poc = _craft_overflow(program)
+    outcome = svc.submit(_envelope(d, l0.task_id, poc))
+    assert outcome.solved and outcome.work_units == Decimal("8")  # level-0 weight
 
 
 def test_synthetic_cheater_with_a_looked_up_poc_does_not_solve(tmp_path):

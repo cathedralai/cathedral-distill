@@ -243,6 +243,20 @@ def test_corpus_source_without_backend_fails_closed():
         cs.backend("arvo:1", b"x", "vul")
 
 
+def test_mix_routes_artifact_to_synthetic_and_none_for_corpus():
+    corpus = CorpusSource(_corpus_pool(), backend=lambda *a: 0)
+    m = MixedTaskSource([SourceSpec("syn", SyntheticTaskSource(), 1),
+                         SourceSpec("corpus", corpus, 1)])
+    b = m.draw(size=6, nonce=NONCE, as_of=NOW, cutoff=CUTOFF)
+    for t in b.tasks:
+        art = m.artifact(t.task_id)
+        if m.origin(t.task_id) == "syn":
+            assert art is not None and "memcpy" in art        # synthetic program delivered inline
+        else:
+            assert art is None                                # corpus binary fetched out of band
+    assert m.artifact("never-drawn") is None
+
+
 def test_synthetic_plus_corpus_blend_both_route_and_score():
     # corpus backend that solves every corpus task on vul; synthetic self-checks.
     corpus = CorpusSource(_corpus_pool(), context={}, backend=lambda tid, poc, mode: 1 if mode == "vul" else 0)
@@ -265,7 +279,7 @@ def test_synthetic_plus_corpus_blend_both_route_and_score():
 # --------------------------------------------------------------------------- #
 
 def _craft_overflow(source: str) -> bytes:
-    magic = bytes.fromhex(re.search(r'memcmp\(in, "\\x([0-9a-f]+)", 4\)', source).group(1))
+    magic = bytes(int(h, 16) for h in re.findall(r'\\x([0-9a-f]{2})', source))
     buf = int(re.search(r"char buf\[(\d+)\]", source).group(1))
     n = buf + 1
     return magic + n.to_bytes(2, "big") + b"A" * n
@@ -301,9 +315,9 @@ def test_mix_runs_through_the_live_service_end_to_end(tmp_path):
 
     d = svc.dispatch_for("5Miner", MODEL)
     assert len(d.tasks) == 4
-    # solve every task from its revealed source
+    # solve every task from its vulnerable-program artifact
     for dt in d.tasks:
-        src = svc.holdout.pool.context_provider(dt.task_id)["description"]
+        src = svc.holdout.pool.artifact(dt.task_id)
         poc = _craft_overflow(src)
         env = SubmissionEnvelope(batch_id=d.batch_id, task_id=dt.task_id, miner_hotkey="5Miner",
                                  poc_base64=base64.b64encode(poc).decode(),
