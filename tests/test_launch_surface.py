@@ -112,6 +112,32 @@ def test_the_other_two_lanes_do_derive_their_units():
     assert decision.verdict == itf.FAIL
 
 
+def test_an_omitted_policy_set_is_not_the_same_as_an_empty_one():
+    """An operator who omits an allowlist and one who pins an empty allowlist must
+    get different answers, or "I forgot to configure the policy" silently becomes
+    "everything is admitted". Omitted (None) skips the check; empty admits nothing.
+    """
+    receipt = FX.cpu_receipt(subject="5Miner", work_units="10")
+    assert _verify(receipt).verdict == itf.PASS          # omitted: no policy applied
+
+    empty_allowlist = itf.verify_lane_receipt(
+        itf.KIND_COMPUTE_CPU, receipt, lane=LANE_CPU, key_registry=FX.registry,
+        source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO,
+        consumption_ledger=itf.NO_REPLAY_LEDGER,
+        allowed_measurements=frozenset(),
+    )
+    assert empty_allowlist.verdict == itf.FAIL
+    assert "not admitted by policy" in empty_allowlist.detail
+
+    pinned = itf.verify_lane_receipt(
+        itf.KIND_COMPUTE_CPU, receipt, lane=LANE_CPU, key_registry=FX.registry,
+        source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO,
+        consumption_ledger=itf.NO_REPLAY_LEDGER,
+        allowed_measurements=frozenset({str(receipt["measurement"])}),
+    )
+    assert pinned.verdict == itf.PASS
+
+
 # --------------------------------------------------------------------------- #
 # 2. The launch path is four kinds, and nothing here writes to a chain
 # --------------------------------------------------------------------------- #
