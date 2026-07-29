@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "CyberGym agent (local, debug)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "cathedral_distill.cybergym_agent_cli",
+      "args": ["--local", "--level", "0", "--out", "${workspaceFolder}/.cybergym/trajectory.jsonl"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "AGENT_API_BASE": "${env:AGENT_API_BASE}",
+        "AGENT_API_KEY": "${env:AGENT_API_KEY}",
+        "AGENT_MODEL": "${env:AGENT_MODEL}"
+      }
+    }
+  ]
+}
