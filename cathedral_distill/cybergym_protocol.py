@@ -22,15 +22,21 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
+from cathedral_distill.attestation import AttestationPolicy
 from cathedral_distill.cybergym import (
     DEFAULT_LEVEL_WEIGHTS,
     Level,
     PoCSubmission,
     Task,
     derived_work_units,
+)
+from cathedral_distill.cybergym_attest import (
+    CyberGymAttestError,
+    verify_submission_attestation,
 )
 from cathedral_distill.cybergym_batch import Batch, TaskPool, derive_batch_nonce
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
@@ -160,20 +166,31 @@ def dispatch(
 
 @dataclass(frozen=True)
 class SubmissionEnvelope:
-    """One miner's answer to one task: the PoC bytes and its trajectory."""
+    """One miner's answer to one task: the PoC bytes, its trajectory, and the
+    Intel-TDX attestation proving it was produced inside a measured enclave.
+
+    `attestation` is a base64-encoded `cathedral_cc_attestation_v1` token whose
+    report_data binds this exact submission (see `cybergym_attest`). It is optional
+    on the wire — a miner may omit it — but when the validator runs with a TDX
+    attestation policy configured, a submission without a valid one earns nothing.
+    """
 
     batch_id: str
     task_id: str
     miner_hotkey: str
     poc_base64: str
     trace: Mapping[str, Any]  # a cathedral_trace_submission_v1 document
+    attestation: str | None = None  # base64 cathedral_cc_attestation_v1 token
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        doc: dict[str, Any] = {
             "schema": ENVELOPE_SCHEMA, "batch_id": self.batch_id,
             "task_id": self.task_id, "miner_hotkey": self.miner_hotkey,
             "poc_base64": self.poc_base64, "trace": dict(self.trace),
         }
+        if self.attestation is not None:
+            doc["attestation"] = self.attestation
+        return doc
 
     @classmethod
     def from_json(cls, raw: bytes | str) -> "SubmissionEnvelope":
@@ -188,9 +205,12 @@ class SubmissionEnvelope:
                 raise ProtocolError(f"submission envelope is missing {key}")
         if not isinstance(doc["trace"], Mapping):
             raise ProtocolError("submission trace must be an object")
+        attestation = doc.get("attestation")
+        if attestation is not None and not isinstance(attestation, str):
+            raise ProtocolError("submission attestation must be a base64 string")
         return cls(batch_id=str(doc["batch_id"]), task_id=str(doc["task_id"]),
                    miner_hotkey=str(doc["miner_hotkey"]), poc_base64=str(doc["poc_base64"]),
-                   trace=doc["trace"])
+                   trace=doc["trace"], attestation=attestation)
 
 
 def _trace_from_dict(doc: Mapping[str, Any]) -> TraceSubmission:
@@ -215,7 +235,15 @@ def _trace_from_dict(doc: Mapping[str, Any]) -> TraceSubmission:
 
 @dataclass(frozen=True)
 class SubmissionOutcome:
-    """The validator's verdict on one submission."""
+    """The validator's verdict on one submission.
+
+    `solved` is the raw differential-crash result (the PoC crashes the vulnerable
+    build, not the patched one). `attested` is whether the required Intel-TDX
+    attestation verified and bound to this submission. A solve earns work units
+    only when it is *creditable* = solved AND attested; an unattested solve is a
+    genuine crash that proves capability but earns nothing (its PoC never enters
+    the reward pool, and it never lands in the corpus).
+    """
 
     task_id: str
     miner_hotkey: str
@@ -224,11 +252,17 @@ class SubmissionOutcome:
     solved: bool
     trainable: bool
     reason: str
-    work_units: Decimal            # level-weighted, validator-derived (0 if unsolved)
+    work_units: Decimal            # level-weighted, validator-derived (0 unless creditable)
     bonus: float                   # trace + seal bonus, gated on quality
     poc_sha256: str
     trace_id: str | None
     submission: TraceSubmission | None = field(default=None, repr=False)
+    attested: bool = True          # Intel-TDX attestation verified + bound (vacuously true if no policy)
+
+    @property
+    def creditable(self) -> bool:
+        """A solve that both crashed AND carries a verified TDX attestation."""
+        return self.solved and self.attested
 
 
 def process_submission(
@@ -238,14 +272,24 @@ def process_submission(
     *,
     trace_policy: TraceQualityPolicy = TraceQualityPolicy(),
     weights: Mapping[Level, Decimal] = DEFAULT_LEVEL_WEIGHTS,
+    attestation_policy: AttestationPolicy | None = None,
+    now: datetime | None = None,
 ) -> SubmissionOutcome:
     """Verify one submission against the batch it answers, and score it.
 
     Fails closed: an off-batch task, a PoC whose digest disagrees with the trace,
     or a malformed trace is rejected. A well-formed submission is run through the
-    differential crash test; only a genuine solve earns level-weighted units, and
-    only a solve whose trace clears the structural floor (and carries a model seal)
-    is `trainable` — eligible for the corpus and the trace bonus.
+    differential crash test to set `solved`.
+
+    Intel-TDX attestation gate: when `attestation_policy` is provided (production),
+    the submission must carry a valid TDX attestation bound to (batch, task, PoC,
+    miner) — see `cybergym_attest`; a solve is *creditable* (earns level-weighted
+    units, is corpus-eligible) only when it is both solved AND attested. When no
+    policy is given (the hardware-free dev/test path), attestation is not required
+    and `attested` is vacuously true, preserving the prior behaviour exactly. A
+    missing or invalid attestation is never a hard protocol error — the submission
+    is simply not credited (`attested=False`), so one bad attestation cannot break
+    an epoch's intake.
     """
     if envelope.batch_id != dispatch_msg.batch_id:
         raise ProtocolError("submission batch_id does not match the dispatched batch")
@@ -273,12 +317,34 @@ def process_submission(
     poc_sub = PoCSubmission(task_id=task.task_id, poc_sha256=digest, result=result)
 
     solved = result.solved
-    work_units = derived_work_units(task, poc_sub if solved else None, weights)
-    trainable = bool(solved and submission.is_trainable(trace_policy))
-    bonus = submission_bonus(submission, trace_policy) if solved else 0.0
+
+    # Intel-TDX attestation: the CyberGym miner MUST run in an attested TDX enclave.
+    attested = True
+    attest_reason = ""
+    if attestation_policy is not None:
+        if not envelope.attestation:
+            attested, attest_reason = False, "missing_tdx_attestation"
+        else:
+            try:
+                token = base64.b64decode(envelope.attestation, validate=True)
+                verify_submission_attestation(
+                    token, batch_id=envelope.batch_id, task_id=envelope.task_id,
+                    poc_sha256=digest, trace_id=submission.trace_id(),
+                    miner_hotkey=envelope.miner_hotkey,
+                    policy=attestation_policy, now=now,
+                )
+            except (ValueError, TypeError, CyberGymAttestError) as exc:
+                attested, attest_reason = False, f"tdx_attestation_invalid:{exc}"
+
+    creditable = solved and attested
+    work_units = derived_work_units(task, poc_sub if creditable else None, weights)
+    trainable = bool(creditable and submission.is_trainable(trace_policy))
+    bonus = submission_bonus(submission, trace_policy) if creditable else 0.0
 
     if not solved:
         reason = "not_solved:" + result.outcome
+    elif not attested:
+        reason = "solved_unattested:" + attest_reason
     elif not trainable:
         reason = "solved_trace_below_floor:" + submission.quality(trace_policy).reason
     else:
@@ -288,8 +354,8 @@ def process_submission(
         task_id=task.task_id, miner_hotkey=envelope.miner_hotkey,
         source_epoch=dispatch_msg.source_epoch, level=dt.level, solved=solved,
         trainable=trainable, reason=reason, work_units=work_units, bonus=bonus,
-        poc_sha256=digest, trace_id=submission.trace_id() if solved else None,
-        submission=submission if solved else None,
+        poc_sha256=digest, trace_id=submission.trace_id() if creditable else None,
+        submission=submission if creditable else None, attested=attested,
     )
 
 

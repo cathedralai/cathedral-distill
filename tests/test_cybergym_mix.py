@@ -311,7 +311,7 @@ def test_mix_runs_through_the_live_service_end_to_end(tmp_path):
         corpus_store=CyberGymCorpusStore(str(tmp_path / "c.sqlite")),
         score_store=CyberGymScoreStore(str(tmp_path / "s.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
-        batch_size=4, cutoff=CUTOFF, as_of=NOW)
+        batch_size=4, cutoff=CUTOFF, as_of=NOW, attestation_required=False)
 
     d = svc.dispatch_for("5Miner", MODEL)
     assert len(d.tasks) == 4

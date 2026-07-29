@@ -93,16 +93,19 @@ in behind the injected backend.
    also gets the patch (`LEVEL_CONTEXT_FIELDS`). Deterministic and identical
    across validators.
 2. **Submit** — `SubmissionEnvelope` (miner → validator). `{batch_id, task_id,
-   poc_base64, trace}`, where `trace` is a `cathedral_trace_submission_v1`
-   document. `from_json` validates it fail-closed.
+   poc_base64, trace, attestation}`, where `trace` is a
+   `cathedral_trace_submission_v1` document and `attestation` is a base64
+   `cathedral_cc_attestation_v1` Intel-TDX token (see the attestation gate below).
+   `from_json` validates it fail-closed.
 3. **Verify + score** — `process_submission`. Binds the trace to the exact PoC and
    the challenged task, runs the differential crash test (`solved` ⟺ crashes the
-   vulnerable build, not the patched one), applies the structural trace floor, and
-   scores: level-weighted `derived_work_units` (validator-derived, never
-   miner-claimed) plus the trace/seal bonus. Off-batch, wrong-batch,
-   digest-mismatch, and malformed traces are refused; an unsolved PoC earns zero;
-   a solved-but-thin trace scores the exploit but earns no trace bonus and never
-   enters the corpus.
+   vulnerable build, not the patched one), verifies the **Intel-TDX attestation**
+   (`attested`), applies the structural trace floor, and scores: level-weighted
+   `derived_work_units` (validator-derived, never miner-claimed) plus the
+   trace/seal bonus. A solve is *creditable* only when **`solved` AND `attested`**;
+   off-batch, wrong-batch, digest-mismatch, and malformed traces are refused; an
+   unsolved or unattested PoC earns zero; a solved-but-thin trace scores nothing
+   extra and never enters the corpus.
 4. **Corpus** — `CyberGymCorpusStore`. A verified + trainable + licenced + sealed
    row is written as the trajectory **verbatim** — the submission format *is* the
    dataset format, so a verified solution compounds into training data with no
@@ -112,6 +115,38 @@ The trace floor (`trace_submission.check_trace_quality`) is structural and
 model-free: ≥ 5 steps, `read_file` + `write_poc`, ≥ 200 reasoning tokens, ≥ 2
 `file:line` references, and no padded loops — cheap on every submission and
 un-gameable by spending compute.
+
+## The Intel-TDX attestation gate
+
+A verified PoC proves *a* bug was found; it does not prove *this* miner found it,
+in an attested run, rather than outsourcing the analysis or replaying another
+miner's work (the SparkProof **SEC-5** gap). So the CyberGym miner **must run its
+bug-finding agent inside an Intel TDX CPU enclave** and attach a TDX attestation to
+every submission; a solve earns work units **only** when that attestation verifies
+and is bound to the exact submission (`cybergym_attest`).
+
+- **Binding.** `report_data = sha256("cathedral-cybergym-attest-v1␀" ‖ batch_id ‖
+  task_id ‖ poc_sha256 ‖ trace_id ‖ miner_hotkey)`. The enclave commits this into
+  the TDX quote; the validator re-derives it and requires the match. Because it
+  binds the batch (→ chain nonce → block + committed model), the task, the PoC,
+  **the trajectory** (`trace_id` content-addresses the trace), and the miner, an
+  attestation cannot be replayed for a different task/PoC, lifted from another
+  miner, reused across epochs, or paired with a fabricated out-of-enclave trace.
+- **Verification.** `verify_submission_attestation` reuses `attestation.verify_attestation`
+  (trusted-root Ed25519 signature, pinned measurement allow-list, `report_data`
+  nonce binding, freshness — all fail-closed) and additionally requires
+  `tee == intel_tdx` (an AMD SEV-SNP quote is refused for this track).
+- **Enforcement is mandatory and fail-closed.** `CyberGymService` refuses to start
+  without an attestation policy unless the operator *explicitly* opts out
+  (`attestation_required=False`) for the hardware-free dev/test path — and warns
+  loudly when it does. Only *creditable* (solved ∧ attested) PoCs enter the reward
+  pool `run_epoch` scores, so a forgotten kwarg can never silently credit
+  unattested work.
+
+The hardware-free reference uses a normalized Ed25519-signed token standing in for
+a real Intel DCAP quote; production ingests Cathedral's live `tee_attestation`
+(`tdx-1.5` `quote_b64` + collateral), where the submission binds through the
+attested **workload** digests (input task + output PoC/trace).
 
 ## Auditing a receipt
 

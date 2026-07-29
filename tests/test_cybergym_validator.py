@@ -286,11 +286,25 @@ def test_derived_cybergym_candidate_crowns():
     cand = cv.derive_cybergym_candidate(
         _receipt(), KEYREG, source_epoch=SOURCE_EPOCH, chain=_chain(), model_commitment=mc,
         miner_coldkey="ck-miner", evaluator_coldkey="ck-val", bundle_registry=_bundle_reg(mc),
-        reproduction=_receipt(validator_hotkey="5Validator2"))
+        reproduction=_receipt(validator_hotkey="5Validator2"), attestation_verified=True)
     assert cand.evidence_verified and cand.attested and not cand.contamination_detected
     policy = cv.cybergym_track_policy()
     dec = fr.Frontier([policy]).submit(policy.track, cand)
     assert dec.crowned, dec.reason
+
+
+def test_cybergym_candidate_fails_attested_gate_without_tdx_evidence():
+    """A valid receipt signature must NOT rubber-stamp the mandatory attested gate:
+    without a real TDX attestation result, attested is False and the gate fails."""
+    from cathedral_distill import frontier as fr
+    mc = _digest("ckpt")
+    cand = cv.derive_cybergym_candidate(
+        _receipt(), KEYREG, source_epoch=SOURCE_EPOCH, chain=_chain(), model_commitment=mc,
+        miner_coldkey="ck-miner", evaluator_coldkey="ck-val", bundle_registry=_bundle_reg(mc),
+        reproduction=_receipt(validator_hotkey="5Validator2"))   # attestation_verified defaults False
+    assert cand.evidence_verified and not cand.attested
+    gates = fr.evaluate_gates(cand, cv.cybergym_track_policy())
+    assert fr.GATE_ATTESTED_RECEIPT in gates.failures
 
 
 def test_derived_candidate_detects_contamination_on_nonce_mismatch():
@@ -308,7 +322,8 @@ def test_self_evaluation_fails_the_independent_gate():
     mc = _digest("ckpt")
     cand = cv.derive_cybergym_candidate(_receipt(), KEYREG, source_epoch=SOURCE_EPOCH,
         chain=_chain(), model_commitment=mc, miner_coldkey="same", evaluator_coldkey="same",
-        bundle_registry=_bundle_reg(mc), reproduction=_receipt(validator_hotkey="5Validator2"))
+        bundle_registry=_bundle_reg(mc), reproduction=_receipt(validator_hotkey="5Validator2"),
+        attestation_verified=True)
     assert not cand.independent_evaluator
     gates = fr.evaluate_gates(cand, cv.cybergym_track_policy())
     assert fr.GATE_INDEPENDENT_EVALUATOR in gates.failures
