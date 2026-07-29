@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral_distill import cybergym_receipt as cr
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level, PoCSubmission, score_batch
-from cathedral_distill.cybergym_batch import Batch, TaskPool, derive_batch_nonce, draw_batch
+from cathedral_distill.cybergym_batch import Batch, TaskPool, derive_batch_nonce
 from cathedral_distill.cybergym_scores import CyberGymScoreStore
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
 from cathedral_distill.receipt_keys import ReceiptKeyRegistry
@@ -174,6 +174,9 @@ def run_epoch(
     miners' scores are only ever compared through the frontier on the same
     batch_id. Returns one `MinerResult` per miner, with the signed receipt and the
     lane contribution ready for `lane_feed.compose_vector`.
+
+    `pool` is any draw-capable source (see `cybergym_protocol.dispatch`'s
+    docstring) — a real `TaskPool` or `cybergym_synthetic.SyntheticTaskSource`.
     """
     # The validator resolves its own signing key by id, exactly as a peer will —
     # never a caller-supplied key.
@@ -187,7 +190,7 @@ def run_epoch(
             netuid=chain.netuid, source_epoch=chain.source_epoch,
             miner_hotkey=miner.miner_hotkey, model_commitment=miner.model_commitment,
         )
-        batch = draw_batch(pool, size=batch_size, nonce=nonce, as_of=as_of, cutoff=cutoff)
+        batch = pool.draw(size=batch_size, nonce=nonce, as_of=as_of, cutoff=cutoff)
 
         submissions: list[PoCSubmission] = []
         for task in batch.tasks:

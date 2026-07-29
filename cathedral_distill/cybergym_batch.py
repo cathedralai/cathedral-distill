@@ -168,11 +168,25 @@ class TaskPool:
             key=lambda t: t.task_id,
         )
 
+    def draw(self, *, size: int, nonce: str, as_of: datetime, cutoff: datetime) -> "Batch":
+        """The uniform draw interface `dispatch`/`run_epoch` call. Delegates to
+        the free `draw_batch` function — same behavior, just callable
+        polymorphically alongside any other draw-capable source (e.g.
+        `cybergym_synthetic.SyntheticTaskSource`) without either caller needing
+        to know which kind of source it has."""
+        return draw_batch(self, size=size, nonce=nonce, as_of=as_of, cutoff=cutoff)
+
 
 def _batch_id(nonce: str, task_ids: Sequence[str]) -> str:
     """Commitment over the drawn set. Order-independent (ids are sorted)."""
     body = (nonce + "\x00" + "\x00".join(sorted(task_ids))).encode("utf-8")
     return "sha256:" + hashlib.sha256(BATCH_DOMAIN + body).hexdigest()
+
+
+# Public alias: other draw-capable sources (e.g. the synthetic generator) reuse
+# the same commitment scheme so a batch_id means the same thing regardless of
+# which source produced the tasks.
+batch_id_for = _batch_id
 
 
 def draw_batch(
