@@ -235,7 +235,7 @@ def test_full_epoch_persists_scores_and_feeds_the_vector(tmp_path):
     results = cv.run_epoch(
         miners, _pool(), chain, validator_hotkey="5Validator", private_key=KEY,
         signing_key_id="cybergym-test-1", backend=backend, score_store=store,
-        cutoff=CUTOFF, as_of=NOW, issued_at=ISSUED, batch_size=3)
+        cutoff=CUTOFF, as_of=NOW, issued_at=ISSUED, batch_size=3, gates_required=False)
 
     assert {r.miner_hotkey for r in results} == {"5Alice", "5Bob"}
     # every receipt independently verifies, and each miner drew its own batch
@@ -364,7 +364,8 @@ def test_full_epoch_is_byte_identical_on_re_run(tmp_path):
         results = cv.run_epoch(
             miners, _pool(), chain, validator_hotkey="5Validator", private_key=KEY,
             signing_key_id="cybergym-test-1", backend=_backend({"arvo:1", "arvo:2"}),
-            score_store=store, cutoff=CUTOFF, as_of=NOW, issued_at=ISSUED, batch_size=3)
+            score_store=store, cutoff=CUTOFF, as_of=NOW, issued_at=ISSUED, batch_size=3,
+            gates_required=False)
         cyber = lf.Lane("cathedral_cybergym", Decimal("0.90"), [
             lf.LaneContribution(miner_hotkey=r.contribution["miner_hotkey"],
                                 receipt_id=r.contribution["receipt_id"],

@@ -37,7 +37,13 @@ from cathedral_distill.cybergym_protocol import (
     process_submission,
 )
 from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore
-from cathedral_distill.cybergym_validator import ChainContext, MinerCommit, MinerResult, run_epoch
+from cathedral_distill.cybergym_validator import (
+    ChainContext,
+    EmissionGatePolicy,
+    MinerCommit,
+    MinerResult,
+    run_epoch,
+)
 from cathedral_distill.lane_feed import Lane, LaneContribution
 from cathedral_distill.trace_submission import TraceQualityPolicy
 
@@ -91,6 +97,8 @@ class CyberGymService:
         attestation_policy: AttestationPolicy | None = None,
         attestation_now: datetime | None = None,
         attestation_required: bool = True,
+        gate_policy: EmissionGatePolicy | None = None,
+        gates_required: bool = True,
     ) -> None:
         # Fail closed: Intel-TDX attestation is a MANDATORY control for this track,
         # so the running service refuses to start without an attestation policy
@@ -133,6 +141,17 @@ class CyberGymService:
                 "only, so a restart before epoch close loses them. Dev/test only.",
                 stacklevel=2,
             )
+        # And fail closed on the anti-gaming gates, for the same reason: the
+        # emission path (score_epoch -> run_epoch -> cybergym_scores -> adapter) is
+        # what pays, so a forgotten gate policy must not quietly pay an
+        # unregistered model commitment.
+        if gate_policy is None and gates_required:
+            raise ProtocolError(
+                "CyberGym requires an anti-gaming gate policy on the emission path: "
+                "pass gate_policy=EmissionGatePolicy(bundle_registry=...), or "
+                "gates_required=False for the dev/test path (which persists scores "
+                "with NO registered-bundle or contamination gate)."
+            )
         self.holdout = holdout
         self.chain = chain
         self._backend = backend
@@ -151,6 +170,8 @@ class CyberGymService:
         # it (cybergym_attest) to be creditable; None keeps the hardware-free path.
         self._attestation_policy = attestation_policy
         self._attestation_now = attestation_now
+        self._gate_policy = gate_policy
+        self._gates_required = gates_required
         self._miners: dict[str, _MinerState] = {}
         self._by_batch: dict[str, str] = {}  # batch_id -> miner_hotkey
         self._dispatched: set[str] = set()   # task_ids actually served this epoch
@@ -328,6 +349,7 @@ class CyberGymService:
             signing_key_id=self._signing_key_id, backend=self._backend,
             score_store=self._scores, cutoff=self._cutoff, as_of=self._as_of,
             issued_at=issued_at, batch_size=self._batch_size, level_weights=self._weights,
+            gate_policy=self._gate_policy, gates_required=self._gates_required,
         )
         self._scored_miners.update(m.miner_hotkey for m in miners)
         return self._results

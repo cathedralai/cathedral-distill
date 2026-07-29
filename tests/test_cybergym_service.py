@@ -78,6 +78,7 @@ def _service(tmp_path, solved=("arvo:1",)):
         solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
         batch_size=2, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
+        gates_required=False,
     )
 
 

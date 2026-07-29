@@ -265,7 +265,8 @@ def test_service_requires_attestation_policy_by_default():
                   score_store=CyberGymScoreStore(":memory:"),
                   solve_store=CyberGymSolveStore(":memory:"), validator_hotkey="5V",
                   private_key=Ed25519PrivateKey.from_private_bytes(bytes(range(32))),
-                  signing_key_id="cybergym-1", batch_size=1, cutoff=None, as_of=None)
+                  signing_key_id="cybergym-1", batch_size=1, cutoff=None, as_of=None,
+                  gates_required=False)
     with pytest.raises(ProtocolError, match="attestation policy"):  # no policy -> refuse
         CyberGymService(Holdout(pool=SyntheticTaskSource(), _context={}), chain, **common)
 
@@ -304,7 +305,7 @@ def test_service_only_attested_miner_earns_and_composes():
         validator_hotkey="5Validator",
         private_key=Ed25519PrivateKey.from_private_bytes(bytes(range(32))),
         signing_key_id="cybergym-1", batch_size=2, cutoff=None, as_of=None,
-        attestation_policy=POLICY, attestation_now=NOW,
+        attestation_policy=POLICY, attestation_now=NOW, gates_required=False,
     )
     commit = "sha256:" + hashlib.sha256(b"m").hexdigest()
 
