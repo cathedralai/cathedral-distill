@@ -1,0 +1,38 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CyberGym: solve locally (live trajectory)",
+      "detail": "Run the agent on a fresh synthetic challenge and stream every step; writes .cybergym/trajectory.jsonl",
+      "type": "shell",
+      "command": "python3 -m cathedral_distill.cybergym_agent_cli --local --level ${input:level} --model ${input:model} --out ${workspaceFolder}/.cybergym/trajectory.jsonl",
+      "options": { "env": { "PYTHONPATH": "${workspaceFolder}" } },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "CyberGym: run agent tests",
+      "type": "shell",
+      "command": "python3 -m pytest -q tests/test_cybergym_agent.py",
+      "options": { "env": { "PYTHONPATH": "${workspaceFolder}" } },
+      "group": "test",
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "level",
+      "type": "pickString",
+      "description": "CyberGym difficulty (0 = blind, 3 = patch hint)",
+      "options": ["0", "1", "2", "3"],
+      "default": "0"
+    },
+    {
+      "id": "model",
+      "type": "promptString",
+      "description": "Model (any OpenAI-compatible endpoint): a local Hermes via Ollama/vLLM, or a hosted model",
+      "default": "deepseek-v4-pro"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "cathedral-cybergym-agent",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "postCreateCommand": "pip install -e . && pip install pytest",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "ms-python.debugpy"],
+      "settings": {
+        "python.testing.pytestEnabled": true,
+        "python.testing.pytestArgs": ["tests"]
+      }
+    }
+  },
+  "remoteEnv": {
+    "PYTHONPATH": "${containerWorkspaceFolder}",
+    "AGENT_API_BASE": "${localEnv:AGENT_API_BASE}",
+    "AGENT_API_KEY": "${localEnv:AGENT_API_KEY}",
+    "AGENT_MODEL": "${localEnv:AGENT_MODEL}"
+  }
+}
