@@ -18,6 +18,7 @@ dev = ["pytest>=8"]
 cathedral-cybergym = "cathedral_distill.operator_cli:main"
 cathedral-cybergym-verify = "cathedral_distill.cybergym_verify_cli:main"
 cathedral-cybergym-agent = "cathedral_distill.cybergym_agent_cli:main"
+cathedral-cybergym-server = "cathedral_distill.cybergym_repro_server:main"
 
 [tool.setuptools]
 packages = ["cathedral_distill"]

@@ -9,11 +9,13 @@ crashes the vulnerable build and spares the patched one, or it does not. There i
 no model in the scoring path and no subjective call.
 
 > **Status.** The scoring, batch-sealing, verification, spot-check, and emission
-> mechanism in this repo is implemented and tested. Running it against real
-> vulnerabilities additionally needs the CyberGym binary corpus behind the
-> verifier backend, and the on-chain weight-setting belongs to the
-> `cathedralconfidential` lane. Steps that need those are marked *(needs corpus)*
-> or *(needs chain)*.
+> mechanism in this repo is implemented and tested. The real verifier backend and
+> a draw-capable real-corpus source ship in
+> [`cybergym_repro.py`](../cathedral_distill/cybergym_repro.py) — see
+> [Running against real vulnerabilities](#running-against-real-vulnerabilities) —
+> and need only the OSS-Fuzz/ARVO Docker images pulled locally. On-chain
+> weight-setting belongs to the `cathedralconfidential` lane. Steps that need the
+> chain are marked *(needs chain)*.
 
 ---
 
@@ -141,6 +143,42 @@ that clears the quality floor and carries a reuse licence is training data. Coll
 both. This is the compounding asset — the reason to run the subnet is the growing,
 verified, licensed corpus, not any single epoch's weights. Curate for quality on
 the already-verified subset; do not train on unlicensed or unsealed traces.
+
+---
+
+## Running against real vulnerabilities
+
+The reference real backend is [`cybergym_repro.py`](../cathedral_distill/cybergym_repro.py) —
+the same `draw / context / artifact / backend` interface as the synthetic source,
+so `CyberGymService` runs identically, but wired to the genuine corpus:
+
+- **`docker_reproduce_backend(task_id, poc, mode)`** — the real differential. It
+  maps a task to its prebuilt image (`n132/arvo:{id}-{vul|fix}` running `/bin/arvo`,
+  or `cybergym/oss-fuzz:{id}-{vul|fix}` running `/usr/local/bin/run_poc` — the exact
+  images CyberGym publishes), runs the PoC mounted at `/tmp/poc`, and reports a
+  crash. Drops straight into `CyberGymService(backend=...)`.
+- **`ReproTaskSource(ids)`** — draws a nonce-sealed batch from a real subset;
+  `artifact()` is `None` because the vulnerable repo *is* the image, fetched out of
+  band by `binary_digest`; `context_provider` serves the level-gated description +
+  sanitizer trace.
+- **`available_tasks(ids)`** — the subset whose vul+fix images are actually pulled,
+  so dispatch never hands out a task the verifier can't run.
+
+Serve it with the production spine — a `ThreadingHTTPServer` (connections thread so
+a slow verify never refuses sockets), serialised stateful handlers (one Docker
+differential at a time), and a lock-free `GET /healthz`:
+
+```bash
+docker pull n132/arvo:368-vul && docker pull n132/arvo:368-fix   # pull the subset first
+PORT=8666 CYBERGYM_CORPUS_DB=/srv/cgd/corpus.sqlite \
+CYBERGYM_SIGNING_SEED=$(openssl rand -hex 32) \
+  python -m cathedral_distill.cybergym_repro_server            # or: cathedral-cybergym-server
+```
+
+The mapping, crash-detection, draw determinism, and the full dispatch→submit→verify
+loop are covered by `tests/test_cybergym_repro.py` with the subprocess runner
+injected, so CI proves the wiring without Docker; the live differential is proven on
+the challenge box.
 
 ---
 
