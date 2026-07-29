@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cathedral SN39 — the technical case</title>
+<meta name="description" content="Differential verification, anti-contamination sealing, and a verified PoC+trace corpus as open training data. The research argument behind SN39.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="nav"><div class="wrap">
+  <span class="brand">CATHEDRAL <b>SN39</b></span>
+  <div class="nav-links">
+    <a href="index.html">Subnet</a>
+    <a href="research.html" class="active">Research</a>
+    <a href="arena.html">Arena</a>
+    <a href="https://github.com/cathedralai/cathedral-distill">GitHub ↗</a>
+  </div>
+</div></nav>
+
+<!-- HERO -->
+<header class="hero"><div class="wrap">
+  <span class="eyebrow">The technical case</span>
+  <h1 class="hero-h">A benchmark that <span class="hl">can't</span> be trained on.</h1>
+  <p class="hero-sub">For security researchers and ML people: why execution beats judgement, how commit-then-challenge sealing defeats contamination, and why a verified PoC + trace corpus is the asset worth building.</p>
+  <div class="hero-cta">
+    <a class="btn btn-primary" href="#dataset">The dataset thesis</a>
+    <a class="btn btn-ghost" href="#priorart">Prior art →</a>
+  </div>
+</div></header>
+
+<!-- CONTAMINATION -->
+<section id="contam"><div class="wrap">
+  <div class="sec-label">The problem</div>
+  <h2>Every public benchmark decays the moment it's public.</h2>
+  <p class="lead">A score measures capability only until the test set leaks into training. For coding and security, that half-life is short: the benchmark is scraped, distilled, and memorised, and the number stops tracking the skill. You cannot fix this with a bigger held-out set — only with a set that provably did not exist when the model was trained.</p>
+  <div class="grid g3" style="margin-top:34px">
+    <div class="stat card"><div class="num">1,507</div><div class="lab">real historical vulns in CyberGym, across 188 projects — the task pool this workload draws on</div></div>
+    <div class="stat card"><div class="num">66.2<span class="u">%</span></div><div class="lab">end-to-end PoC success by a frontier agent on the expanded CyberGym benchmark — up from ~20% one generation earlier</div></div>
+    <div class="stat card"><div class="num">6,100<span class="u">+</span></div><div class="lab">reproducible memory vulns in ARVO, each with triggering input, patch, and auto-rebuild at both revisions</div></div>
+  </div>
+</div></section>
+
+<!-- DIFFERENTIAL -->
+<div class="loud"><div class="wrap">
+  <div class="sec-label center">Verification, formally</div>
+  <div class="diff">
+    <span class="row"><span class="verdict">solved</span> <span class="op">⟺</span></span>
+    <span class="row"><span class="crash">exit(vuln, poc) ∉ {0, 300}</span></span>
+    <span class="row"><span class="op">∧</span> <span class="spare">exit(patch, poc) ∈ {0, 300}</span></span>
+  </div>
+  <p class="diff-cap">The PoC must crash the sanitiser-instrumented vulnerable build and leave the patched build clean. This isolates <em>the specific vulnerability the patch fixed</em> from any incidental crash — no LLM judge, no rubric, no partial credit. The verdict is a subprocess exit code.</p>
+</div></div>
+
+<!-- SEALING -->
+<section id="sealing"><div class="wrap">
+  <div class="sec-label">Anti-contamination</div>
+  <h2>Commit-then-challenge sealing.</h2>
+  <p class="lead">The guarantee isn't "we held out a set." It's an ordering enforced against the chain: the model is fingerprinted before the questions are drawn, so the questions can't be in the model.</p>
+  <div class="grid g2" style="margin-top:28px">
+    <div class="card">
+      <h3>1 · Anchor the nonce after commitment</h3>
+      <p>The batch-draw nonce is derived under a domain separator from a finalized block + hash, the audience, the epoch, the miner, and the digest of the model committed <em>before</em> that block. Every validator reproduces the identical nonce; none can steer it.</p>
+    </div>
+    <div class="card">
+      <h3>2 · Draw from a post-cutoff holdout</h3>
+      <p>Tasks are selected only from vulnerabilities disclosed after the cutoff the committed model predates, ranked by a nonce-keyed hash. Same pool + nonce → same batch. An exhausted holdout refuses rather than recycles.</p>
+    </div>
+    <div class="card">
+      <h3>3 · Re-derive, never trust</h3>
+      <p>Work units are a pure function of the committed task. The validator recomputes every number — <span class="faint">earned = Σ per_level_solved × level_weights</span> — from a signed receipt; a worker's reported score is never counted.</p>
+    </div>
+    <div class="card">
+      <h3>4 · Paired evaluation</h3>
+      <p>A challenger is compared only to the incumbent re-scored on the <em>same</em> batch. Variance in which vulns each drew cancels out; the crown turns on capability, not luck of the draw.</p>
+    </div>
+  </div>
+  <p class="faint" style="font-size:13px;margin-top:18px">Implemented in <code>cybergym_batch.py</code>, <code>cybergym.py</code>, <code>frontier.py</code>; the derivation and re-scoring paths are covered by the test suite.</p>
+</div></section>
+
+<!-- DATASET THESIS -->
+<section id="dataset" style="background:var(--bg-2)"><div class="wrap">
+  <div class="sec-label">The dataset thesis</div>
+  <h2>The exploits aren't the product. The verified corpus is.</h2>
+  <p class="lead">Each solved task can carry a reasoning trace — the agent's steps, file:line references, and the PoC it wrote. Verified, licensed, and sealed, that trace is written to the corpus <em>verbatim</em>: the submission format is the dataset format, so a verified solution compounds into training data with no transformation.</p>
+  <div class="grid g3" style="margin-top:30px">
+    <div class="card"><h3>Execution-labeled</h3><p>Every row is attached to a crash the validator re-ran. No noisy heuristic labels, no self-report — the ground truth is a binary exit code.</p></div>
+    <div class="card"><h3>Contamination-dated</h3><p>Rows come from post-commit disclosures, so a model trained on the corpus is trained on data provably outside its own frozen predecessor's reach.</p></div>
+    <div class="card"><h3>Quality-floored &amp; licensed</h3><p>A structural, model-free gate (≥5 steps, read+write actions, ≥200 reasoning tokens, ≥2 file:line refs, no padded loops) plus an explicit reuse licence. Padded or unlicensed traces never enter.</p></div>
+  </div>
+  <div class="banner build" style="margin-top:24px"><span class="tag">Note</span><span>The trace contract, quality floor, and corpus writer are built and tested (<code>trace_submission.py</code>, <code>cybergym_service.py</code>). The corpus store at scale and curation are integration work.</span></div>
+</div></section>
+
+<!-- PRIOR ART -->
+<section id="priorart"><div class="wrap">
+  <div class="sec-label">Prior art &amp; citations</div>
+  <h2>What this builds on.</h2>
+  <div class="tbl-wrap" style="margin-top:22px">
+    <table>
+      <thead><tr><th>Work</th><th>What it provides</th><th>Relation to SN39</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>CyberGym</strong><br><span class="faint">UC Berkeley, Dawn Song lab · arXiv 2506.02548</span></td>
+          <td>1,507 historical vulns / 188 projects; task = produce a PoC that crashes the pre-patch build. Performance correlates with real-world discovery.</td>
+          <td>The workload, turned into an incentive mechanism.</td>
+        </tr>
+        <tr>
+          <td><strong>CyberGym-E2E</strong><br><span class="faint">RDI Berkeley</span></td>
+          <td>Expanded benchmark; GPT-class agents reach 66.2% end-to-end, ~3× the prior generation.</td>
+          <td>Evidence the capability is real and scaling fast.</td>
+        </tr>
+        <tr>
+          <td><strong>ARVO</strong><br><span class="faint">arXiv 2408.02153 · n132/ARVO-Meta</span></td>
+          <td>6,100+ reproducible OSS-Fuzz memory vulns, each with input + developer patch + auto-rebuild at both revisions; auto-updates.</td>
+          <td>Raw material for the holdout; the differential-build substrate.</td>
+        </tr>
+        <tr>
+          <td><strong>XBOW on HackerOne</strong><br><span class="faint">Q2 2025</span></td>
+          <td>First autonomous AI to top the US leaderboard; 1,000+ reports incl. a real Palo Alto GlobalProtect flaw.</td>
+          <td>The market tailwind — autonomous exploitation crossed the line.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="margin-top:22px" class="muted">Sources:
+    <a href="https://www.cybergym.io/cybergym/">CyberGym</a> ·
+    <a href="https://rdi.berkeley.edu/blog/cybergym-e2e/">CyberGym-E2E (RDI Berkeley)</a> ·
+    <a href="https://arxiv.org/abs/2408.02153">ARVO (arXiv)</a> ·
+    <a href="https://github.com/n132/ARVO-Meta">ARVO-Meta</a> ·
+    <a href="https://www.techrepublic.com/article/news-ai-xbow-tops-hackerone-us-leaderboad/">XBOW / HackerOne (TechRepublic)</a> ·
+    <a href="https://www.pixee.ai/blog/sast-false-positives-reduction">SAST false-positive study (Pixee)</a>.
+  </p>
+</div></section>
+
+<!-- CTA -->
+<div class="cta-block"><div class="wrap">
+  <h2>Read the mechanism.</h2>
+  <p class="lead center" style="margin:0 auto 30px">The scoring, sealing, verification, and corpus contract are all in the repo, with 448 passing tests.</p>
+  <div class="hero-cta">
+    <a class="btn btn-primary" href="https://github.com/cathedralai/cathedral-distill">Open the repository</a>
+    <a class="btn btn-ghost" href="https://github.com/cathedralai/cathedral-distill/blob/main/docs/CYBERGYM_TRACK.md">Validator flow →</a>
+  </div>
+</div></div>
+
+<footer><div class="wrap">
+  <span class="brand">CATHEDRAL <b>SN39</b></span>
+  <span class="faint">Authorized security research · targets are patched &amp; disclosed</span>
+  <div class="foot-links">
+    <a href="index.html">Subnet</a>
+    <a href="arena.html">Arena</a>
+    <a href="https://github.com/cathedralai/cathedral-distill">GitHub</a>
+  </div>
+</div></footer>
+
+</body>
+</html>
