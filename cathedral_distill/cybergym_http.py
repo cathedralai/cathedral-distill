@@ -4,6 +4,7 @@ Two POST routes over the stdlib `http.server` — the whole wire surface of the
 CyberGym lane:
 
     POST /cybergym/dispatch   {miner_hotkey, model_commitment}  -> DispatchMessage
+    POST /cybergym/artifact   {task_id}                          -> {task_id, program}
     POST /cybergym/submit     <SubmissionEnvelope JSON>         -> verdict
 
 This is deliberately the *reference* transport: no framework, no new dependency
@@ -21,6 +22,7 @@ from typing import Any
 from cathedral_distill.cybergym_service import CyberGymService
 
 DISPATCH_PATH = "/cybergym/dispatch"
+ARTIFACT_PATH = "/cybergym/artifact"
 SUBMIT_PATH = "/cybergym/submit"
 MAX_BODY_BYTES = 2 * 1024 * 1024  # generous for a base64 PoC + trace
 
@@ -66,6 +68,17 @@ def make_handler(service: CyberGymService) -> type[BaseHTTPRequestHandler]:
                     return
                 result = service.handle_dispatch(request)
                 self._send(400 if "error" in result else 200, result)
+            elif self.path == ARTIFACT_PATH:
+                body = self._read_body()
+                if body is None:
+                    return
+                try:
+                    request = json.loads(body or b"{}")
+                except ValueError:
+                    self._send(400, {"error": "request is not valid JSON"})
+                    return
+                result = service.handle_artifact(request)
+                self._send(400 if "error" in result else 200, result)
             elif self.path == SUBMIT_PATH:
                 body = self._read_body()
                 if body is None:
@@ -90,4 +103,4 @@ def make_server(service: CyberGymService, host: str = "127.0.0.1", port: int = 0
     return HTTPServer((host, port), make_handler(service))
 
 
-__all__ = ["make_handler", "make_server", "DISPATCH_PATH", "SUBMIT_PATH"]
+__all__ = ["make_handler", "make_server", "DISPATCH_PATH", "ARTIFACT_PATH", "SUBMIT_PATH"]

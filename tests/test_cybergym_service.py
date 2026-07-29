@@ -221,6 +221,13 @@ def test_http_shim_dispatch_and_submit(tmp_path):
         assert verdict["accepted"] and verdict["solved"] and verdict["trainable"]
         assert verdict["work_units"] == "8"
 
+        # the artifact route: a corpus task's binary is fetched out of band by
+        # digest, so the service reports no inline artifact (fails closed to 400)
+        status, art = _post(base, chttp.ARTIFACT_PATH, {"task_id": "arvo:1"})
+        assert status == 400 and "out of band" in art["error"]
+        # and the holdout-oracle guard: an un-dispatched task is refused
+        assert _post(base, chttp.ARTIFACT_PATH, {"task_id": "arvo:999"})[1]["error"] == "no such dispatched task"
+
         # an unknown route and a bad batch both fail closed over the wire
         assert _post(base, "/nope", {})[0] == 404
         bad = dict(envelope, batch_id="sha256:" + "00" * 32)

@@ -90,6 +90,7 @@ class CyberGymService:
         self._trace_policy = trace_policy
         self._miners: dict[str, _MinerState] = {}
         self._by_batch: dict[str, str] = {}  # batch_id -> miner_hotkey
+        self._dispatched: set[str] = set()   # task_ids actually served this epoch
         self._results: list[MinerResult] = []
 
     # -- dispatch (validator -> miner) ------------------------------------- #
@@ -103,6 +104,7 @@ class CyberGymService:
         )
         self._miners[miner_hotkey] = _MinerState(model_commitment, message)
         self._by_batch[message.batch_id] = miner_hotkey
+        self._dispatched.update(t.task_id for t in message.tasks)
         return message
 
     # -- submit (miner -> validator) --------------------------------------- #
@@ -127,7 +129,42 @@ class CyberGymService:
                 raise ProtocolError("PoC is not valid base64") from exc
         return outcome
 
+    # -- artifact (validator -> miner): the vulnerable program to analyse --- #
+    def artifact_for(self, task_id: str) -> str:
+        """Return the vulnerable program a miner must analyse for a dispatched task.
+
+        This is the 'binary'/'repo' a CyberGym miner needs — over the wire a miner
+        has only metadata otherwise, so a blind (level-0) task is unsolvable without
+        it. Guarded to tasks THIS service actually dispatched: the holdout is
+        secret, so the service must never generate-and-reveal a program for a task
+        it did not draw (that would turn the artifact route into a holdout oracle).
+        For a synthetic task the artifact is the generated source; for a real
+        corpus task it is fetched out of band by `binary_digest` (not inline), so
+        this raises directing the miner there.
+        """
+        if task_id not in self._dispatched:
+            raise ProtocolError("no such dispatched task")
+        provider = getattr(self.holdout.pool, "artifact", None)
+        program = provider(task_id) if provider is not None else None
+        if program is None:
+            raise ProtocolError(
+                "no inline artifact for this task; fetch the build out of band by binary_digest"
+            )
+        return str(program)
+
     # -- transport-agnostic handlers --------------------------------------- #
+    def handle_artifact(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """{task_id} -> {task_id, program} (or {error}). Never raises."""
+        if not isinstance(request, Mapping):
+            return {"error": "artifact request must be an object"}
+        task_id = request.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            return {"error": "task_id is required"}
+        try:
+            return {"task_id": task_id, "program": self.artifact_for(task_id)}
+        except (ProtocolError, ValueError) as exc:
+            return {"error": str(exc)}
+
     def handle_dispatch(self, request: Mapping[str, Any]) -> dict[str, Any]:
         """{miner_hotkey, model_commitment} -> DispatchMessage dict (or {error})."""
         if not isinstance(request, Mapping):
