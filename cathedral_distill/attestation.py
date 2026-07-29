@@ -208,25 +208,47 @@ def cpu_quote_verifier(
     policy: AttestationPolicy,
     token_provider: Callable[[str], bytes | None],
     *,
-    expected_report_data: str,
+    expected_report_data: str | Callable[[Mapping[str, Any]], str],
     now: datetime | None = None,
 ) -> Callable[[Mapping[str, Any]], bool]:
     """A `compute_receipt.cpu_quote_verifier` that does real verification.
 
-    The CPU-TEE evidence pins the quote by `policy_registry_digest`; `token_provider`
-    resolves it to the raw quote, which is verified against the trusted roots and
-    the measurement allow-list. Fails closed."""
-    import hashlib
+    `token_provider` resolves the receipt to its raw CPU-TEE quote, which is then
+    verified against the trusted roots and the measurement allow-list. Fails closed.
+
+    The lookup key is the receipt's own `receipt_id` (the per-receipt handle), NOT
+    `policy_registry_digest`: that digest identifies the signed policy REGISTRY and
+    is a constant shared by every receipt in a release, so it can neither address a
+    single quote nor equal `sha256(token)`. The previous implementation required
+    `sha256(token) == policy_registry_digest`, which no real receipt can satisfy —
+    the verifier returned False for every input, so wiring it produced a total
+    compute-lane outage and the only "working" configuration was to leave real
+    quote verification off entirely.
+
+    `expected_report_data` may be a callable so the caller can derive per-receipt
+    report_data (binding the quote to this subject_hotkey/epoch/receipt_id) rather
+    than pinning one constant across every receipt a verifier ever sees. A plain
+    string keeps the previous behaviour."""
 
     def verify(evidence: Mapping[str, Any]) -> bool:
-        digest = str(evidence.get("policy_registry_digest") or "")
-        token = token_provider(digest)
+        key = str(evidence.get("receipt_id") or "")
+        if not key:
+            # No receipt identity supplied: refuse rather than fall back to a
+            # registry-wide key that cannot address a single quote.
+            return False
+        token = token_provider(key)
         if not isinstance(token, bytes):
             return False
-        if "sha256:" + hashlib.sha256(token).hexdigest() != digest:
+        try:
+            want = (
+                expected_report_data(evidence)
+                if callable(expected_report_data)
+                else expected_report_data
+            )
+        except Exception:
             return False
         try:
-            doc = verify_attestation(token, expected_report_data=expected_report_data,
+            doc = verify_attestation(token, expected_report_data=want,
                                     policy=policy, now=now)
         except AttestationError:
             return False
