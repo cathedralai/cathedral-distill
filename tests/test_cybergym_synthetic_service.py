@@ -51,7 +51,7 @@ def _chain(*, source_epoch: int = SOURCE_EPOCH, block: int = 100, block_hash: st
                         source_epoch=source_epoch, valid_from_block=block, valid_until_block=block + 360)
 
 
-def _service(tmp_path, *, batch_size: int = 2, chain=None):
+def _service(tmp_path, *, batch_size: int = 2, chain=None, credit_synthetic_tasks: bool = False):
     holdout, backend = synthetic_holdout()
     return CyberGymService(
         holdout, chain or _chain(),
@@ -61,7 +61,7 @@ def _service(tmp_path, *, batch_size: int = 2, chain=None):
         solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
         batch_size=batch_size, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
-        gates_required=False,
+        gates_required=False, credit_synthetic_tasks=credit_synthetic_tasks,
     )
 
 
@@ -103,7 +103,11 @@ def _envelope(dispatch_msg, task_id, poc_bytes, *, miner="5Miner"):
 # --------------------------------------------------------------------------- #
 
 def test_synthetic_dispatch_submit_score_compose_end_to_end(tmp_path):
-    svc = _service(tmp_path)
+    # credit_synthetic_tasks=True is the explicit unsafe-for-rewards override; it is
+    # what this test needs, because it exercises the full synthetic loop THROUGH the
+    # reward path. The default (synthetic earns nothing) is pinned in
+    # tests/test_cybergym_synthetic_reward.py.
+    svc = _service(tmp_path, credit_synthetic_tasks=True)
     d = svc.dispatch_for("5Miner", MODEL)
     assert len(d.tasks) == 2
     # level 0 (the batch's first task, per generate_holdout's level cycling) is blind

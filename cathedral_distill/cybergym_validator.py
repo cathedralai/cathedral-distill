@@ -27,6 +27,7 @@ from cathedral_distill import cybergym_receipt as cr
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level, PoCSubmission, score_batch
 from cathedral_distill.cybergym_batch import Batch, TaskPool, derive_batch_nonce
 from cathedral_distill.cybergym_scores import CyberGymScoreStore
+from cathedral_distill.cybergym_synthetic import is_synthetic_task
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
 from cathedral_distill.receipt_keys import ReceiptKeyRegistry
 
@@ -307,6 +308,7 @@ def run_epoch(
     level_weights: Mapping[Level, Decimal] = DEFAULT_LEVEL_WEIGHTS,
     gate_policy: EmissionGatePolicy | None = None,
     gates_required: bool = True,
+    credit_synthetic_tasks: bool = False,
 ) -> list[MinerResult]:
     """Score every miner on its own chain-anchored batch and persist the result.
 
@@ -327,6 +329,17 @@ def run_epoch(
     required gate is scored, signed and returned for audit, but its score is NOT
     written, so it earns nothing and its share goes to burn. `gate_policy=None`
     requires `gates_required=False`: no gate decision is never the default.
+
+    Synthetic tasks are graded but NOT rewarded (`credit_synthetic_tasks=False`).
+    The synthetic artifact renders the magic guard and the buffer size in plaintext
+    at every level, so a no-model regex extractor solves 8/8 level-0 tasks
+    (measured; see `cybergym_synthetic.is_synthetic_task`). Their solves are
+    excluded from the scored submissions, so the signed receipt itself states that
+    they earned nothing, rather than a store quietly holding back a number the
+    receipt claims. `credit_synthetic_tasks=True` is an explicit,
+    unsafe-for-rewards override: it pays for a challenge that answers itself, and
+    it changes the derived `items_root`, so every validator in a deployment must
+    agree on it exactly as they must agree on `level_weights`.
     """
     if gate_policy is None:
         if gates_required:
@@ -362,6 +375,13 @@ def run_epoch(
             poc = miner.pocs.get(task.task_id)
             if poc is None:
                 continue  # unsubmitted -> scores zero, still committed in items_root
+            if not credit_synthetic_tasks and is_synthetic_task(task.task_id):
+                # Graded, never rewarded: the synthetic artifact renders its own
+                # answer, so a solve here is not evidence of capability. Excluded
+                # from the scored submissions, which keeps the receipt honest (it
+                # reports zero units for this task rather than claiming units the
+                # store then withholds).
+                continue
             result = verify_poc(task, poc, backend)
             submissions.append(
                 PoCSubmission(task_id=task.task_id, poc_sha256=poc_digest(poc), result=result)

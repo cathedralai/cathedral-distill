@@ -99,6 +99,7 @@ class CyberGymService:
         attestation_required: bool = True,
         gate_policy: EmissionGatePolicy | None = None,
         gates_required: bool = True,
+        credit_synthetic_tasks: bool = False,
     ) -> None:
         # Fail closed: Intel-TDX attestation is a MANDATORY control for this track,
         # so the running service refuses to start without an attestation policy
@@ -172,6 +173,10 @@ class CyberGymService:
         self._attestation_now = attestation_now
         self._gate_policy = gate_policy
         self._gates_required = gates_required
+        # Synthetic tasks are graded but not rewarded by default: their artifact
+        # renders the answer (see cybergym_synthetic.is_synthetic_task). True is an
+        # explicit unsafe-for-rewards override.
+        self._credit_synthetic_tasks = credit_synthetic_tasks
         self._miners: dict[str, _MinerState] = {}
         self._by_batch: dict[str, str] = {}  # batch_id -> miner_hotkey
         self._dispatched: set[str] = set()   # task_ids actually served this epoch
@@ -350,6 +355,7 @@ class CyberGymService:
             score_store=self._scores, cutoff=self._cutoff, as_of=self._as_of,
             issued_at=issued_at, batch_size=self._batch_size, level_weights=self._weights,
             gate_policy=self._gate_policy, gates_required=self._gates_required,
+            credit_synthetic_tasks=self._credit_synthetic_tasks,
         )
         self._scored_miners.update(m.miner_hotkey for m in miners)
         return self._results

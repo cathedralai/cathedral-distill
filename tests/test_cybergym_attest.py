@@ -306,6 +306,9 @@ def test_service_only_attested_miner_earns_and_composes():
         private_key=Ed25519PrivateKey.from_private_bytes(bytes(range(32))),
         signing_key_id="cybergym-1", batch_size=2, cutoff=None, as_of=None,
         attestation_policy=POLICY, attestation_now=NOW, gates_required=False,
+        # this test scores synthetic tasks on purpose, to prove the ATTESTATION gate
+        # decides the reward; synthetic tasks are non-rewarding by default
+        credit_synthetic_tasks=True,
     )
     commit = "sha256:" + hashlib.sha256(b"m").hexdigest()
 

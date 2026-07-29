@@ -313,7 +313,10 @@ def test_mix_runs_through_the_live_service_end_to_end(tmp_path):
         solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
         batch_size=4, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
-        gates_required=False)
+        # the mix under test is built from two SYNTHETIC sources, which are
+        # non-rewarding by default; this test is about the blend reaching the score
+        # path, so it takes the explicit unsafe-for-rewards override
+        gates_required=False, credit_synthetic_tasks=True)
 
     d = svc.dispatch_for("5Miner", MODEL)
     assert len(d.tasks) == 4
