@@ -86,6 +86,7 @@ def derive_cybergym_candidate(
     evaluator_coldkey: str,
     bundle_registry=None,
     reproduction: Mapping[str, object] | None = None,
+    attestation_verified: bool = False,
 ):
     """Build a frontier `Candidate` from a VERIFIED CyberGym receipt.
 
@@ -94,6 +95,14 @@ def derive_cybergym_candidate(
     refuses anything else. Contamination is checked structurally — the batch nonce
     must reproduce the chain-anchored, post-commitment derivation bound to the
     miner's committed model, so the miner could not have trained on the drawn set.
+
+    `attested` is NOT asserted from a signature: `verify_receipt` proves the
+    receipt's Ed25519 signature + epoch + nonce, not that the work ran in a TDX
+    enclave. The caller must pass `attestation_verified=True` only after
+    independently verifying the submission's Intel-TDX attestation (the same gate
+    `cybergym_attest.verify_submission_attestation` enforces on the live path); it
+    defaults to False so the frontier's mandatory `GATE_ATTESTED_RECEIPT` fails
+    closed rather than being rubber-stamped by a valid signature.
     """
     from datetime import datetime, timezone
 
@@ -142,7 +151,7 @@ def derive_cybergym_candidate(
         cost_usd=Decimal(0),
         submitted_at=submitted_at,
         batch_id=str(doc["batch"]["batch_id"]),
-        attested=True,               # reached only because verify_receipt passed
+        attested=bool(attestation_verified),   # from a real TDX check, never the signature
         reproduced=reproduced,
         contamination_detected=contamination_detected,
         registered_bundle=registered_bundle,

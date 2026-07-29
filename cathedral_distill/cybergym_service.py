@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Mapping
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from cathedral_distill.attestation import AttestationPolicy
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level
 from cathedral_distill.cybergym_holdout import Holdout
 from cathedral_distill.cybergym_protocol import (
@@ -74,7 +76,29 @@ class CyberGymService:
         as_of,
         level_weights: Mapping[Level, Decimal] = DEFAULT_LEVEL_WEIGHTS,
         trace_policy: TraceQualityPolicy = TraceQualityPolicy(),
+        attestation_policy: AttestationPolicy | None = None,
+        attestation_now: datetime | None = None,
+        attestation_required: bool = True,
     ) -> None:
+        # Fail closed: Intel-TDX attestation is a MANDATORY control for this track,
+        # so the running service refuses to start without an attestation policy
+        # unless the operator EXPLICITLY opts out (attestation_required=False) for
+        # the hardware-free dev/test path — and even then it says so loudly. A
+        # forgotten kwarg must never silently credit unattested solves.
+        if attestation_policy is None:
+            if attestation_required:
+                raise ProtocolError(
+                    "CyberGym requires an Intel-TDX attestation policy: pass "
+                    "attestation_policy=..., or attestation_required=False for the "
+                    "hardware-free dev/test path (which credits UNATTESTED solves)."
+                )
+            import warnings
+            warnings.warn(
+                "CyberGymService running WITHOUT Intel-TDX attestation enforcement "
+                "(attestation_required=False): every solved PoC is credited with no "
+                "attestation. Dev/test only — never in production.",
+                stacklevel=2,
+            )
         self.holdout = holdout
         self.chain = chain
         self._backend = backend
@@ -88,6 +112,10 @@ class CyberGymService:
         self._as_of = as_of
         self._weights = level_weights
         self._trace_policy = trace_policy
+        # When set, a submission must carry a valid Intel-TDX attestation bound to
+        # it (cybergym_attest) to be creditable; None keeps the hardware-free path.
+        self._attestation_policy = attestation_policy
+        self._attestation_now = attestation_now
         self._miners: dict[str, _MinerState] = {}
         self._by_batch: dict[str, str] = {}  # batch_id -> miner_hotkey
         self._dispatched: set[str] = set()   # task_ids actually served this epoch
@@ -119,10 +147,13 @@ class CyberGymService:
         outcome = process_submission(
             envelope, state.dispatch, self._backend,
             trace_policy=self._trace_policy, weights=self._weights,
+            attestation_policy=self._attestation_policy, now=self._attestation_now,
         )
         self._corpus.record(outcome)
-        if outcome.solved:
-            # keep the solved PoC bytes so score_epoch can score the batch
+        if outcome.creditable:
+            # Only an attested solve enters the reward pool: score_epoch re-derives
+            # each miner's units from exactly these PoCs, so an unattested (or
+            # unverifiable-attestation) solve earns nothing even though it crashed.
             try:
                 state.pocs[envelope.task_id] = base64.b64decode(envelope.poc_base64, validate=True)
             except (ValueError, TypeError) as exc:  # pragma: no cover - process_submission already checked
@@ -191,6 +222,8 @@ class CyberGymService:
             "accepted": True,
             "task_id": outcome.task_id,
             "solved": outcome.solved,
+            "attested": outcome.attested,
+            "creditable": outcome.creditable,
             "trainable": outcome.trainable,
             "reason": outcome.reason,
             "work_units": str(outcome.work_units),

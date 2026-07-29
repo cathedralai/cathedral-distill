@@ -59,7 +59,7 @@ def _service(tmp_path, *, batch_size: int = 2, chain=None):
         corpus_store=CyberGymCorpusStore(str(tmp_path / "corpus.sqlite")),
         score_store=CyberGymScoreStore(str(tmp_path / "scores.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
-        batch_size=batch_size, cutoff=CUTOFF, as_of=NOW,
+        batch_size=batch_size, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
     )
 
 
