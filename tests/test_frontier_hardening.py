@@ -67,14 +67,21 @@ def _base_receipt(**overrides):
     return er.build_receipt(doc, EVAL_KEY, signing_key_id="eval-1")
 
 
-def _creditable_receipt(**overrides):
-    """A tdx receipt whose report_data binding validates — so it is creditable."""
+CURRENT_BLOCK = 6_000_100  # inside the receipt's [valid_from_block, valid_until_block)
+
+
+def _creditable_receipt(authorize=True, **overrides):
+    """A tdx receipt whose report_data binding validates AND (by default) carries a
+    signed evaluator authorization — so it is creditable/attested."""
     doc = _base_receipt(**overrides)
     doc = {k: v for k, v in doc.items() if k not in ("receipt_id", "signing_key_id", "signature")}
     report_data = er.expected_report_data(doc).hex()
     doc["attestation"] = {"kind": "tdx", "evidence_digest": _digest("evidence"),
                           "evidence_uri": "", "policy_digest": _digest("policy"),
                           "report_data_hex": report_data}
+    if authorize:
+        # a grant the evaluator signed, bound to this receipt's identity fields
+        doc["eval_authorization"] = er.build_authorization(doc, EVAL_KEY, signing_key_id="eval-1")
     return er.build_receipt(doc, EVAL_KEY, signing_key_id="eval-1")
 
 
@@ -116,6 +123,7 @@ def _full_evidence(**over):
         attestation_verified=True,  # the raw Polaris/TDX quote verified
         reproduction_attestation_verified=True,  # the reproduction's quote verified too
         key_registry=EVAL_KEYREG,  # resolves both receipts' signing_key_id
+        current_block=CURRENT_BLOCK,  # inside the authorization's block window
     )
     ev.update(over)
     return fr.CandidateEvidence(**ev)
@@ -232,6 +240,40 @@ def test_missing_key_registry_derives_attested_false():
     # structurally valid receipt is not the same as a genuinely signed one).
     ev = _full_evidence(key_registry=None)
     assert fr.derive_candidate(ev, POLICY).attested is False
+
+
+def test_unauthorized_receipt_derives_attested_false():
+    # A genuinely-signed, quote-verified receipt the evaluator never authorized is
+    # NOT attested: the frontier must apply the same authorization gate the
+    # unified admission verifier does, or it would crown an unauthorized run.
+    ev = _full_evidence(receipt=_creditable_receipt(authorize=False))
+    candidate = fr.derive_candidate(ev, POLICY)
+    assert candidate.attested is False
+    assert fr.GATE_ATTESTED_RECEIPT in fr.evaluate_gates(candidate, POLICY).failures
+
+
+def test_missing_finalized_block_derives_attested_false():
+    # Without the finalized block the authorization window cannot be checked -> fail closed
+    ev = _full_evidence(current_block=None)
+    assert fr.derive_candidate(ev, POLICY).attested is False
+
+
+def test_finalized_block_outside_the_authorization_window_derives_attested_false():
+    ev = _full_evidence(current_block=7_000_000)  # past valid_until_block
+    assert fr.derive_candidate(ev, POLICY).attested is False
+
+
+def test_authorization_bound_to_another_miner_derives_attested_false():
+    # a grant issued for a different miner cannot make this receipt attested
+    other = _base_receipt()
+    other = {k: v for k, v in other.items() if k not in ("receipt_id", "signing_key_id", "signature")}
+    rd = er.expected_report_data(other).hex()
+    other["attestation"] = {"kind": "tdx", "evidence_digest": _digest("evidence"),
+                            "evidence_uri": "", "policy_digest": _digest("policy"), "report_data_hex": rd}
+    other["eval_authorization"] = er.build_authorization(
+        dict(other, miner_hotkey="5OtherMiner"), EVAL_KEY, signing_key_id="eval-1")
+    receipt = er.build_receipt(other, EVAL_KEY, signing_key_id="eval-1")
+    assert fr.derive_candidate(_full_evidence(receipt=receipt), POLICY).attested is False
 
 
 def test_receipt_signed_by_an_unanchored_key_derives_attested_false():
