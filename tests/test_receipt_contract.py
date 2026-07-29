@@ -339,6 +339,72 @@ def test_unpassed_hardware_claim_is_rejected():
         dr.verify_receipt(r, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
 
 
+# --------------------------------------------------------------------------- #
+# A failed or degraded evaluation is not creditable work (Compute parity)
+# --------------------------------------------------------------------------- #
+
+def test_failed_channel_status_is_rejected():
+    """A correctly signed receipt with a FAILED confidential channel used to be
+    credited in full: `channel.status` was only checked against the vocabulary,
+    never required to be 'passed'."""
+    body = _receipt_body()
+    body["channel"]["status"] = "failed"
+    r = dr.build_receipt(body, KEY, signing_key_id="distill-test-1")
+    with pytest.raises(dr.DistillReceiptError, match="channel.status must be 'passed'"):
+        dr.verify_receipt(r, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+@pytest.mark.parametrize("status", ["failed", "unknown"])
+def test_unpassed_work_status_is_rejected(status):
+    """`work.status` gates the Compute lane and did not gate this one, so a
+    receipt recording a failed evaluation still credited its work_units."""
+    body = _receipt_body()
+    body["work"]["status"] = status
+    r = dr.build_receipt(body, KEY, signing_key_id="distill-test-1")
+    with pytest.raises(dr.DistillReceiptError, match="work.status must be 'passed'"):
+        dr.verify_receipt(r, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+@pytest.mark.parametrize("claim", ["channel", "work"])
+def test_unpassed_channel_or_work_claim_is_rejected(claim):
+    """Only the hardware and software claims were gated, so a receipt asserting
+    its own channel or work claim FAILED was still admitted as verified work."""
+    body = _receipt_body()
+    body["assurance"]["claims"][claim]["status"] = "failed"
+    r = dr.build_receipt(body, KEY, signing_key_id="distill-test-1")
+    with pytest.raises(dr.DistillReceiptError, match=f"assurance {claim} claim must be passed"):
+        dr.verify_receipt(r, KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH)
+
+
+def test_a_failed_evaluation_fails_only_its_own_lane():
+    """The FAIL must cost one contribution, not the epoch.
+
+    A degraded Distill receipt reaches the composition path as a zero-unit FAIL
+    while the Compute lane in the same composition still composes.
+    """
+    from cathedral_distill import integrated_feed as itf
+    from cathedral_distill.testing import IntegrationFixtures
+
+    fx = IntegrationFixtures(source_epoch=11)
+    good = fx.cpu_receipt(subject="5Cpu", work_units="5")
+    bad = fx.distill_receipt(subject="5Distill", passed=28, graded=32)
+    bad = dict(bad)
+    bad["work"] = dict(bad["work"])
+    bad["work"]["status"] = "failed"  # breaks the signature too; both must FAIL
+
+    decisions = itf.verify_lane_receipts(
+        [
+            itf.LaneSubmission(itf.KIND_COMPUTE_CPU, good, "cathedral_confidential_tdx"),
+            itf.LaneSubmission(itf.KIND_DISTILL, bad, "cathedral_distill"),
+        ],
+        key_registry=fx.registry, source_epoch=11,
+        now_iso="2026-07-25T12:30:00.000000Z",
+        consumption_ledger=itf.NO_REPLAY_LEDGER,
+    )
+    assert decisions[0].verdict == itf.PASS
+    assert decisions[1].verdict == itf.FAIL and decisions[1].work_units == Decimal(0)
+
+
 def test_policy_gating_rejects_disallowed_measurement():
     with pytest.raises(dr.DistillReceiptError, match="not admitted by policy"):
         dr.verify_receipt(_receipt(), KEYREG, now_iso=NOW, source_epoch=SOURCE_EPOCH,

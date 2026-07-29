@@ -180,6 +180,12 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
         dr.digest_field(channel["binding_digest"], "channel.binding_digest")
         if str(channel["status"]) not in ("passed", "failed", "unknown"):
             raise ComputeReceiptError("channel status is invalid")
+        # The confidential channel must have verified. The `channel` assurance
+        # claim below is checked too, but the raw status is the field the issuer
+        # sets from the actual channel binding, and a receipt that reports a failed
+        # channel is not evidence of confidential work whatever its claims say.
+        if str(channel["status"]) != "passed":
+            raise ComputeReceiptError("channel.status must be 'passed' for a creditable receipt")
 
         work = dr.exact_keys(doc["work"], dr.WORK_KEYS, "work")
         dr.digest_field(work["manifest_digest"], "work.manifest_digest")
