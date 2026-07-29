@@ -176,6 +176,24 @@ class TaskPool:
         to know which kind of source it has."""
         return draw_batch(self, size=size, nonce=nonce, as_of=as_of, cutoff=cutoff)
 
+    def draw_public(self, *, size: int, nonce: str, cutoff: datetime) -> "Batch":
+        """Draw from the PUBLIC (retired, freely-trainable) set — the same
+        deterministic nonce-ranked selection as `draw`, but over tasks whose
+        answers are already public. This is the source a liveness canary draws
+        from: solving these proves a miner is alive and configured without
+        touching the reward-eligible private holdout (see
+        `cybergym_mix.PublicCanarySource`)."""
+        if size <= 0 or size > MAX_BATCH:
+            raise BatchError("batch size out of range")
+        if not nonce:
+            raise BatchError("a batch draw requires a nonce")
+        eligible = self.public(cutoff=cutoff)
+        if len(eligible) < size:
+            raise BatchError(
+                f"only {len(eligible)} public tasks available; need {size}."
+            )
+        return _select_ranked(eligible, size, nonce)
+
 
 def _batch_id(nonce: str, task_ids: Sequence[str]) -> str:
     """Commitment over the drawn set. Order-independent (ids are sorted)."""
@@ -214,10 +232,17 @@ def draw_batch(
             f"only {len(eligible)} private tasks available; need {size}. "
             "The holdout is exhausted — ingest fresh disclosures before drawing."
         )
+    return _select_ranked(eligible, size, nonce)
 
-    # Deterministic selection: rank each eligible task by a nonce-keyed hash and
-    # take the lowest `size`. Uniform, reproducible, and unpredictable before the
-    # nonce is known.
+
+def _select_ranked(eligible: Sequence[PooledTask], size: int, nonce: str) -> Batch:
+    """Deterministic selection: rank each eligible task by a nonce-keyed hash and
+    take the lowest `size`. Uniform, reproducible, and unpredictable before the
+    nonce is known — the one selection scheme both the private and the public
+    (canary) draws share, so a `batch_id` means the same thing either way."""
+    if len(eligible) < size:  # pragma: no cover - callers check with tailored messages
+        raise BatchError(f"only {len(eligible)} tasks available; need {size}")
+
     def rank(task: PooledTask) -> bytes:
         return hashlib.sha256(
             BATCH_DOMAIN + nonce.encode() + b"\x00" + task.task_id.encode()
