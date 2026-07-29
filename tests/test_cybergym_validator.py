@@ -364,3 +364,21 @@ def test_full_epoch_is_byte_identical_on_re_run(tmp_path):
     # the same chain state + commitments reproduce byte-identical receipts and vector.
     assert feed_a == feed_b
     assert ids_a == ids_b
+
+
+def test_integrated_feed_enforces_the_finalized_block_window():
+    # The composition path must not be weaker than admission.verify_admission: a
+    # CyberGym receipt outside its authorized block window is FAIL (its share goes
+    # to burn), not a silent PASS. Back-compatible: no current_block -> unchecked.
+    from cathedral_distill import integrated_feed as itf
+
+    r = _receipt()  # valid_from_block=100, valid_until_block=460
+    passes = itf.verify_lane_receipt(itf.KIND_CYBERGYM, r, lane="cathedral_cybergym",
+                                     key_registry=KEYREG, source_epoch=SOURCE_EPOCH)
+    assert passes.verdict == "PASS"                                   # no current_block: unchecked
+    in_window = itf.verify_lane_receipt(itf.KIND_CYBERGYM, r, lane="cathedral_cybergym",
+                                        key_registry=KEYREG, source_epoch=SOURCE_EPOCH, current_block=200)
+    assert in_window.verdict == "PASS"
+    out = itf.verify_lane_receipt(itf.KIND_CYBERGYM, r, lane="cathedral_cybergym",
+                                  key_registry=KEYREG, source_epoch=SOURCE_EPOCH, current_block=999)
+    assert out.verdict == "FAIL" and "outside authorized window" in out.detail
