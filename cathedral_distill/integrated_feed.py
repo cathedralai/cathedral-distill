@@ -81,6 +81,7 @@ def verify_lane_receipt(
     key_registry: Any,
     source_epoch: int,
     now_iso: str | None = None,
+    current_block: int | None = None,
     gpu_attestation_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
     cpu_quote_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
     consumption_ledger: Any = None,
@@ -93,6 +94,12 @@ def verify_lane_receipt(
     A verifier that proves the receipt wrong -> `FAIL`. Evidence that cannot be
     checked at all (a GPU receipt with no attestation verifier configured) ->
     `NOT_PROVEN`, never a silent pass. Only `PASS` contributes weight.
+
+    `current_block` is the finalized chain height: when supplied, a CyberGym
+    receipt outside its signed `[valid_from_block, valid_until_block)` window is
+    `FAIL`, so the composition path applies the same finalized-chain gate the
+    unified `admission.verify_admission` does. Omitted -> the window is not
+    checked (back-compatible).
     """
     if kind not in _KINDS:
         raise IntegratedFeedError(f"unknown receipt kind {kind!r}")
@@ -134,6 +141,17 @@ def verify_lane_receipt(
             contribution = _distill.lane_contribution(doc)
         else:  # KIND_CYBERGYM
             doc = _cybergym.verify_receipt(receipt, key_registry, source_epoch=source_epoch)
+            # Finalized chain context: a CyberGym receipt is authorized for a bounded
+            # block window; when the caller supplies the finalized block, a receipt
+            # outside its window is FAIL, not a silent PASS — the same gate the
+            # unified `admission.verify_admission` applies, so the composition path
+            # is not weaker than the admission verifier.
+            if current_block is not None:
+                first, last = int(doc["valid_from_block"]), int(doc["valid_until_block"])
+                if not (first <= current_block < last):
+                    raise _cybergym.CyberGymReceiptError(
+                        f"finalized block {current_block} outside authorized window [{first},{last})"
+                    )
             contribution = _cybergym.lane_contribution(doc)
     except (
         _compute.ComputeReceiptError,
