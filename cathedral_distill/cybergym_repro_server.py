@@ -34,7 +34,7 @@ from cathedral_distill.cybergym_http import make_threaded_server
 from cathedral_distill.cybergym_protocol import CyberGymCorpusStore
 from cathedral_distill.cybergym_repro import REPRO_SUBSET, ReproTaskSource, available_tasks
 from cathedral_distill.cybergym_scores import CyberGymScoreStore
-from cathedral_distill.cybergym_service import CyberGymService
+from cathedral_distill.cybergym_service import CYBERGYM_LANE, CyberGymService
 from cathedral_distill.cybergym_validator import ChainContext
 
 
@@ -87,7 +87,8 @@ def main() -> None:
         score_db=os.environ.get("CYBERGYM_SCORE_DB", ":memory:"),
         validator_hotkey=os.environ.get("CYBERGYM_VALIDATOR_HOTKEY", "cathedral-repro-validator"))
     server = make_threaded_server(svc, host=host, port=port,
-                                  healthz={"status": "ok", "tasks": ids, "lane": "cybergym_v0"})
+                                  healthz={"status": "ok", "tasks": ids,
+                                           "lane": CYBERGYM_LANE})
     if ephemeral:
         print("WARNING: no CYBERGYM_SIGNING_SEED set — using an ephemeral key; "
               "receipts will not verify across restarts.", flush=True)
