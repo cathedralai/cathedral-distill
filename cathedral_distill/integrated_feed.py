@@ -68,6 +68,14 @@ class IntegratedFeedError(ValueError):
     """Raised when the integrated composition cannot proceed. Fails closed."""
 
 
+# Where a decision's replay token stands. Consumption is irreversible, so the
+# composer has to know whether it already happened (and must not happen twice) or
+# is still owed (and must happen only for a contribution that will be credited).
+REPLAY_NONE = "none"          # no replay protection in use for this decision
+REPLAY_CONSUMED = "consumed"  # the token was consumed during verification
+REPLAY_PENDING = "pending"    # a ledger is in use and the token is NOT yet consumed
+
+
 @dataclass(frozen=True)
 class ReceiptDecision:
     """One receipt's verification outcome, ready to compose and to audit."""
@@ -79,6 +87,10 @@ class ReceiptDecision:
     verdict: str            # PASS | FAIL | NOT_PROVEN
     work_units: Decimal     # 0 unless PASS
     detail: str = ""
+    replay: str = REPLAY_NONE  # none | consumed | pending
+    # The authorized epoch this receipt was verified against. Carried so a deferred
+    # consumption at composition time records the same epoch the verification used.
+    source_epoch: int | None = None
 
     @property
     def creditable(self) -> bool:
@@ -130,6 +142,7 @@ def verify_lane_receipt(
     gpu_attestation_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
     cpu_quote_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
     consumption_ledger: Any = None,
+    defer_consumption: bool = False,
     allowed_measurements: frozenset[str] | set[str] | None = None,
     allowed_tcb_statuses: frozenset[str] | set[str] | None = None,
     allowed_advisories: frozenset[str] | set[str] | None = None,
@@ -150,6 +163,15 @@ def verify_lane_receipt(
     consumed the token lets an attacker submit the receipt outside its window,
     burn the one-time token, and leave the legitimate in-window submission with
     nothing to consume.
+
+    `defer_consumption=True` verifies without touching the ledger and marks the
+    decision `REPLAY_PENDING`, so a caller that will COMPOSE this decision can
+    consume it after composition eligibility is settled (see `compose_integrated`).
+    Verifying-then-consuming-then-composing is not safe: composition can still
+    reject a `PASS` receipt (unknown lane, unfunded lane, burn subject, duplicate
+    receipt_id, duplicate miner), and a rejected contribution must never have
+    burned its one-time token. Admission (`admission.verify_admission`) has no
+    composition stage, so it consumes here.
     """
     if kind not in _KINDS:
         raise IntegratedFeedError(f"unknown receipt kind {kind!r}")
@@ -249,25 +271,44 @@ def verify_lane_receipt(
     # one-time token, which an attacker can use to destroy a legitimate
     # submission's only chance to be credited.
     ledger = None if consumption_ledger is NO_REPLAY_LEDGER else consumption_ledger
+    if ledger is not None and defer_consumption:
+        return ReceiptDecision(
+            lane, kind, contribution_id, contribution_miner, PASS, work_units,
+            "verified", REPLAY_PENDING, int(source_epoch),
+        )
     if ledger is not None:
-        try:
-            ledger.consume(
-                contribution_id, kind=f"{kind}_receipt_id", source_epoch=source_epoch,
-            )
-        except ReplayError as exc:
+        consumed = _consume_token(
+            ledger, contribution_id, kind=kind, source_epoch=source_epoch
+        )
+        if consumed is not None:
             return ReceiptDecision(
                 lane, kind, contribution_id, contribution_miner,
-                FAIL, Decimal(0), str(exc),
+                FAIL, Decimal(0), consumed, REPLAY_NONE, int(source_epoch),
             )
-        except Exception as exc:  # noqa: BLE001 - an unusable ledger never credits
-            return ReceiptDecision(
-                lane, kind, contribution_id, contribution_miner, FAIL, Decimal(0),
-                f"replay ledger failed: {type(exc).__name__}: {exc}",
-            )
+        return ReceiptDecision(
+            lane, kind, contribution_id, contribution_miner, PASS, work_units,
+            "verified", REPLAY_CONSUMED, int(source_epoch),
+        )
 
     return ReceiptDecision(
         lane, kind, contribution_id, contribution_miner, PASS, work_units, "verified",
+        REPLAY_NONE, int(source_epoch),
     )
+
+
+def _consume_token(ledger: Any, token: str, *, kind: str, source_epoch: int) -> str | None:
+    """Consume one replay token. Returns `None` on success, else the reason.
+
+    Every failure is a refusal to credit, including an unusable ledger: a
+    consumption that cannot be recorded must not become a payment.
+    """
+    try:
+        ledger.consume(token, kind=f"{kind}_receipt_id", source_epoch=source_epoch)
+    except ReplayError as exc:
+        return str(exc)
+    except Exception as exc:  # noqa: BLE001 - an unusable ledger never credits
+        return f"replay ledger failed: {type(exc).__name__}: {exc}"
+    return None
 
 
 def verify_lane_receipts(
@@ -300,6 +341,12 @@ def verify_lane_receipts(
 
     `consumption_ledger` is required: a `ConsumptionLedger`, or the explicit
     `NO_REPLAY_LEDGER` opt-out.
+
+    Consumption is DEFERRED to `compose_integrated`, which is the first place that
+    knows whether a `PASS` receipt will actually be credited. The decisions come
+    back marked `REPLAY_PENDING`, and `compose_integrated` refuses to compose them
+    without the ledger, so the deferral cannot be silently dropped. Use
+    `compose_epoch` to do both halves in one call.
     """
     ledger = _resolve_ledger(consumption_ledger, entry="verify_lane_receipts")
     decisions: list[ReceiptDecision] = []
@@ -313,6 +360,7 @@ def verify_lane_receipts(
                 gpu_attestation_verifier=gpu_attestation_verifier,
                 cpu_quote_verifier=cpu_quote_verifier,
                 consumption_ledger=ledger if ledger is not None else NO_REPLAY_LEDGER,
+                defer_consumption=True,
                 allowed_measurements=allowed_measurements,
                 allowed_tcb_statuses=allowed_tcb_statuses,
                 allowed_advisories=allowed_advisories,
@@ -342,30 +390,90 @@ def verify_lane_receipts(
     return decisions
 
 
+def compose_epoch(
+    resolved: ResolvedAllocation,
+    submissions: Sequence[LaneSubmission],
+    *,
+    key_registry: Any,
+    source_epoch: int,
+    consumption_ledger: Any,
+    now_iso: str | None = None,
+    current_block: int | None = None,
+    gpu_attestation_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
+    cpu_quote_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
+    allowed_measurements: frozenset[str] | set[str] | None = None,
+    allowed_tcb_statuses: frozenset[str] | set[str] | None = None,
+    allowed_advisories: frozenset[str] | set[str] | None = None,
+) -> dict[str, Any]:
+    """Verify and compose one epoch in a single call. The recommended entry.
+
+    One call so the verification and the composition cannot disagree about the
+    signed allocation config or about the ledger: the same `resolved` decides
+    eligibility and the same ledger consumes exactly the contributions that end up
+    credited. Returns `{feed, audit, decisions}`.
+    """
+    decisions = verify_lane_receipts(
+        submissions, key_registry=key_registry, source_epoch=source_epoch,
+        consumption_ledger=consumption_ledger, now_iso=now_iso,
+        current_block=current_block,
+        gpu_attestation_verifier=gpu_attestation_verifier,
+        cpu_quote_verifier=cpu_quote_verifier,
+        allowed_measurements=allowed_measurements,
+        allowed_tcb_statuses=allowed_tcb_statuses,
+        allowed_advisories=allowed_advisories,
+    )
+    composed = compose_integrated(
+        resolved, decisions, consumption_ledger=consumption_ledger,
+    )
+    return {**composed, "decisions": decisions}
+
+
 def compose_integrated(
     resolved: ResolvedAllocation,
     decisions: Sequence[ReceiptDecision],
+    *,
+    consumption_ledger: Any = None,
 ) -> dict[str, Any]:
     """Compose verified decisions into one feed plus an audit trail.
 
     Every lane the allocation config expects is composed — including lanes with no
     `PASS` contribution, which compose empty so their allocation goes to burn.
 
-    Composition never aborts on one decision. Four things drop a decision to
+    Composition never aborts on one decision. Five things drop a decision to
     uncredited (its share goes to burn, and the audit records why) instead of
     raising and taking every lane and every miner with it:
 
       1. a lane the signed allocation config does not know;
-      2. a `receipt_id` already credited in this composition, GLOBALLY, across
+      2. a lane the signed allocation config funds with zero, which cannot pay;
+      3. a `receipt_id` already credited in this composition, GLOBALLY, across
          lanes, so one signed receipt tagged into two lanes earns once, and the
          second lane does not become "contributing" on borrowed work;
-      3. a miner already credited in the same lane;
-      4. the burn hotkey as a reward subject: burn is a destination, never an
+      4. a miner already credited in the same lane;
+      5. the burn hotkey as a reward subject: burn is a destination, never an
          earner, so a receipt whose subject is the configured burn address is
          never a contribution.
+
+    **Replay consumption happens HERE, last, and only for a contribution that is
+    actually being credited.** This is the only place that knows all five rules
+    above, so it is the only safe place to burn a one-time token. Consuming during
+    verification instead left every rule above able to reject a receipt whose token
+    was already gone: an attacker could resubmit a legitimate miner's public
+    receipt under a lane that will be rejected, consume the token, and the miner's
+    own later submission would be refused as a replay. Denial of reward with no
+    forgery. A decision marked `REPLAY_PENDING` therefore requires
+    `consumption_ledger`; composing one without it fails closed.
     """
     known_lanes = set(resolved.lane_allocations)
     burn_hotkey = str(resolved.burn_hotkey)
+    ledger = None if consumption_ledger is NO_REPLAY_LEDGER else consumption_ledger
+    if ledger is None and any(
+        d.replay == REPLAY_PENDING and d.creditable for d in decisions
+    ):
+        raise IntegratedFeedError(
+            "these decisions carry deferred replay consumption (REPLAY_PENDING) but no "
+            "consumption_ledger was supplied: pass the same ledger the verifier used, "
+            "or use compose_epoch"
+        )
 
     by_lane: dict[str, list[_lane_feed.LaneContribution]] = {lane: [] for lane in known_lanes}
     seen_in_lane: dict[str, set[str]] = {lane: set() for lane in known_lanes}
@@ -377,6 +485,9 @@ def compose_integrated(
         if d.lane not in known_lanes:
             drop_reason[position] = f"lane {d.lane!r} is not in the allocation config"
             continue
+        if resolved.lane_allocations[d.lane] <= 0:
+            drop_reason[position] = f"lane {d.lane} is allocated zero and cannot pay"
+            continue
         if d.miner_hotkey == burn_hotkey:
             drop_reason[position] = "subject is the burn hotkey, which is never an earner"
             continue
@@ -387,6 +498,17 @@ def compose_integrated(
         if d.miner_hotkey in seen_in_lane[d.lane]:
             drop_reason[position] = f"miner already credited in lane {d.lane}"
             continue
+        # Every non-mutating rule has passed and this contribution IS being
+        # credited, so now, and only now, burn the one-time token. A replay failure
+        # here drops this decision and leaves the slot open, so a miner's second,
+        # genuinely fresh receipt can still take it.
+        if d.replay == REPLAY_PENDING and ledger is not None:
+            failure = _consume_token(
+                ledger, d.receipt_id, kind=d.kind, source_epoch=d.source_epoch,
+            )
+            if failure is not None:
+                drop_reason[position] = failure
+                continue
         credited_receipt_ids[d.receipt_id] = d.lane
         seen_in_lane[d.lane].add(d.miner_hotkey)
         by_lane[d.lane].append(
@@ -422,10 +544,16 @@ def compose_integrated(
                 final_weight.get(d.miner_hotkey, 0.0) if credited(position, d) else 0.0
             ),
             # a PASS that was not credited, and why (duplicate receipt_id, unknown
-            # lane, duplicate miner, burn subject), the operator's record of a
-            # verified receipt that still earned nothing.
+            # lane, unfunded lane, duplicate miner, burn subject), the operator's
+            # record of a verified receipt that still earned nothing.
             "credited": credited(position, d),
             "drop_reason": drop_reason.get(position, ""),
+            # whether this receipt's one-time replay token was burned, so the audit
+            # shows that an uncredited receipt kept its token
+            "replay_token_consumed": (
+                d.replay == REPLAY_CONSUMED
+                or (d.replay == REPLAY_PENDING and credited(position, d))
+            ),
         }
         for position, d in enumerate(decisions)
     ]
@@ -463,7 +591,7 @@ def compose_integrated(
 __all__ = [
     "AUDIT_SCHEMA", "PASS", "FAIL", "NOT_PROVEN",
     "KIND_COMPUTE_CPU", "KIND_COMPUTE_GPU", "KIND_DISTILL", "KIND_CYBERGYM",
-    "NO_REPLAY_LEDGER",
+    "NO_REPLAY_LEDGER", "REPLAY_NONE", "REPLAY_CONSUMED", "REPLAY_PENDING",
     "IntegratedFeedError", "ReceiptDecision", "LaneSubmission",
-    "verify_lane_receipt", "verify_lane_receipts", "compose_integrated",
+    "verify_lane_receipt", "verify_lane_receipts", "compose_integrated", "compose_epoch",
 ]

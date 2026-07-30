@@ -134,17 +134,35 @@ def test_batch_verification_requires_an_explicit_replay_decision():
 def test_one_receipt_in_two_lanes_is_consumed_once_by_the_ledger(tmp_path):
     ledger = ConsumptionLedger(str(tmp_path / "ledger.sqlite"))
     receipt = FX.cpu_receipt(subject="5Doubler", work_units="9")
+    submissions = [
+        itf.LaneSubmission(itf.KIND_COMPUTE_CPU, receipt, LANE_CPU),
+        itf.LaneSubmission(itf.KIND_COMPUTE_CPU, receipt, LANE_DISTILL),
+    ]
     decisions = itf.verify_lane_receipts(
-        [
-            itf.LaneSubmission(itf.KIND_COMPUTE_CPU, receipt, LANE_CPU),
-            itf.LaneSubmission(itf.KIND_COMPUTE_CPU, receipt, LANE_DISTILL),
-        ],
-        key_registry=FX.registry, source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO,
-        consumption_ledger=ledger,
+        submissions, key_registry=FX.registry, source_epoch=SOURCE_EPOCH,
+        now_iso=NOW_ISO, consumption_ledger=ledger,
     )
     assert decisions[0].verdict == itf.PASS
     assert decisions[1].verdict == itf.FAIL
+    # verification defers consumption: nothing is burned until composition decides
+    assert ledger.size() == 0
+    assert decisions[0].replay == itf.REPLAY_PENDING
+
+    itf.compose_integrated(_resolved(), decisions, consumption_ledger=ledger)
     assert ledger.size() == 1
+    assert ledger.is_consumed(str(receipt["receipt_id"]))
+
+
+def test_composing_a_deferred_decision_without_the_ledger_fails_closed(tmp_path):
+    """Deferral must not be a way to lose replay protection by forgetting a kwarg."""
+    ledger = ConsumptionLedger(str(tmp_path / "ledger.sqlite"))
+    decisions = itf.verify_lane_receipts(
+        [itf.LaneSubmission(itf.KIND_COMPUTE_CPU, FX.cpu_receipt(), LANE_CPU)],
+        key_registry=FX.registry, source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO,
+        consumption_ledger=ledger,
+    )
+    with pytest.raises(itf.IntegratedFeedError, match="deferred replay consumption"):
+        itf.compose_integrated(_resolved(), decisions)
 
 
 def test_one_receipt_in_two_lanes_is_credited_once_without_a_ledger():
@@ -160,6 +178,155 @@ def test_one_receipt_in_two_lanes_is_credited_once_without_a_ledger():
     )
     assert [d.verdict for d in decisions] == [itf.PASS, itf.FAIL]
     assert "already credited in lane" in decisions[1].detail
+
+
+# --------------------------------------------------------------------------- #
+# Nothing that composition rejects may burn its one-time token
+# --------------------------------------------------------------------------- #
+
+LANE_ZERO = "cathedral_zero_funded"
+
+_ALLOCATIONS_WITH_ZERO = [
+    {"lane": LANE_CPU, "allocation": "0.50", "enabled": True},
+    {"lane": LANE_DISTILL, "allocation": "0.40", "enabled": True},
+    {"lane": LANE_ZERO, "allocation": "0", "enabled": True},
+]
+
+
+def _resolved_with_zero_funded_lane():
+    burn = sc.verify_burn_config(
+        FX.burn_config(burn_hotkey=BURN_HOTKEY), FX.registry,
+        network="finney", netuid=39, now=NOW_DT,
+    )
+    allocation = sc.verify_allocation_config(
+        FX.allocation_config(_ALLOCATIONS_WITH_ZERO), FX.registry,
+        network="finney", netuid=39, now=NOW_DT,
+    )
+    return sc.resolve_allocation(burn, allocation)
+
+
+def _compose_epoch(resolved, submissions, ledger):
+    return itf.compose_epoch(
+        resolved, submissions, key_registry=FX.registry, source_epoch=SOURCE_EPOCH,
+        now_iso=NOW_ISO, consumption_ledger=ledger,
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["unknown_lane", "unfunded_lane", "burn_subject", "duplicate_receipt", "duplicate_miner"],
+)
+def test_every_composition_rejection_leaves_the_token_unconsumed(tmp_path, case):
+    """Consumption must be the last step of COMPOSITION, not of verification.
+
+    Composition can still reject a receipt that verified `PASS`: unknown lane,
+    unfunded lane, burn subject, a receipt_id already credited, a miner already
+    credited in that lane. When consumption happened during verification, every one
+    of those rejections burned the receipt's one-time token anyway, so an attacker
+    could resubmit a legitimate miner's public receipt under a lane that will be
+    rejected, and the miner's own later submission was refused as a replay. Denial
+    of reward with no forgery.
+
+    Each case here composes a receipt that will be rejected, then asserts the token
+    is untouched and the legitimate submission of the SAME receipt still earns.
+    """
+    ledger = ConsumptionLedger(str(tmp_path / "ledger.sqlite"))
+    resolved = _resolved_with_zero_funded_lane()
+    victim = FX.cpu_receipt(subject="5Victim", work_units="11")
+
+    if case == "unknown_lane":
+        attack = [itf.LaneSubmission(itf.KIND_COMPUTE_CPU, victim, "cathedral_no_such_lane")]
+    elif case == "unfunded_lane":
+        attack = [itf.LaneSubmission(itf.KIND_COMPUTE_CPU, victim, LANE_ZERO)]
+    elif case == "burn_subject":
+        victim = FX.cpu_receipt(subject=BURN_HOTKEY, work_units="11")
+        attack = [itf.LaneSubmission(itf.KIND_COMPUTE_CPU, victim, LANE_CPU)]
+    elif case == "duplicate_receipt":
+        # the same receipt offered to two lanes: the second is rejected, and that
+        # rejection must not be what burns the token
+        attack = [
+            itf.LaneSubmission(itf.KIND_COMPUTE_CPU, victim, LANE_CPU),
+            itf.LaneSubmission(itf.KIND_COMPUTE_CPU, victim, LANE_DISTILL),
+        ]
+    else:  # duplicate_miner: a second receipt from a miner already credited
+        first = FX.cpu_receipt(subject="5Victim", work_units="3")
+        attack = [
+            itf.LaneSubmission(itf.KIND_COMPUTE_CPU, first, LANE_CPU),
+            itf.LaneSubmission(itf.KIND_COMPUTE_CPU, victim, LANE_CPU),
+        ]
+
+    composed = _compose_epoch(resolved, attack, ledger)
+    rejected = [
+        row for row in composed["audit"]["receipts"]
+        if row["receipt_id"] == str(victim["receipt_id"]) and not row["credited"]
+    ]
+    assert rejected, f"{case} did not produce a rejected contribution"
+
+    if case == "duplicate_receipt":
+        # the FIRST offer of this receipt was legitimately credited, so its token is
+        # gone by design. What matters is that the rejected SECOND offer is not what
+        # burned it, and that exactly one credit happened.
+        assert ledger.size() == 1
+        credited_rows = [r for r in composed["audit"]["receipts"] if r["credited"]]
+        assert len(credited_rows) == 1
+        assert credited_rows[0]["lane"] == LANE_CPU
+        return
+
+    # every other rejection leaves the REJECTED receipt's token untouched
+    assert all(row["replay_token_consumed"] is False for row in rejected)
+    assert not ledger.is_consumed(str(victim["receipt_id"]))
+    if case == "duplicate_miner":
+        # the miner's first receipt was legitimately credited (one token burned),
+        # and the second, rejected one kept its own
+        assert ledger.size() == 1
+    else:
+        assert ledger.size() == 0
+
+    # the token survived, so the legitimate submission still earns
+    honest = _compose_epoch(
+        resolved,
+        [itf.LaneSubmission(itf.KIND_COMPUTE_CPU, victim, LANE_CPU)],
+        ledger,
+    )
+    if case == "burn_subject":
+        # the burn hotkey is never an earner, whoever submits for it
+        assert all(not row["credited"] for row in honest["audit"]["receipts"])
+        assert ledger.size() == 0
+        return
+    credited = [row for row in honest["audit"]["receipts"] if row["credited"]]
+    assert len(credited) == 1
+    assert credited[0]["replay_token_consumed"] is True
+    assert ledger.is_consumed(str(victim["receipt_id"]))
+
+
+def test_a_replayed_receipt_does_not_block_a_miners_fresh_receipt(tmp_path):
+    """A consumption failure must leave the lane slot open.
+
+    A miner submits a receipt that was already credited in an earlier epoch pass
+    plus a genuinely fresh one. The stale receipt is refused, and because the
+    refusal happens inside the selection loop, the fresh receipt takes the slot
+    instead of being dropped as "miner already credited".
+    """
+    ledger = ConsumptionLedger(str(tmp_path / "ledger.sqlite"))
+    resolved = _resolved()
+    stale = FX.cpu_receipt(subject="5Miner", work_units="7")
+    fresh = FX.cpu_receipt(subject="5Miner", work_units="9")
+
+    _compose_epoch(resolved, [itf.LaneSubmission(itf.KIND_COMPUTE_CPU, stale, LANE_CPU)], ledger)
+    assert ledger.is_consumed(str(stale["receipt_id"]))
+
+    composed = _compose_epoch(
+        resolved,
+        [
+            itf.LaneSubmission(itf.KIND_COMPUTE_CPU, stale, LANE_CPU),
+            itf.LaneSubmission(itf.KIND_COMPUTE_CPU, fresh, LANE_CPU),
+        ],
+        ledger,
+    )
+    by_id = {row["receipt_id"]: row for row in composed["audit"]["receipts"]}
+    assert by_id[str(stale["receipt_id"])]["credited"] is False
+    assert by_id[str(fresh["receipt_id"])]["credited"] is True
+    assert "5Miner" in {w["miner_hotkey"] for w in composed["feed"]["weights"]}
 
 
 # --------------------------------------------------------------------------- #
