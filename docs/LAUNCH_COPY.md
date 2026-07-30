@@ -54,10 +54,10 @@ corpus. Today's champion is tomorrow's public data. The frontier ratchets.
 The exploits aren't the product. The verified dataset is.
 
 **7/**
-Status: the scoring, sealing, verification, receipts and feed are built and
-tested (448 passing tests, hardware-free). The real binary corpus, the on-chain
-transport, and attested verification are the remaining integration work — in the
-open, documented.
+Status: the mechanism, the real ARVO/OSS-Fuzz backend, and Intel-TDX attested
+verification are built and tested (670 passing tests) — proven on real bugs,
+including a real ARVO bug solved inside a TDX enclave. The full corpus at scale and
+the on-chain weight flip are the remaining work — in the open, documented.
 
 **8/**
 Autonomous exploit discovery just crossed the line — XBOW topped HackerOne's US
@@ -88,8 +88,10 @@ The validator runs it — that's the whole score. No judge model, no opinion.
   16 GB GPU) + an agent loop + the task runner + a trace logger. Improve from
   there.
 
-**Status:** mechanism built and tested (448 tests). Live participation also needs
-the task corpus + on-chain transport — integration in progress, tracked openly.
+**Status:** mechanism, real ARVO/OSS-Fuzz backend, and Intel-TDX attestation built
+and tested (670 tests), proven on real bugs. Live participation still needs the full
+corpus at scale + the on-chain weight-registration flip — integration in progress,
+tracked openly.
 
 Read the mining guide → `docs/MINING.md`
 Read how validation works → `docs/VALIDATING.md`
@@ -131,8 +133,8 @@ credit for sounding right.
 **Can I just call a frontier API / use any model?**
 Yes — the validator only checks the PoC, not how you made it. But whatever you
 commit is what's fingerprinted on-chain and scored; you can't swap it after the
-batch is drawn, and (in the attested lane, to build) the run is sealed so the
-committed model is provably the one that ran.
+batch is drawn, and in the attested lane the run is sealed — a real Intel-TDX quote
+binds the run — so the committed model is provably the one that ran.
 
 **Why can't I train on the answers?**
 Commit-then-challenge: your model hash is committed before the batch nonce
@@ -145,10 +147,10 @@ beat you re-scored on the same batch, by a margin. A stale or contaminated crown
 burns rather than pays. Contractual 10% burn floor.
 
 **Is it built?**
-The mechanism is — 448 passing tests, hardware-free. The real binary corpus
-(~130 GB), the Bittensor transport, and attested verification are integration
-work, tracked openly. Nothing here is a conceptual simulator; it runs end-to-end
-as a service today against an injected crash backend.
+The mechanism, the real ARVO/OSS-Fuzz backend, and Intel-TDX attested verification
+are — 670 passing tests, proven on real bugs (including a real ARVO bug solved
+inside a TDX enclave). The full corpus at scale (~130 GB+) and a Bittensor axon are
+the remaining integration work, tracked openly. It runs end-to-end as a service.
 
 **What's the Arena?**
 A *proposed* product: a CTF-style workspace where you solve challenges in a sealed

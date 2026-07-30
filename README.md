@@ -13,11 +13,14 @@ become an open training corpus that makes the next model better.
 > *requires* the patched build to exist. The subnet does not target live systems,
 > See [Responsible use](#responsible-use).
 
-**Status:** the scoring, sealing, verification, and reward mechanism is implemented
-and tested hardware-free (**448 passing tests**), and the CyberGym lane now runs
-end to end as a service. The real binary backend, the Bittensor transport, and the
-attested-verification lane are the remaining integration work — see
-[What is built](#what-is-built).
+**Status:** the mechanism is implemented and tested hardware-free (**670 passing
+tests**), and the CyberGym lane runs end to end. The **real binary backend** (the
+ARVO + OSS-Fuzz differential) and both **Intel-TDX attestation adapters** are now
+built and proven on real vulnerabilities — including a genuine ARVO bug solved
+*inside* a sealed Intel TDX enclave. What remains is the full ~130 GB+ corpus at
+scale, a Bittensor axon (the reference HTTP transport is built), and the on-chain
+flip (the scored→weights wiring is merged in `cathedral`; registering the
+mechanism's emission weight is an owner step) — see [What is built](#what-is-built).
 
 ---
 
@@ -83,9 +86,9 @@ farmed by splitting it across submissions.
 
 ## What is built
 
-The mechanism is complete and tested. The integration layer that turns it into a
-live subnet is not — and some of it (the dataset, the confidential-compute
-attestation) belongs to Cathedral's infrastructure, not this repo.
+The mechanism **and** the real backend, TDX attestation, and on-chain wiring are now
+built. What remains is scale (the full corpus) and owner ceremonies (keys + the
+weight-registration flip) — some of which belongs to Cathedral's infrastructure.
 
 | Capability | Status |
 |---|---|
@@ -95,21 +98,24 @@ attestation) belongs to Cathedral's infrastructure, not this repo.
 | **Aggregate the dataset** — trace contract + structural quality gate + reuse licence | **built** ([`trace_submission.py`](cathedral_distill/trace_submission.py)) |
 | **Share emission to valuable miners** — king-of-the-hill + independent reward books | **built** ([`frontier.py`](cathedral_distill/frontier.py), [`roles.py`](cathedral_distill/roles.py)) |
 | **Spot-check without re-running everything** — Merkle openings, chain-derived challenges | **built** ([`challenge.py`](cathedral_distill/challenge.py)) |
-| Real binary backend — CyberGym `reproduce` over the ~130 GB corpus | to build (needs the dataset) |
-| Network transport — Bittensor synapse/axon, task serving, PoC submission | to build |
-| On-chain wiring — the CyberGym lane in `cathedralconfidential`, weight setting | to build |
-| Attested verification (L1) — the crash result bound to a TDX quote | to build (the `cathedralconfidential` lane) |
+| **Real binary backend** — real ARVO + OSS-Fuzz vul/fix differential, network-isolated, digest-pinned | **built + proven** ([`cybergym_repro.py`](cathedral_distill/cybergym_repro.py), [`corpus_images.py`](cathedral_distill/corpus_images.py)) |
+| **Attested verification (L1)** — the solve bound to a real Intel-TDX quote (two profiles) | **built + proven on real DCAP quotes** ([`cybergym_cathedral_attest.py`](cathedral_distill/cybergym_cathedral_attest.py), [TDX_ATTESTATION.md](docs/TDX_ATTESTATION.md)) |
+| Network transport — reference HTTP service (a Bittensor axon can swap in over the same handlers) | **built (HTTP)** ([`cybergym_http.py`](cathedral_distill/cybergym_http.py), [`cybergym_repro_server.py`](cathedral_distill/cybergym_repro_server.py)) |
+| On-chain wiring — scored→weights adapter + refresh orchestrator + cadence triggers | **merged in `cathedral`**; the emission-weight registration is an owner flip |
+| Full corpus at scale — the ~130 GB+ ARVO/OSS-Fuzz image set | infra (a 10-task dual-family slice is deployed + verified) |
 
 So, concretely, to the six questions a subnet operator asks:
 
-- **Can validators distribute problems?** The sealed, unpredictable, verifiable
-  batch draw is built. Serving it over the network is not.
-- **Can miners get problems and submit?** The submission and result structures are
-  built. The miner client and transport are not.
-- **Can the validator verify a solution?** The differential-crash verification
-  logic is built and tested; wiring it to the real binaries needs the dataset.
-- **Do we aggregate a dataset?** The trace-submission contract and its quality gate
-  are built; the corpus store and curation are not.
+- **Can validators distribute problems?** Yes — the sealed, unpredictable,
+  verifiable batch draw and a reference HTTP service that serves it are both built.
+- **Can miners get problems and submit?** Yes — the submission/result structures, a
+  Hermes tool-use miner agent, and the HTTP transport are built (proven end to end
+  with a real external LLM miner).
+- **Can the validator verify a solution?** Yes — the differential-crash verification
+  runs the real ARVO/OSS-Fuzz vul/fix builds (network-isolated), proven on real bugs
+  and inside a sealed Intel TDX enclave.
+- **Do we aggregate a dataset?** Yes — the trace-submission contract, its quality
+  gate, and the corpus store are built; every verified + trainable solve lands in it.
 - **Do we share emission to valuable miners?** Yes — king-of-the-hill scoring with
   paired evaluation, independent per-role reward books, and a 10% burn floor.
 - **How do we score?** Level-weighted solves over a sealed batch, paired against the
@@ -187,7 +193,7 @@ pip install -e '.[dev]'
 pytest
 ```
 
-Expected: `448 passed, 1 skipped`. All hardware-free — the verifier backend is
+Expected: `670 passed, 1 skipped`. All hardware-free — the verifier backend is
 injected, so the full mechanism is exercised without the CyberGym binary corpus.
 
 ---
