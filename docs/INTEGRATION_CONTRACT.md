@@ -179,6 +179,53 @@ redeploy. Both are verified with the receipt discipline and fail closed:
 - **`cathedral_burn_config_v1`** — `burn.fraction` (decimal) + `burn.burn_hotkey`.
 - **`cathedral_lane_allocation_v1`** — `allocations: [{lane, allocation, enabled}]`.
 
+Both carry the same envelope: `{schema, config_version, network, netuid,
+generated_at, valid_from, valid_until, signing_key_id}`, timestamps canonical
+`YYYY-MM-DDTHH:MM:SSZ`, decimals matching `_DECIMAL_RE` (0..1). Unknown or missing
+keys are refused — the check is exact, not a superset.
+
+### 4a. The anchoring key registry (`receipt_keys.py`)
+
+`signing_key_id` on any receipt or config is resolved through one root-signed
+registry, so no key is self-asserted:
+
+- **`cathedral_receipt_key_registry_v1`** — `{schema, release, generated_at,
+  valid_from, valid_until, registry_key_id, keys, signature}`, each entry in `keys`
+  being `{key_id, public_key_base64, valid_from, valid_until, status}` with `status`
+  one of `active` / `retired` / `revoked`.
+
+`verify_key_registry(data, trusted_roots)` checks the signature against
+`trusted_roots[registry_key_id]` — the operator root anchored in validator config.
+Sign with `cathedral-cybergym sign-registry`, which refuses a wrong `schema` before
+signing rather than letting a validator discover it.
+
+> **⚠ A registry goes stale in 24 hours, whatever `valid_until` says.**
+> `max_age_seconds` (default `86400`) bounds `generated_at`, *independently* of the
+> validity window, so a registry signed with a year-long `valid_until` is refused by
+> every default-configured verifier the next day (`key registry is too stale`).
+> Re-sign and re-serve on that cadence. `served_keys.ServedKeyRegistry` +
+> `GET /v1/keys` serve it verbatim, verified against the anchored root, and return
+> 503 naming the deadline once stale rather than handing out bytes every consumer
+> would reject. See [`VALIDATING.md`](VALIDATING.md).
+
+### 4b. `lane` is not the mechanism id
+
+The `lane` string in `cathedral_lane_allocation_v1` is matched against the lane the
+composing code names. Two ids exist, in unrelated namespaces:
+
+| | value | who matches on it |
+|---|---|---|
+| **lane id** | `cathedral_cybergym` (`cybergym_service.CYBERGYM_LANE`) | the allocation config, `compose_scores_lane`, `integrated_feed.compose_integrated` |
+| **mechanism id** | `cybergym_v0` | the cathedral publisher's `MechanismSpec` (`PUT /mechanisms/{id}`) |
+
+Putting the mechanism id in the `lane` field is **silent**: both configs verify, the
+vector composes, and every contribution is dropped as `lane 'cathedral_cybergym' is
+not in the allocation config` — a 100% burn epoch whose only trace is a `drop_reason`
+in an audit row. Read the share through
+`cybergym_service.lane_allocation_for(resolved)`, which refuses and names the lanes
+that *are* funded, rather than hand-passing a number to
+`compose_scores_lane(allocation=...)`.
+
 Every apply verifies: **signer authority** (id resolved via the anchored registry),
 **network/subnet target** (`network`/`netuid`), **freshness** (validity window +
 publication-age ceiling), **rollback protection** (monotonic `config_version`; a
