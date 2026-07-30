@@ -11,8 +11,7 @@ become an open training corpus that makes the next model better.
 > **Scope and posture.** This is authorized security research. Targets are
 > historical vulnerabilities that already have a public fix; verification
 > *requires* the patched build to exist. The subnet does not target live systems,
-> and models trained on its corpus are distributed under access controls, never as
-> ungated open weights. See [Responsible use](#responsible-use).
+> See [Responsible use](#responsible-use).
 
 **Status:** the scoring, sealing, verification, and reward mechanism is implemented
 and tested hardware-free (**448 passing tests**), and the CyberGym lane now runs
