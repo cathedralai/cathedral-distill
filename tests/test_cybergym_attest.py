@@ -262,7 +262,7 @@ def test_service_requires_attestation_policy_by_default(tmp_path):
     chain = ChainContext(block=1, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
                          source_epoch=11, valid_from_block=1, valid_until_block=999)
     common = dict(backend=lambda *a: 0, corpus_store=CyberGymCorpusStore(":memory:"),
-                  score_store=CyberGymScoreStore(":memory:"),
+                  score_store=CyberGymScoreStore(":memory:", durability_required=False),
                   solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
                   validator_hotkey="5V",
                   private_key=Ed25519PrivateKey.from_private_bytes(bytes(range(32))),
@@ -301,7 +301,8 @@ def test_service_only_attested_miner_earns_and_composes(tmp_path):
                          source_epoch=11, valid_from_block=1, valid_until_block=999)
     svc = CyberGymService(
         Holdout(pool=source, _context={}), chain, backend=source.backend,
-        corpus_store=CyberGymCorpusStore(":memory:"), score_store=CyberGymScoreStore(":memory:"),
+        corpus_store=CyberGymCorpusStore(":memory:"),
+        score_store=CyberGymScoreStore(":memory:", durability_required=False),
         solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
         validator_hotkey="5Validator",
         private_key=Ed25519PrivateKey.from_private_bytes(bytes(range(32))),

@@ -187,6 +187,40 @@ def test_build_service_starts_and_dispatches():
     assert msg.batch_id and [t.task_id for t in msg.tasks] == ["arvo:368"]
 
 
+def test_build_service_default_stores_are_files_not_memory():
+    """The score store now refuses ":memory:" (the external adapter reads it as a
+    file), so the reference server's zero-config boot has to hand it a real path
+    or the shipped server stops booting at all: per-boot temp files."""
+    from cathedral_distill.cybergym_repro_server import build_service
+    svc = build_service(["arvo:368"], private_key=Ed25519PrivateKey.generate())
+    score_path = svc._scores._db_path
+    assert score_path != ":memory:" and os.path.isfile(score_path)
+
+
+@pytest.mark.parametrize("seed, complaint", [
+    ("deadbeef", "64 hex characters"),               # too short
+    ("zz" * 32, "not valid hex"),                    # right length, not hex
+    ("ab" * 40, "64 hex characters"),                # too long
+])
+def test_a_malformed_signing_seed_is_refused_with_the_env_var_named(monkeypatch, seed, complaint):
+    """A mistyped CYBERGYM_SIGNING_SEED used to surface as a raw cryptography
+    traceback ("Expected 32 bytes") that never named the variable; the operator
+    now gets the variable and the expected shape."""
+    from cathedral_distill.cybergym_repro_server import _signing_key
+    monkeypatch.setenv("CYBERGYM_SIGNING_SEED", seed)
+    with pytest.raises(SystemExit, match="CYBERGYM_SIGNING_SEED") as excinfo:
+        _signing_key()
+    assert complaint in str(excinfo.value)
+
+
+def test_a_wellformed_signing_seed_is_accepted_and_not_ephemeral(monkeypatch):
+    from cathedral_distill.cybergym_repro_server import _signing_key
+    monkeypatch.setenv("CYBERGYM_SIGNING_SEED", "ab" * 32)
+    key, ephemeral = _signing_key()
+    assert not ephemeral
+    assert key.private_bytes_raw() == bytes.fromhex("ab" * 32)
+
+
 # --------------------------------------------------------------------------- #
 # available_tasks — only serve what's pulled
 # --------------------------------------------------------------------------- #
