@@ -18,14 +18,24 @@ adapter verifies the receipt is a genuine Intel-TDX, sealed (`reuse=forbidden`,
 attestation cannot be replayed for another task, lifted from another miner, or paired
 with a trace authored outside the enclave.
 
-Trust posture: by default this trusts Cathedral's own `intel_verified` +
-`report_data_match` (**trusted-issuer**). Pass a `quote_verifier` to additionally
-verify the raw `quote_b64` against Intel DCAP collateral (**trustless**) — that
-raw-quote parse is the standing INFRA seam; the submission-binding logic here is
-independent of it, and fails closed.
+Two Cathedral Intel-TDX profiles are covered:
+  * `verify_cathedral_attestation` — an `attest.v1` **result** quote (above): bounded,
+    one-shot, binds the exact `(task, poc, trace)` via the artifact commitment.
+  * `verify_boot_attestation` — a `custom.v1` **boot** quote: a sealed TDX worker that
+    keeps the real corpus image running with SSH access after a verified boot, binding
+    the machine + the customer SSH key (`workload_result_binding` is false). This is the
+    path that runs the genuine multi-GB `n132/arvo` build inside TDX, which the bounded
+    `attest.v1` enclave cannot.
+
+Trust posture: by default this trusts Cathedral's own verification flags
+(`intel_verified` / `report_data_match` / `binding_verified`) — **trusted-issuer**. Pass
+a `quote_verifier` to additionally verify the raw `quote_b64` against Intel DCAP
+collateral (**trustless**) — that raw-quote parse is the standing INFRA seam; the
+binding logic here is independent of it, and fails closed.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from dataclasses import dataclass
@@ -56,9 +66,11 @@ def commitment_sha256(*, task_id: str, poc_sha256: str, trace_id: str) -> str:
 
 
 def tee_kind(receipt: Mapping[str, Any]) -> str:
-    """Map Cathedral's `tee_attestation.kind` (e.g. 'tdx-1.5', 'sev-snp-...') to our
-    canonical tee name. An Intel TDX quote → 'intel_tdx'; anything else is refused."""
-    kind = str(receipt.get("tee_attestation", {}).get("kind", "")).lower()
+    """Map Cathedral's quote `kind` (e.g. 'tdx-1.5', 'sev-snp-...') to our canonical
+    tee name. An Intel TDX quote → 'intel_tdx'; anything else is refused. Reads the
+    top-level `kind` (custom.v1 boot receipt) or the nested `tee_attestation.kind`
+    (attest.v1 result receipt)."""
+    kind = str(receipt.get("kind") or receipt.get("tee_attestation", {}).get("kind", "")).lower()
     if kind.startswith("tdx"):
         return REQUIRED_TEE
     if kind.startswith("sev"):
@@ -157,6 +169,73 @@ def verify_cathedral_attestation(
                                 rid, got, trustless)
 
 
+@dataclass(frozen=True)
+class BootAttestation:
+    attested: bool
+    tee: str
+    reason: str
+    receipt_id: str = ""
+    key_bound: bool = False
+
+
+def verify_boot_attestation(
+    receipt: Mapping[str, Any], *, expected_ssh_pubkey: str | None = None,
+    quote_verifier: QuoteVerifier | None = None,
+) -> BootAttestation:
+    """Verify a Cathedral `custom.v1` **boot** quote: a sealed Intel-TDX worker that
+    keeps a customer image running with SSH access after a verified boot.
+
+    Unlike `attest.v1`'s result quote, a boot quote binds the **machine boot + the
+    customer SSH key**, not a workload output (`trust.workload_result_binding` is
+    false). Its recipe (verified here on a real receipt):
+
+        report_data[0:32] = sha256(nonce_hex || base64(customer_ssh_public_key))
+
+    So passing `expected_ssh_pubkey` proves the operator's own key — the one used to
+    run the reproduction over SSH — is the key bound into the quote, i.e. the solve
+    ran on *this* verified TDX worker under *this* key. Result-binding of the PoC then
+    rests on the sealed worker + the key-bound SSH session, not a per-result quote.
+    Trusted-issuer by default; a `quote_verifier` checks the raw quote against Intel
+    DCAP. Fails closed.
+    """
+    rid = str(receipt.get("receipt_id") or receipt.get("worker_id") or "")
+
+    def no(reason: str) -> BootAttestation:
+        return BootAttestation(False, tee_kind(receipt), reason, rid)
+
+    if str(receipt.get("receipt_status") or receipt.get("status")) != "ready":
+        return no("boot receipt not ready")
+    tee = tee_kind(receipt)
+    if tee != REQUIRED_TEE:
+        return no(f"CyberGym requires an Intel TDX worker, got tee={tee!r}")
+
+    key_bound = False
+    if expected_ssh_pubkey is not None:
+        pub_b64 = base64.b64encode(expected_ssh_pubkey.strip().encode()).decode()
+        nonce = str(receipt.get("nonce", ""))
+        rd = str(receipt.get("report_data", ""))
+        expect = hashlib.sha256((nonce + pub_b64).encode()).hexdigest()
+        if not rd or not rd.startswith(expect):
+            return no("boot quote report_data does not bind the expected ssh key")
+        if str(receipt.get("pubkey_b64", "")) != pub_b64:
+            return no("receipt pubkey_b64 does not match the expected ssh key")
+        key_bound = True
+
+    if quote_verifier is not None:
+        q = str(receipt.get("quote_b64", ""))
+        if not q or not quote_verifier(q, str(receipt.get("report_data", ""))):
+            return no("raw boot quote failed independent verification")
+    else:
+        if receipt.get("intel_verified") is not True and str(receipt.get("intel_status")) != "verified":
+            return no("Cathedral did not report intel_verified")
+        if receipt.get("binding_verified") is not True:
+            return no("customer key binding not verified")
+        if receipt.get("verified") is not True:
+            return no("boot quote not verified (intel chain and/or binding failed)")
+
+    return BootAttestation(True, REQUIRED_TEE, "attested_intel_tdx_boot", rid, key_bound)
+
+
 def _expected_report_data_hex(receipt: Mapping[str, Any]) -> str | None:
     """Recompute report_data[32:64] from the receipt fields per Cathedral's
     binding_recipe, for a trustless quote check. Returns None if a needed field is
@@ -178,4 +257,5 @@ __all__ = [
     "COMMITMENT_SCHEMA", "REQUIRED_TEE", "REQUIRED_HARDWARE", "RESULT_ARTIFACT",
     "commitment_bytes", "commitment_sha256", "tee_kind",
     "CathedralAttestation", "verify_cathedral_attestation",
+    "BootAttestation", "verify_boot_attestation",
 ]

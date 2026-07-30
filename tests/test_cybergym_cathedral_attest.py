@@ -9,6 +9,8 @@ stale receipt — the properties that make an attested solve un-forgeable.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cathedral_distill.cybergym_cathedral_attest import (  # noqa: E402
     commitment_sha256,
     tee_kind,
+    verify_boot_attestation,
     verify_cathedral_attestation,
 )
 
@@ -145,3 +148,56 @@ def test_trustless_mode_fails_closed_when_the_quote_is_rejected():
                                      trace_id=TRACE_ID, now=NOW,
                                      quote_verifier=lambda q, rd: False)
     assert not r.attested and "raw TDX quote" in r.reason
+
+
+# --------------------------------------------------------------------------- #
+# custom.v1 boot quote — a sealed TDX worker running the real corpus image
+# --------------------------------------------------------------------------- #
+SSH_PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexampleexamplekey cathedral"
+
+
+def _boot_receipt(*, ssh_pubkey=SSH_PUB, kind="tdx-1.5", intel_verified=True,
+                  binding_verified=True, verified=True, status="ready", nonce="9c99da63"):
+    """A custom.v1 boot receipt whose report_data binds the ssh key, per the real recipe
+    report_data[0:32] = sha256(nonce_hex || base64(ssh_pubkey))."""
+    pub_b64 = base64.b64encode(ssh_pubkey.strip().encode()).decode()
+    rd = hashlib.sha256((nonce + pub_b64).encode()).hexdigest()
+    return {"receipt_id": "74bb4a0b-9b61-4d10-bcfd-9a1d2e958b7d", "receipt_status": status,
+            "kind": kind, "intel_verified": intel_verified, "intel_status": "verified",
+            "binding_verified": binding_verified, "verified": verified,
+            "nonce": nonce, "pubkey_b64": pub_b64, "report_data": rd,
+            "quote_b64": "BAACAIEA…"}
+
+
+def test_a_genuine_boot_quote_binds_the_operator_ssh_key():
+    a = verify_boot_attestation(_boot_receipt(), expected_ssh_pubkey=SSH_PUB)
+    assert a.attested and a.tee == "intel_tdx" and a.key_bound and a.reason == "attested_intel_tdx_boot"
+
+
+def test_boot_quote_bound_to_a_different_key_is_refused():
+    # a boot quote for someone else's key can't vouch for our reproduction
+    a = verify_boot_attestation(_boot_receipt(ssh_pubkey="ssh-ed25519 AAAAotherkey x"),
+                                expected_ssh_pubkey=SSH_PUB)
+    assert not a.attested and "bind the expected ssh key" in a.reason
+
+
+def test_boot_quote_issuer_trust_without_a_key_still_requires_verified_flags():
+    assert verify_boot_attestation(_boot_receipt()).attested                       # verified flags true
+    assert not verify_boot_attestation(_boot_receipt(intel_verified=False, verified=False)).attested
+    assert not verify_boot_attestation(_boot_receipt(binding_verified=False, verified=False)).attested
+    assert not verify_boot_attestation(_boot_receipt(verified=False)).attested
+
+
+def test_boot_quote_refuses_wrong_tee_and_unready():
+    assert not verify_boot_attestation(_boot_receipt(kind="sev-snp-1")).attested
+    assert not verify_boot_attestation(_boot_receipt(status="provisioning")).attested
+
+
+def test_boot_quote_trustless_mode_checks_the_raw_quote():
+    seen = {}
+    ok = verify_boot_attestation(_boot_receipt(intel_verified=False, verified=False),
+                                 expected_ssh_pubkey=SSH_PUB,
+                                 quote_verifier=lambda q, rd: seen.setdefault("q", q) or True)
+    assert ok.attested and seen["q"].startswith("BAAC")
+    bad = verify_boot_attestation(_boot_receipt(), quote_verifier=lambda q, rd: False)
+    assert not bad.attested and "raw boot quote" in bad.reason
