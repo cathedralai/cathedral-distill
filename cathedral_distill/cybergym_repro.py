@@ -8,7 +8,8 @@ challenges from the real corpus.
   * `docker_reproduce_backend` — VERIFY: `(task_id, poc, mode) -> exit_code`. Maps
     a task to its prebuilt Docker image (`n132/arvo:{id}-{vul|fix}` running
     `/bin/arvo`, or `cybergym/oss-fuzz:{id}-{vul|fix}` running `/usr/local/bin/run_poc`
-    — the exact images CyberGym uses), runs the PoC mounted at `/tmp/poc`, and
+    — the exact images CyberGym uses), runs the PoC mounted at `/tmp/poc`
+    network-isolated (`--network none`, egress-deny — the PoC is adversarial), and
     reports a crash. Drops into `CyberGymService(backend=...)` in place of the stub.
   * `ReproTaskSource` — DISTRIBUTE: a draw-capable source over a real subset,
     nonce-sealed. `artifact()` returns None — the miner fetches the real vulnerable
@@ -30,6 +31,14 @@ from cathedral_distill.cybergym import Level, Task
 from cathedral_distill.cybergym_batch import Batch, batch_id_for
 
 DOCKER_TIMEOUT = 300
+
+#: Isolation flags for the verify container. `--network none` is egress-deny — the
+#: PoC is an adversarial, deliberately-crashing input, so the build must have no way
+#: to phone home (launch runbook Phase 1.4); `no-new-privileges` blocks setuid
+#: escalation. Kept minimal (no cpu/mem/pids caps) so a legitimate crash still
+#: reproduces faithfully — correctness of the differential comes first. Overridable
+#: so an operator can tighten further per deployment.
+SANDBOX_FLAGS: tuple[str, ...] = ("--network", "none", "--security-opt", "no-new-privileges")
 
 # A real subset with level-gated metadata; the vulnerable repo itself is the image
 # the miner pulls by binary_digest. Extend from cybergym's download_subset.py.
@@ -76,17 +85,18 @@ def _is_crash(output: str) -> bool:
 
 def docker_reproduce_backend(task_id: str, poc: bytes, mode: str, *,
                              docker: str = "docker", timeout: int = DOCKER_TIMEOUT,
+                             sandbox_flags: Sequence[str] = SANDBOX_FLAGS,
                              _run: Runner = subprocess.run) -> int:
     """Run one PoC against the real vulnerable (mode!='fix') or patched build via
-    Docker. Returns nonzero iff the build crashes on the PoC — the differential
-    signal `verify_poc` composes into solved = crash-vuln AND clean-patch."""
+    Docker, network-isolated. Returns nonzero iff the build crashes on the PoC — the
+    differential signal `verify_poc` composes into solved = crash-vuln AND clean-patch."""
     image, cmd = _image_and_command(task_id, mode)
     fd, path = tempfile.mkstemp()
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(poc)
         try:
-            r = _run([docker, "run", "--rm", "-v", f"{path}:/tmp/poc:ro", image, *cmd],
+            r = _run([docker, "run", "--rm", *sandbox_flags, "-v", f"{path}:/tmp/poc:ro", image, *cmd],
                      capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return 0

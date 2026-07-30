@@ -124,6 +124,23 @@ def test_backend_cleans_up_the_temp_poc_file():
     assert fake.seen_paths and not os.path.exists(fake.seen_paths[0])
 
 
+def test_backend_isolates_the_verify_container_network():
+    seen = {}
+
+    def capture(argv, capture_output=False, timeout=None):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, stdout=CLEAN, stderr=b"")
+
+    docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=capture)
+    argv = seen["argv"]
+    # egress-deny: the adversarial build must have no network, and the flags must
+    # precede the image so they apply to the run (not get parsed as image args).
+    assert "--network" in argv and argv[argv.index("--network") + 1] == "none"
+    assert "no-new-privileges" in argv
+    image_ix = argv.index("n132/arvo:368-vul")
+    assert argv.index("--network") < image_ix
+
+
 def test_backend_treats_a_timeout_as_no_crash():
     def timeout_run(argv, capture_output=False, timeout=None):
         raise subprocess.TimeoutExpired(argv, timeout)
