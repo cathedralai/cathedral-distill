@@ -142,15 +142,17 @@ def test_one_receipt_in_two_lanes_is_consumed_once_by_the_ledger(tmp_path):
         submissions, key_registry=FX.registry, source_epoch=SOURCE_EPOCH,
         now_iso=NOW_ISO, consumption_ledger=ledger,
     )
-    assert decisions[0].verdict == itf.PASS
-    assert decisions[1].verdict == itf.FAIL
+    assert [decision.verdict for decision in decisions] == [itf.PASS, itf.PASS]
     # verification defers consumption: nothing is burned until composition decides
     assert ledger.size() == 0
     assert decisions[0].replay == itf.REPLAY_PENDING
 
-    itf.compose_integrated(_resolved(), decisions, consumption_ledger=ledger)
+    composed = itf.compose_integrated(
+        _resolved(), decisions, consumption_ledger=ledger
+    )
     assert ledger.size() == 1
     assert ledger.is_consumed(str(receipt["receipt_id"]))
+    assert sum(row["credited"] for row in composed["audit"]["receipts"]) == 1
 
 
 def test_composing_a_deferred_decision_without_the_ledger_fails_closed(tmp_path):
@@ -166,7 +168,7 @@ def test_composing_a_deferred_decision_without_the_ledger_fails_closed(tmp_path)
 
 
 def test_one_receipt_in_two_lanes_is_credited_once_without_a_ledger():
-    """The in-batch dedup holds even on the explicit no-ledger path."""
+    """Composition, not verification, globally deduplicates a receipt."""
     receipt = FX.cpu_receipt(subject="5Doubler", work_units="9")
     decisions = itf.verify_lane_receipts(
         [
@@ -176,8 +178,53 @@ def test_one_receipt_in_two_lanes_is_credited_once_without_a_ledger():
         key_registry=FX.registry, source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO,
         consumption_ledger=itf.NO_REPLAY_LEDGER,
     )
-    assert [d.verdict for d in decisions] == [itf.PASS, itf.FAIL]
-    assert "already credited in lane" in decisions[1].detail
+    assert [d.verdict for d in decisions] == [itf.PASS, itf.PASS]
+
+    composed = itf.compose_integrated(_resolved(), decisions)
+    credited = [row for row in composed["audit"]["receipts"] if row["credited"]]
+    rejected = [row for row in composed["audit"]["receipts"] if not row["credited"]]
+    assert [(row["lane"], row["receipt_id"]) for row in credited] == [
+        (LANE_CPU, receipt["receipt_id"])
+    ]
+    assert len(rejected) == 1
+    assert "already credited in lane" in rejected[0]["drop_reason"]
+
+
+def test_unknown_lane_cannot_preempt_same_batch_legitimate_lane(tmp_path):
+    """A rejected first label must not reserve a public receipt id.
+
+    An attacker can replay a miner's public receipt under an unknown lane in the
+    same intake batch as the miner's real submission. Verification does not know
+    the resolved allocation, so reserving the id there made the unknown lane PASS,
+    the funded lane FAIL, and the whole receipt earn zero. Composition is the first
+    allocation-aware layer and must let the funded lane take the still-unused id.
+    """
+    ledger = ConsumptionLedger(str(tmp_path / "ledger.sqlite"))
+    receipt = FX.cpu_receipt(subject="5Victim", work_units="11")
+    composed = _compose_epoch(
+        _resolved_with_zero_funded_lane(),
+        [
+            itf.LaneSubmission(
+                itf.KIND_COMPUTE_CPU, receipt, "cathedral_no_such_lane"
+            ),
+            itf.LaneSubmission(itf.KIND_COMPUTE_CPU, receipt, LANE_CPU),
+        ],
+        ledger,
+    )
+
+    assert [decision.verdict for decision in composed["decisions"]] == [
+        itf.PASS,
+        itf.PASS,
+    ]
+    by_lane = {row["lane"]: row for row in composed["audit"]["receipts"]}
+    assert by_lane["cathedral_no_such_lane"]["credited"] is False
+    assert (
+        "not in the allocation config"
+        in by_lane["cathedral_no_such_lane"]["drop_reason"]
+    )
+    assert by_lane[LANE_CPU]["credited"] is True
+    assert [row["miner_hotkey"] for row in composed["feed"]["weights"]] == ["5Victim"]
+    assert ledger.is_consumed(str(receipt["receipt_id"]))
 
 
 # --------------------------------------------------------------------------- #

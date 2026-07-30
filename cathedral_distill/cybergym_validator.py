@@ -16,6 +16,8 @@ loop changes.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -118,8 +120,11 @@ class EmissionGatePolicy:
     Each gate has an evidence source, and a gate with no evidence FAILS (it is
     never skipped):
 
-      * `registered_bundle`: `bundle_registry.is_registered_by(commitment, miner)`.
-        No registry means no miner can prove its model is registered, so all fail.
+      * `registered_bundle`:
+        `bundle_registry.is_cryptographically_verified_by(commitment, miner)`.
+        A presence-only or unverified registry row is provenance, not reward
+        evidence. No verified registry means no miner can prove its model is
+        registered, so all fail.
       * `no_contamination`: the committed model must have been registered before
         the batch was drawn (`registered_at <= commitment_deadline`, defaulting to
         the epoch's `as_of` draw time). A commitment made after the draw cannot be
@@ -147,6 +152,120 @@ class EmissionGatePolicy:
     require_independent_evaluator: bool = False
 
 
+def _canonical_evidence_digest(value: object, *, label: str) -> str:
+    """Digest JSON-compatible reward evidence or fail before an epoch starts."""
+    try:
+        text = json.dumps(
+            value,
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise EmissionGateError(
+            f"{label} cannot be pinned as canonical reward evidence"
+        ) from exc
+    return "sha256:" + hashlib.sha256(text.encode("ascii")).hexdigest()
+
+
+def _registry_evidence_identity(registry: Any, *, label: str) -> dict[str, object]:
+    """Return a stable verified-registry identity, or mark it unverified.
+
+    An object without an identity method cannot satisfy the verified registration
+    gate either, but recording that state still makes the epoch manifest stable and
+    lets the per-miner gate fail instead of turning configuration into a process
+    crash.
+    """
+    method = getattr(registry, "reward_evidence_identity", None)
+    if method is None:
+        method = getattr(registry, "evidence_identity", None)
+    if not callable(method):
+        return {
+            "status": "unverified",
+            "type": f"{type(registry).__module__}.{type(registry).__qualname__}",
+        }
+    try:
+        identity = method()
+    except Exception as exc:  # noqa: BLE001 - configuration must fail closed
+        raise EmissionGateError(f"{label} identity is unavailable") from exc
+    if not isinstance(identity, Mapping):
+        raise EmissionGateError(f"{label} identity must be a mapping")
+    document = dict(identity)
+    _canonical_evidence_digest(document, label=label)
+    return document
+
+
+def emission_gate_policy_manifest(
+    policy: EmissionGatePolicy | None,
+) -> dict[str, object] | None:
+    """Canonical reward-policy and evidence identity for restart pinning.
+
+    Only evidence that can affect an enabled gate is included. The manifest pins
+    semantics rather than object identity: equivalent reconstructed registries and
+    evidence maps produce the same digest, while any reward-relevant change refuses
+    to resume the epoch.
+    """
+    if policy is None:
+        return None
+
+    bundle_registry = None
+    if policy.require_registered_bundle or policy.require_no_contamination:
+        bundle_registry = (
+            None
+            if policy.bundle_registry is None
+            else _registry_evidence_identity(
+                policy.bundle_registry, label="bundle registry"
+            )
+        )
+
+    reproductions_digest = None
+    reproduction_registry = None
+    if policy.require_reproduction:
+        reproductions = dict(policy.reproductions or {})
+        reproductions_digest = _canonical_evidence_digest(
+            reproductions, label="reproduction receipts"
+        )
+        reproduction_registry = (
+            {"source": "epoch_signing_key_registry"}
+            if policy.reproduction_key_registry is None
+            else _registry_evidence_identity(
+                policy.reproduction_key_registry,
+                label="reproduction key registry",
+            )
+        )
+
+    miner_coldkeys_digest = None
+    if policy.require_independent_evaluator:
+        miner_coldkeys_digest = _canonical_evidence_digest(
+            dict(policy.miner_coldkeys or {}), label="miner coldkeys"
+        )
+
+    return {
+        "schema": "cathedral_cybergym_emission_gate_policy_v1",
+        "require_registered_bundle": bool(policy.require_registered_bundle),
+        "require_no_contamination": bool(policy.require_no_contamination),
+        "require_reproduction": bool(policy.require_reproduction),
+        "require_independent_evaluator": bool(
+            policy.require_independent_evaluator
+        ),
+        "commitment_deadline": (
+            policy.commitment_deadline.isoformat()
+            if policy.commitment_deadline is not None
+            else None
+        ),
+        "bundle_registry": bundle_registry,
+        "reproductions_digest": reproductions_digest,
+        "reproduction_key_registry": reproduction_registry,
+        "evaluator_coldkey": (
+            policy.evaluator_coldkey
+            if policy.require_independent_evaluator
+            else None
+        ),
+        "miner_coldkeys_digest": miner_coldkeys_digest,
+    }
+
+
 def evaluate_emission_gates(
     policy: EmissionGatePolicy,
     *,
@@ -169,22 +288,27 @@ def evaluate_emission_gates(
 
     failures: list[str] = []
 
-    def lookup(call, *args) -> Any:
+    def lookup(target: Any, method_name: str, *args) -> Any:
         """Registry access that fails this miner rather than the epoch."""
         try:
-            return call(*args)
+            return getattr(target, method_name)(*args)
         except Exception:  # noqa: BLE001 - unreadable evidence is a gate failure
             return None
 
     registration = None
     if policy.bundle_registry is not None:
-        registration = lookup(policy.bundle_registry.claim_for, model_commitment)
+        registration = lookup(
+            policy.bundle_registry, "verified_claim_for", model_commitment
+        )
 
     if policy.require_registered_bundle:
         registered = bool(
             policy.bundle_registry is not None
             and lookup(
-                policy.bundle_registry.is_registered_by, model_commitment, miner_hotkey
+                policy.bundle_registry,
+                "is_cryptographically_verified_by",
+                model_commitment,
+                miner_hotkey,
             )
         )
         if not registered:

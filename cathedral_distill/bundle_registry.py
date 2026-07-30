@@ -29,6 +29,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 REGISTRATION_SCHEMA = "cathedral_bundle_registration_v1"
 REGISTRATION_DOMAIN = b"cathedral-bundle-registration-v1\x00"
+REWARD_EVIDENCE_SCHEMA = "cathedral_bundle_registry_reward_evidence_v1"
 
 # Verifies a registration signature: (signing_payload, signature_str, miner_hotkey)
 # -> True iff the signature is a valid signature over signing_payload by the key
@@ -123,10 +124,18 @@ def bundle_digest(*parts: bytes) -> str:
 
 
 class BundleRegistry:
-    """First valid signed registration establishes the claim over a digest."""
+    """First valid signed registration establishes the claim over a digest.
+
+    Registrations accepted with only a present signature remain useful for the
+    non-reward provenance and ordering views. Reward gates use the stricter
+    `verified_claim_for` / `is_cryptographically_verified_by` methods, which expose
+    only registrations whose signature was actually checked against an anchored
+    hotkey key.
+    """
 
     def __init__(self) -> None:
         self._by_digest: dict[str, BundleRegistration] = {}
+        self._cryptographically_verified: set[str] = set()
 
     def register(
         self,
@@ -147,6 +156,7 @@ class BundleRegistry:
         """
         if verify_signature and not registration.signature:
             raise RegistrationError("registration must be signed")
+        cryptographically_verified = False
         if verify_signature and signature_verifier is not None:
             try:
                 ok = signature_verifier(
@@ -158,6 +168,7 @@ class BundleRegistry:
                 raise RegistrationError(f"registration signature check failed: {exc}") from exc
             if ok is not True:
                 raise RegistrationError("registration signature does not verify")
+            cryptographically_verified = True
 
         existing = self._by_digest.get(registration.bundle_digest)
         if existing is not None:
@@ -183,6 +194,8 @@ class BundleRegistry:
                 raise RegistrationError("a version chain cannot change track")
 
         self._by_digest[registration.bundle_digest] = registration
+        if cryptographically_verified:
+            self._cryptographically_verified.add(registration.bundle_digest)
         return registration
 
     def claim_for(self, digest: str) -> BundleRegistration | None:
@@ -191,6 +204,39 @@ class BundleRegistry:
     def is_registered_by(self, digest: str, miner_hotkey: str) -> bool:
         claim = self._by_digest.get(digest)
         return claim is not None and claim.miner_hotkey == miner_hotkey
+
+    def verified_claim_for(self, digest: str) -> BundleRegistration | None:
+        """Return a claim only when its signature was cryptographically verified."""
+        if digest not in self._cryptographically_verified:
+            return None
+        return self._by_digest.get(digest)
+
+    def is_cryptographically_verified_by(
+        self, digest: str, miner_hotkey: str
+    ) -> bool:
+        claim = self.verified_claim_for(digest)
+        return claim is not None and claim.miner_hotkey == miner_hotkey
+
+    def reward_evidence_identity(self) -> dict[str, Any]:
+        """Stable identity of exactly the registry rows reward gates can trust.
+
+        Unverified provenance rows are deliberately absent: they cannot satisfy a
+        reward gate, so changing one does not change reward eligibility. The signed
+        row includes the maintainer, digest, lineage and timestamp, and therefore
+        pins both registered-bundle and no-contamination evidence across restarts.
+        """
+        rows = [
+            self._by_digest[digest].as_dict()
+            for digest in sorted(self._cryptographically_verified)
+        ]
+        canonical = json.dumps(
+            rows, sort_keys=True, ensure_ascii=True, separators=(",", ":")
+        ).encode("ascii")
+        return {
+            "schema": REWARD_EVIDENCE_SCHEMA,
+            "digest": "sha256:" + hashlib.sha256(canonical).hexdigest(),
+            "registrations": len(rows),
+        }
 
     def lineage(self, digest: str) -> list[BundleRegistration]:
         """Chain from this bundle back to its root, newest first.
@@ -259,7 +305,7 @@ def ed25519_registration_verifier(keys: Mapping[str, bytes]) -> SignatureVerifie
 def load_registry(
     rows: Iterable[Mapping[str, Any]],
     *,
-    verify_signature: bool = False,
+    verify_signature: bool = True,
     signature_verifier: SignatureVerifier | None = None,
 ) -> BundleRegistry:
     """Rebuild a registry from published rows, preserving registration order.
@@ -268,6 +314,12 @@ def load_registry(
     live. Any row that would violate a rule — including a signature that does not
     verify when a `signature_verifier` is supplied — is skipped rather than
     accepted, keeping a corrupted or forged feed from rewriting history.
+
+    Signature presence is checked by default. Cryptographic verification requires
+    `signature_verifier`; only rows checked that way are visible through the
+    reward-capable methods. This lets public provenance remain readable without
+    letting a caller accidentally promote a presence-only signature into reward
+    evidence.
     """
     registry = BundleRegistry()
     ordered = sorted(rows, key=lambda row: str(row.get("registered_at") or ""))

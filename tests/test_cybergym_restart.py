@@ -29,6 +29,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from cathedral_distill.bundle_registry import (  # noqa: E402
+    BundleRegistration,
+    BundleRegistry,
+    ed25519_registration_verifier,
+)
 from cathedral_distill.cybergym_holdout import load_holdout  # noqa: E402
 from cathedral_distill.cybergym_protocol import (  # noqa: E402
     CyberGymCorpusStore,
@@ -44,7 +49,10 @@ from cathedral_distill.cybergym_scores import (  # noqa: E402
     CyberGymSolveStore,
 )
 from cathedral_distill.cybergym_service import CyberGymService, compose_scores_lane  # noqa: E402
-from cathedral_distill.cybergym_validator import ChainContext  # noqa: E402
+from cathedral_distill.cybergym_validator import (  # noqa: E402
+    ChainContext,
+    EmissionGatePolicy,
+)
 from cathedral_distill.cybergym_verifier import poc_digest  # noqa: E402
 
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
@@ -94,7 +102,41 @@ def _trace(task_id, poc_sha256):
             "steps": steps, "licence": "cathedral-corpus-v1", "model_seal": _dg("seal")}
 
 
-def _service(tmp_path, *, durable: bool, chain=None, batch_size: int = 2):
+def _verified_registry(*, digest=MODEL, hotkey="5Miner", registered_at=CUTOFF):
+    unsigned = BundleRegistration(
+        miner_hotkey=hotkey,
+        track="cybergym-v0",
+        bundle_digest=digest,
+        version="v1",
+        registered_at=registered_at,
+    )
+    signed = BundleRegistration(
+        miner_hotkey=hotkey,
+        track="cybergym-v0",
+        bundle_digest=digest,
+        version="v1",
+        registered_at=registered_at,
+        signature=base64.b64encode(KEY.sign(unsigned.signing_payload())).decode(),
+    )
+    registry = BundleRegistry()
+    registry.register(
+        signed,
+        signature_verifier=ed25519_registration_verifier(
+            {hotkey: KEY.public_key().public_bytes_raw()}
+        ),
+    )
+    return registry
+
+
+def _service(
+    tmp_path,
+    *,
+    durable: bool,
+    chain=None,
+    batch_size: int = 2,
+    gate_policy: EmissionGatePolicy | None = None,
+    gates_required: bool = False,
+):
     """A service over the SAME storage every time, so a new one is a restart."""
     kwargs = {}
     if durable:
@@ -107,7 +149,7 @@ def _service(tmp_path, *, durable: bool, chain=None, batch_size: int = 2):
         score_store=CyberGymScoreStore(str(tmp_path / "scores.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
         batch_size=batch_size, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
-        gates_required=False, **kwargs,
+        gate_policy=gate_policy, gates_required=gates_required, **kwargs,
     )
 
 
@@ -244,11 +286,87 @@ def test_the_pinned_epoch_manifest_covers_every_scoring_input(tmp_path):
     assert set(manifest) == {
         "schema", "source_epoch", "network", "netuid", "block", "block_hash",
         "valid_from_block", "valid_until_block", "batch_size", "cutoff", "as_of",
-        "validator_hotkey", "signing_key_id", "level_weights", "credit_synthetic_tasks",
+        "validator_hotkey", "signing_key_id", "signing_public_key_digest",
+        "level_weights", "credit_synthetic_tasks", "gates_required", "gate_policy",
     }
+    assert manifest["gates_required"] is False
+    assert manifest["gate_policy"] is None
     pinned = service._solves.manifest_for(SOURCE_EPOCH)
     assert pinned["manifest"] == manifest
     assert pinned["digest"].startswith("sha256:")
+
+
+def test_restart_that_changes_reward_gate_policy_is_refused(tmp_path):
+    killed = _service(
+        tmp_path,
+        durable=True,
+        gate_policy=EmissionGatePolicy(
+            bundle_registry=_verified_registry(),
+            require_reproduction=True,
+        ),
+        gates_required=True,
+    )
+    _solve(killed)
+    del killed
+
+    with pytest.raises(ProtocolError, match="gate_policy"):
+        _service(
+            tmp_path,
+            durable=True,
+            gate_policy=EmissionGatePolicy(
+                bundle_registry=_verified_registry(),
+                require_reproduction=False,
+            ),
+            gates_required=True,
+        )
+
+
+def test_restart_that_changes_reward_registry_identity_is_refused(tmp_path):
+    killed = _service(
+        tmp_path,
+        durable=True,
+        gate_policy=EmissionGatePolicy(bundle_registry=_verified_registry()),
+        gates_required=True,
+    )
+    _solve(killed)
+    del killed
+
+    with pytest.raises(ProtocolError, match="gate_policy"):
+        _service(
+            tmp_path,
+            durable=True,
+            gate_policy=EmissionGatePolicy(
+                bundle_registry=_verified_registry(digest=OTHER_MODEL)
+            ),
+            gates_required=True,
+        )
+
+
+def test_restart_that_changes_reproduction_evidence_is_refused(tmp_path):
+    killed = _service(
+        tmp_path,
+        durable=True,
+        gate_policy=EmissionGatePolicy(
+            bundle_registry=_verified_registry(),
+            require_reproduction=True,
+            reproductions={"5Miner": {"receipt_id": "receipt-a"}},
+        ),
+        gates_required=True,
+    )
+    _solve(killed)
+    del killed
+
+    with pytest.raises(ProtocolError, match="gate_policy"):
+        _service(
+            tmp_path,
+            durable=True,
+            gate_policy=EmissionGatePolicy(
+                bundle_registry=_verified_registry(),
+                require_reproduction=True,
+                reproductions={"5Miner": {"receipt_id": "receipt-b"}},
+            ),
+            gates_required=True,
+        )
 
 
 # --------------------------------------------------------------------------- #

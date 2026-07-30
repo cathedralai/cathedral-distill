@@ -18,6 +18,7 @@ backend is injected, so the whole service runs end-to-end with no CyberGym binar
 from __future__ import annotations
 
 import base64
+import hashlib
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
@@ -48,6 +49,7 @@ from cathedral_distill.cybergym_validator import (
     EmissionGatePolicy,
     MinerCommit,
     MinerResult,
+    emission_gate_policy_manifest,
     run_epoch,
 )
 from cathedral_distill.cybergym_synthetic import is_synthetic_task
@@ -223,8 +225,16 @@ class CyberGymService:
             "as_of": stamp(self._as_of),
             "validator_hotkey": str(self._validator_hotkey),
             "signing_key_id": str(self._signing_key_id),
+            "signing_public_key_digest": (
+                "sha256:"
+                + hashlib.sha256(
+                    self._private_key.public_key().public_bytes_raw()
+                ).hexdigest()
+            ),
             "level_weights": {str(int(level)): str(w) for level, w in self._weights.items()},
             "credit_synthetic_tasks": bool(self._credit_synthetic_tasks),
+            "gates_required": bool(self._gates_required),
+            "gate_policy": emission_gate_policy_manifest(self._gate_policy),
         }
 
     def _pin_epoch_manifest(self) -> None:

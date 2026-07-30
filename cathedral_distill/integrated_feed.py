@@ -350,7 +350,6 @@ def verify_lane_receipts(
     """
     ledger = _resolve_ledger(consumption_ledger, entry="verify_lane_receipts")
     decisions: list[ReceiptDecision] = []
-    credited_receipt_ids: dict[str, str] = {}  # receipt_id -> lane that credited it
     for submission in submissions:
         try:
             decision = verify_lane_receipt(
@@ -376,16 +375,6 @@ def verify_lane_receipts(
                 )
             )
             continue
-        if decision.creditable:
-            first_lane = credited_receipt_ids.get(decision.receipt_id)
-            if first_lane is not None:
-                decision = ReceiptDecision(
-                    decision.lane, decision.kind, decision.receipt_id,
-                    decision.miner_hotkey, FAIL, Decimal(0),
-                    f"receipt_id already credited in lane {first_lane}",
-                )
-            else:
-                credited_receipt_ids[decision.receipt_id] = decision.lane
         decisions.append(decision)
     return decisions
 

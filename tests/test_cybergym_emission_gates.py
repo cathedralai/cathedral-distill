@@ -13,6 +13,7 @@ Every gate is fail-closed: no evidence is a failure, not a skip.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import sys
 from datetime import UTC, datetime, timedelta
@@ -26,7 +27,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cathedral_distill import cybergym_validator as cv  # noqa: E402
 from cathedral_distill import frontier as fr  # noqa: E402
-from cathedral_distill.bundle_registry import BundleRegistration, BundleRegistry  # noqa: E402
+from cathedral_distill.bundle_registry import (  # noqa: E402
+    BundleRegistration,
+    BundleRegistry,
+    ed25519_registration_verifier,
+    load_registry,
+)
 from cathedral_distill.cybergym import Level  # noqa: E402
 from cathedral_distill.cybergym_batch import PooledTask, TaskPool  # noqa: E402
 from cathedral_distill.cybergym_scores import (  # noqa: E402
@@ -73,13 +79,27 @@ def _backend(task_id, poc, mode):
 
 
 def _registry(*, hotkey=MINER, digest=COMMITMENT, registered_at=None):
-    registry = BundleRegistry()
-    registry.register(
-        BundleRegistration(miner_hotkey=hotkey, track=TRACK, bundle_digest=digest,
-                           version="v1", registered_at=registered_at or (NOW - timedelta(days=1)),
-                           signature="not-checked-here"),
-        verify_signature=False,
+    at = registered_at or (NOW - timedelta(days=1))
+    unsigned = BundleRegistration(
+        miner_hotkey=hotkey,
+        track=TRACK,
+        bundle_digest=digest,
+        version="v1",
+        registered_at=at,
     )
+    registration = BundleRegistration(
+        miner_hotkey=hotkey,
+        track=TRACK,
+        bundle_digest=digest,
+        version="v1",
+        registered_at=at,
+        signature=base64.b64encode(KEY.sign(unsigned.signing_payload())).decode(),
+    )
+    verifier = ed25519_registration_verifier(
+        {hotkey: KEY.public_key().public_bytes_raw()}
+    )
+    registry = BundleRegistry()
+    registry.register(registration, signature_verifier=verifier)
     return registry
 
 
@@ -156,6 +176,37 @@ def test_no_bundle_registry_at_all_fails_closed(tmp_path):
     store = _store(tmp_path)
     results = _run(store, cv.EmissionGatePolicy())
     assert fr.GATE_REGISTERED_BUNDLE in results[0].gate_failures
+    assert store.epoch_scores(SOURCE_EPOCH) == {}
+
+
+def test_unsigned_or_presence_only_registry_rows_cannot_satisfy_reward_gates(tmp_path):
+    """A public timestamp is not anti-contamination evidence until its signature
+    was checked against the miner's anchored key."""
+    row = {
+        "miner_hotkey": MINER,
+        "track": TRACK,
+        "bundle_digest": COMMITMENT,
+        "version": "v1",
+        "registered_at": (NOW - timedelta(days=1)).isoformat(),
+        "parent_digest": None,
+        "signature": "",
+    }
+    unsigned = load_registry([row])
+    assert unsigned.claim_for(COMMITMENT) is None
+
+    row["signature"] = "present-but-not-verified"
+    presence_only = load_registry([row])
+    assert presence_only.is_registered_by(COMMITMENT, MINER)
+    assert not presence_only.is_cryptographically_verified_by(COMMITMENT, MINER)
+
+    store = _store(tmp_path)
+    result = _run(
+        store, cv.EmissionGatePolicy(bundle_registry=presence_only)
+    )[0]
+    assert set(result.gate_failures) == {
+        fr.GATE_REGISTERED_BUNDLE,
+        fr.GATE_NO_CONTAMINATION,
+    }
     assert store.epoch_scores(SOURCE_EPOCH) == {}
 
 
@@ -288,13 +339,7 @@ def test_a_timezone_naive_registration_fails_that_miner_only(tmp_path):
     """`registered_at` arrives from a published row, so it can lack an offset. That
     used to raise `TypeError` mid-comparison and abort the epoch for every miner; an
     unknown offset is not evidence, so it is that miner's gate failure."""
-    naive = BundleRegistry()
-    naive.register(
-        BundleRegistration(miner_hotkey=MINER, track=TRACK, bundle_digest=COMMITMENT,
-                           version="v1", registered_at=datetime(2026, 7, 20, 12, 0),
-                           signature="not-checked-here"),
-        verify_signature=False,
-    )
+    naive = _registry(registered_at=datetime(2026, 7, 20, 12, 0))
     store = _store(tmp_path)
     results = _run(store, cv.EmissionGatePolicy(bundle_registry=naive), miners=[
         cv.MinerCommit(miner_hotkey=MINER, model_commitment=COMMITMENT, pocs={"arvo:1": b"a"}),
