@@ -90,9 +90,12 @@ class CathedralAttestation:
 
 def _iso(value: Any) -> datetime | None:
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
+    # A naive (tz-less) timestamp would raise on subtraction against a tz-aware
+    # `now`; treat it as UTC so freshness never crashes the intake loop.
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 def verify_cathedral_attestation(
@@ -128,15 +131,17 @@ def verify_cathedral_attestation(
     if str(policy.get("egress")) != "none":
         return no("worker egress is not denied")
 
-    # --- freshness ---
+    # --- freshness (fail closed: a missing/unparseable timestamp is not creditable,
+    #     else an old-but-genuine receipt could be replayed forever by omitting it) ---
     started = _iso(receipt.get("started_at"))
     ref = now or datetime.now(UTC)
-    if started is not None:
-        age = (ref - started).total_seconds()
-        if age > max_age_seconds:
-            return no(f"attestation is stale ({int(age)}s > {max_age_seconds}s)")
-        if age < -300:
-            return no("attestation is from the future")
+    if started is None:
+        return no("missing or invalid attestation timestamp")
+    age = (ref - started).total_seconds()
+    if age > max_age_seconds:
+        return no(f"attestation is stale ({int(age)}s > {max_age_seconds}s)")
+    if age < -300:
+        return no("attestation is from the future")
 
     # --- the submission binding: the attested result.txt IS the commitment ---
     expect = commitment_sha256(task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id)
@@ -150,6 +155,13 @@ def verify_cathedral_attestation(
                   f"(artifact {got[:16]}… != expected {expect[:16]}…)")
 
     # --- the quote itself: trusted-issuer by default, trustless if a verifier is given ---
+    # SECURITY (trustless seam): report_data[32:64] binds the `artifacts_sha256`
+    # SCALAR, while the commitment above is matched against the `artifacts[]` LIST.
+    # The adapter does not yet recompute the scalar from the list, so before the
+    # trustless DCAP path is wired in production the list→scalar binding MUST be
+    # verified with Cathedral's canonical `artifacts_sha256` recipe — otherwise a
+    # genuine quote can be re-paired with a swapped result.txt. Trusted-issuer
+    # (default) is unaffected: Cathedral validates the full binding server-side.
     verification = receipt.get("verification", {})
     trustless = False
     if quote_verifier is not None:
