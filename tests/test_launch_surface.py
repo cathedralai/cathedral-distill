@@ -22,6 +22,7 @@ Two jobs, both about keeping a future change deliberate rather than accidental.
 """
 from __future__ import annotations
 
+import ast
 import json
 import sys
 from decimal import Decimal
@@ -177,13 +178,34 @@ def test_the_package_never_writes_weights_to_a_chain():
     """Composition is preview/shadow by construction: this package produces a
     pre-burn vector and stops. There is no chain writer to invoke, so no mode of
     this package can invoke one."""
-    forbidden = ("bittensor", "subtensor", "set_weights", "commit_weights", "root_set_weights")
+    # Parsed, not grepped. A substring scan reads comments and prose, so a module
+    # that only MENTIONS the chain (for example "a live validator reads this from
+    # the subtensor") counted as a chain writer. What matters is whether the
+    # package can actually reach one: an import of a chain library, or a call to a
+    # weight-writing name.
+    forbidden_imports = ("bittensor", "substrateinterface", "async_substrate_interface")
+    forbidden_calls = ("set_weights", "commit_weights", "root_set_weights",
+                       "set_weights_extrinsic", "commit_weights_extrinsic")
     offenders: dict[str, list[str]] = {}
     for path in sorted(PACKAGE.glob("*.py")):
-        source = path.read_text(encoding="utf-8")
-        hits = [token for token in forbidden if token in source]
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        hits: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                hits += [f"import {a.name}" for a in node.names
+                         if a.name.split(".")[0] in forbidden_imports]
+            elif isinstance(node, ast.ImportFrom):
+                root = (node.module or "").split(".")[0]
+                if root in forbidden_imports:
+                    hits.append(f"from {node.module} import ...")
+            elif isinstance(node, ast.Attribute) and node.attr in forbidden_calls:
+                hits.append(f".{node.attr}")
+            elif isinstance(node, ast.Name) and node.id in forbidden_calls:
+                hits.append(node.id)
+            elif isinstance(node, ast.FunctionDef) and node.name in forbidden_calls:
+                hits.append(f"def {node.name}")
         if hits:
-            offenders[path.name] = hits
+            offenders[path.name] = sorted(set(hits))
     assert offenders == {}, f"a chain-writing surface appeared in {offenders}"
 
     # the composed artifact is explicitly the PRE-burn input, not a published vector
