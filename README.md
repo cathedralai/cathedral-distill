@@ -13,7 +13,7 @@ become an open training corpus that makes the next model better.
 > *requires* the patched build to exist. The subnet does not target live systems,
 > See [Responsible use](#responsible-use).
 
-**Status:** the mechanism is implemented and tested hardware-free (**670 passing
+**Status:** the mechanism is implemented and tested hardware-free (**678 passing
 tests**), and the CyberGym lane runs end to end. The **real binary backend** (the
 ARVO + OSS-Fuzz differential) and both **Intel-TDX attestation adapters** are now
 built and proven on real vulnerabilities — including a genuine ARVO bug solved
@@ -30,8 +30,16 @@ Every public coding benchmark is contaminated — labs train on it, so a score s
 measuring capability. Every vendor benchmark is unavailable. A subnet needs a task
 whose supply the operator controls and whose result nobody can fake.
 
+The usual fallback, an LLM judge, does not fix this. It grades prose, so it rewards
+whichever answer reads best. It can approve a wrong answer that sounds professional.
+And it was trained on the same public internet as the contestant, so a high score can
+be an echo of the training data rather than evidence of reasoning, with nothing in the
+pipeline able to tell those two apart. Grading a security claim by asking a model
+whether the explanation sounds right is the failure mode this subnet is built to
+avoid.
+
 [CyberGym](https://github.com/sunblaze-ucb/cybergym) (UC Berkeley, Dawn Song's lab)
-provides it. A task is a codebase with a known, patched vulnerability. The miner's
+supplies that task. A task is a codebase with a known, patched vulnerability. The miner's
 model must produce a **PoC** — a byte-string input that triggers the bug. The
 result is a physical fact, not an opinion:
 
@@ -45,6 +53,30 @@ crashes the patched build fails — the input must trigger *the specific
 vulnerability the patch fixed*. A passing PoC is a witness in the exact sense SAT
 uses: **expensive to produce, trivial and deterministic to check.** Producing the
 exploit is the miner's hard work; verifying it is a millisecond binary run.
+
+### What a verified solve does and does not prove
+
+Worth stating exactly, because "the program crashed" invites more than it earns. The
+claim a passing PoC supports is narrow:
+
+```
+Under this pinned environment, this input produces this observable
+difference between these two builds.
+```
+
+That is a real fact and it is reproducible by anyone with the same digest-pinned
+image, which is the entire point. It is not a claim that the bug is exploitable in
+production, that it yields code execution rather than a denial of service, that the
+model grasped the root cause, or that the model discovered the bug rather than
+recalling one it had already seen. The last of those is a supply problem and is
+handled separately, in [Anti-gaming](#anti-gaming).
+
+The crash differential is also one predicate, not the only possible one. Memory-safety
+bugs announce themselves through a sanitizer, which is why they are the lane that
+exists today. Authorization bypass, secret disclosure, path traversal and injection
+are just as checkable in principle, but each needs its own deterministic predicate
+rather than an exit code. The general form of this design is verification of a
+security property, not of a crash.
 
 ---
 
@@ -126,6 +158,19 @@ So, concretely, to the six questions a subnet operator asks:
 
 ## Anti-gaming
 
+Two questions have to be answered, and running the PoC settles only the first:
+
+```
+Verification:  does the submitted PoC actually work?
+Novelty:       did this model solve the task, or retrieve an answer it already had?
+```
+
+Execution settles verification outright. Novelty cannot be checked after the fact at
+all, because a memorised PoC and a discovered one are the same bytes; it has to be
+designed out by controlling what the miner could possibly have seen before it
+answered. That is what the sealed batch, the recency rotation, the commit ordering and
+the level0 weighting below are for.
+
 The design defends itself through structure, not policy — every property below is
 tested:
 
@@ -193,7 +238,7 @@ pip install -e '.[dev]'
 pytest
 ```
 
-Expected: `670 passed, 1 skipped`. All hardware-free — the verifier backend is
+Expected: `678 passed, 1 skipped`. All hardware-free — the verifier backend is
 injected, so the full mechanism is exercised without the CyberGym binary corpus.
 
 ---
