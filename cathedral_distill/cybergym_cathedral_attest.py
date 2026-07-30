@@ -171,32 +171,45 @@ def verify_cathedral_attestation(
 
 @dataclass(frozen=True)
 class BootAttestation:
-    attested: bool
+    attested: bool                 # a genuine Intel-TDX worker booted
     tee: str
     reason: str
     receipt_id: str = ""
-    key_bound: bool = False
+    key_bound: bool = False        # the quote binds the *expected* (miner's) SSH key
+    result_bound: bool = False     # ALWAYS False: a boot quote never binds the PoC/trace
+
+    @property
+    def miner_attested(self) -> bool:
+        """A boot quote tied to the expected miner key. Still NOT proof the PoC was
+        produced in the enclave — see `verify_boot_attestation` (result_bound is False).
+        Use for environment attestation / defense-in-depth, never as the sole credit gate."""
+        return self.attested and self.key_bound
 
 
 def verify_boot_attestation(
     receipt: Mapping[str, Any], *, expected_ssh_pubkey: str | None = None,
     quote_verifier: QuoteVerifier | None = None,
 ) -> BootAttestation:
-    """Verify a Cathedral `custom.v1` **boot** quote: a sealed Intel-TDX worker that
-    keeps a customer image running with SSH access after a verified boot.
+    """Verify a Cathedral `custom.v1` **boot** quote — a sealed Intel-TDX worker that
+    keeps the real corpus image running with SSH access after a verified boot.
 
-    Unlike `attest.v1`'s result quote, a boot quote binds the **machine boot + the
-    customer SSH key**, not a workload output (`trust.workload_result_binding` is
-    false). Its recipe (verified here on a real receipt):
+    ⚠️  SAFETY — a boot quote attests the ENVIRONMENT, not the solve:
+      * It binds the machine boot + the **customer's SSH key**
+        (`report_data[0:32] = sha256(nonce_hex || base64(ssh_pubkey))`).
+        `trust.workload_result_binding` is false — the PoC/trace are NOT in the quote,
+        so `result_bound` is always False.
+      * You MUST pass the miner's REGISTERED key as `expected_ssh_pubkey`. Without it
+        (`key_bound=False`) a pass only proves "*some* genuine TDX worker booted", which
+        any party with any TDX worker satisfies — it must NEVER credit a miner.
+      * Even key-bound this is NOT a sufficient anti-cheat gate: the customer holds the
+        SSH private key, so a miner can present a valid key-bound boot quote alongside a
+        PoC obtained anywhere (looked up). The quote does not tie the PoC to the enclave.
 
-        report_data[0:32] = sha256(nonce_hex || base64(customer_ssh_public_key))
-
-    So passing `expected_ssh_pubkey` proves the operator's own key — the one used to
-    run the reproduction over SSH — is the key bound into the quote, i.e. the solve
-    ran on *this* verified TDX worker under *this* key. Result-binding of the PoC then
-    rests on the sealed worker + the key-bound SSH session, not a per-result quote.
-    Trusted-issuer by default; a `quote_verifier` checks the raw quote against Intel
-    DCAP. Fails closed.
+    Use for environment attestation / defense-in-depth. A *creditable* solve must be
+    RESULT-bound — `attest.v1`'s result quote (`verify_cathedral_attestation`), or a
+    persistent worker whose ENCLAVE holds the signing key and signs the (task, poc, trace)
+    commitment. Trusted-issuer by default; a `quote_verifier` checks the raw quote via
+    Intel DCAP. Fails closed.
     """
     rid = str(receipt.get("receipt_id") or receipt.get("worker_id") or "")
 
@@ -233,7 +246,8 @@ def verify_boot_attestation(
         if receipt.get("verified") is not True:
             return no("boot quote not verified (intel chain and/or binding failed)")
 
-    return BootAttestation(True, REQUIRED_TEE, "attested_intel_tdx_boot", rid, key_bound)
+    reason = "attested_intel_tdx_boot_" + ("key_bound" if key_bound else "environment_only")
+    return BootAttestation(True, REQUIRED_TEE, reason, rid, key_bound)
 
 
 def _expected_report_data_hex(receipt: Mapping[str, Any]) -> str | None:

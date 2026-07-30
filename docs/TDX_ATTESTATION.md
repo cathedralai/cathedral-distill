@@ -50,9 +50,18 @@ verified = intel_verified (quote chains to the Intel TDX PCK cert)
 ```
 
 `verify_boot_attestation(receipt, expected_ssh_pubkey=...)` confirms the worker is a
-genuine Intel-TDX boot **and** that the operator's own SSH key — the one used to run the
-reproduction — is the key bound into the quote. Result-binding of the PoC then rests on
-the sealed worker plus the key-bound SSH session, not a per-result quote.
+genuine Intel-TDX boot **and** that the miner's registered SSH key is the key bound into
+the quote.
+
+**Safety — this attests the environment, not the solve.** Two limits:
+
+1. You *must* pass the miner's registered `expected_ssh_pubkey`. Without it, a pass only
+   proves "*some* TDX worker booted" — which any party with any `custom.v1` worker
+   satisfies — so `key_bound=False` must never credit a miner.
+2. Even key-bound, the quote does **not** bind the PoC (`result_bound` is always false):
+   the customer holds the SSH private key, so a miner could present a valid key-bound boot
+   quote alongside a PoC obtained anywhere (looked up). It is defense-in-depth /
+   environment attestation, **not** proof-of-solve.
 
 ## Trustless mode
 
@@ -64,9 +73,13 @@ binding logic is independent of it and always runs.
 ## The production real-corpus path
 
 `attest.v1` gives the strongest per-result binding but can't hold the corpus image;
-`custom.v1` runs the real corpus image but its boot quote doesn't bind the result. The
+`custom.v1` runs the real corpus image but its boot quote binds only the environment. The
 production real-ARVO-in-TDX validator combines them: a **persistent `custom.v1` worker**
-with the corpus baked in runs the reproduction and emits a signed commitment over
-`(task, poc, trace)` — the corpus image of `attest.v1`'s result binding. That is an
-infrastructure/build step (a long-lived sealed worker), not a code gap; the verification
-adapters for both quote shapes are in place and tested.
+with the corpus baked in, where the **enclave generates its own signing keypair** (private
+key never leaves the enclave) and the boot quote binds that enclave key. The enclave runs
+the reproduction and **signs a commitment over `(task, poc, trace)`** — so the output is
+bound to the attested enclave, and a miner cannot sign a looked-up PoC's commitment outside
+it. (Binding the *customer's* SSH key, as the plain SSH flow does, does not achieve this —
+the customer holds that private key.) That is an infrastructure/build step (a long-lived
+sealed worker with an enclave-held key), not a verification-code gap; the adapters for both
+quote shapes are in place and tested.
