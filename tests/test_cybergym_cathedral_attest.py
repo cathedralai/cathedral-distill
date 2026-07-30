@@ -119,6 +119,22 @@ def test_stale_attestation_is_refused():
     assert not _ok(old).attested
 
 
+def test_a_naive_timestamp_does_not_crash_and_is_still_freshness_checked():
+    # regression: a tz-less started_at must not raise (the "never raises" contract)
+    # — it is read as UTC and judged by the same window, fresh or stale.
+    assert _ok(_receipt(started="2026-07-30T11:59:00")).attested        # naive, ~1 min old
+    assert not _ok(_receipt(started="2026-07-01T00:00:00")).attested    # naive, a month old
+
+
+def test_a_missing_timestamp_fails_closed_not_open():
+    # regression: omitting started_at must NOT bypass the staleness window (else an
+    # old-but-genuine receipt replays forever by dropping the field).
+    r = _receipt()
+    del r["started_at"]
+    a = _ok(r)
+    assert not a.attested and "timestamp" in a.reason
+
+
 def test_a_malformed_receipt_fails_closed_without_raising():
     assert not verify_cathedral_attestation({}, task_id=TASK, poc_sha256=POC_SHA,
                                             trace_id=TRACE_ID, now=NOW).attested

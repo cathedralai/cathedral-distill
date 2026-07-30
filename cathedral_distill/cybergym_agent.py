@@ -176,7 +176,7 @@ def run_agent(
             # No tool call: treat a bare hex string in the reply as a final answer to test.
             poc = _decode_hex(_HEX_RE.search(reply).group(0)) if _HEX_RE.search(reply) else None
             if poc is not None:
-                crashed = backend(task_id, poc, "vuln") != CLEAN_EXIT
+                crashed = backend(task_id, poc, "vul") != CLEAN_EXIT
                 record("write_poc", _thought(reply) or "final candidate input", "crashed" if crashed else "clean exit")
                 if crashed:
                     solved_poc = poc
@@ -211,7 +211,7 @@ def run_agent(
                 out = "invalid hex — provide the input as a lowercase hex string"
                 record("write_poc", thought or "invalid PoC", out)
             else:
-                crashed = backend(task_id, poc, "vuln") != CLEAN_EXIT
+                crashed = backend(task_id, poc, "vul") != CLEAN_EXIT
                 out = "vulnerable build CRASHED (AddressSanitizer)" if crashed else "clean exit (no crash)"
                 record("write_poc", thought or "run a candidate PoC", out)
                 if crashed:

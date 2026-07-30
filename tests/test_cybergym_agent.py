@@ -115,6 +115,25 @@ def test_agent_trace_verifies_through_the_validator_pipeline():
         __import__("cathedral_distill.cybergym_protocol", fromlist=["_trace_from_dict"])._trace_from_dict(res.trace).trace_id()
 
 
+def test_agent_calls_the_backend_with_the_vul_mode_contract_not_vuln():
+    # regression: run_agent must drive the backend with "vul" (the VerifierBackend
+    # contract: mode is "vul"|"fix"), never "vuln". The production backends raise
+    # VerifierError on an unknown mode, so a typo crashes the agent on its first
+    # run_poc — but the synthetic backend treats any non-"fix" string as vul and
+    # hides it. A strict backend that mirrors the production contract catches it.
+    source, task, bug = _fixture()
+    workspace = {"vuln.c": source.artifact(task.task_id)}
+
+    def strict_backend(task_id, poc, mode):
+        if mode not in ("vul", "fix"):
+            raise RuntimeError(f"unknown mode {mode!r}")   # what subprocess_backend does
+        return source.backend(task_id, poc, mode)
+
+    res = run_agent(_scripted_model(bug), task_id=task.task_id, workspace=workspace,
+                    backend=strict_backend, miner_hotkey=MINER, model_id="test/strict", max_turns=8)
+    assert res.solved and res.poc == bug.trigger
+
+
 def test_agent_reports_unsolved_when_it_never_crashes():
     source, task, bug = _fixture()
     workspace = {"vuln.c": source.artifact(task.task_id)}
