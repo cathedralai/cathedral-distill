@@ -36,7 +36,12 @@ from cathedral_distill.cybergym_protocol import (
     dispatch,
     process_submission,
 )
-from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore
+from cathedral_distill.cybergym_scores import (
+    EPOCH_CLOSED,
+    EPOCH_INCOMPLETE,
+    CyberGymScoreStore,
+    CyberGymSolveStore,
+)
 from cathedral_distill.cybergym_validator import (
     ChainContext,
     EmissionGatePolicy,
@@ -358,6 +363,25 @@ class CyberGymService:
             credit_synthetic_tasks=self._credit_synthetic_tasks,
         )
         self._scored_miners.update(m.miner_hotkey for m in miners)
+        # Record how this pass ended IN THE SCORES DATABASE, which is what the
+        # external mechanism adapter reads. Refusal that lives only on this object
+        # is invisible to the adapter, and the adapter is the thing that publishes.
+        lost = self.lost_durable_solvers()
+        if lost:
+            self._scores.mark_epoch(
+                self.chain.source_epoch, state=EPOCH_INCOMPLETE,
+                detail=(
+                    f"{len(lost)} miner(s) with durable solves could not be scored: "
+                    f"{', '.join(sorted(lost))}"
+                ),
+                scored_miners=len(miners),
+            )
+        else:
+            self._scores.mark_epoch(
+                self.chain.source_epoch, state=EPOCH_CLOSED,
+                detail="scored with every durable solve accounted for",
+                scored_miners=len(miners),
+            )
         return self._results
 
     def lost_durable_solvers(self) -> set[str]:
@@ -459,7 +483,16 @@ def compose_scores_lane(
     external mechanism adapter reads; this reads the same rows into the in-repo
     `compose_vector` path, so a validator can compose the signed vector directly
     from what it persisted. A miner with zero verified units contributes nothing.
+
+    Refuses unless the epoch is marked `closed` in the same database. Without that
+    check this function was the way around the restart guarantee: it reads the score
+    table directly, so it could not see `CyberGymService.lost_durable_solvers()` and
+    happily composed an empty, 100%-burn lane after the epoch's state was lost,
+    which is exactly the outcome the solve store exists to prevent. An external
+    adapter reading the table with its own SQL must apply the same gate:
+    `SELECT state FROM cybergym_epoch_status WHERE epoch=?` must be `closed`.
     """
+    score_store.require_closed_epoch(epoch)
     contributions = [
         LaneContribution(row["miner_hotkey"], row["receipt_id"], Decimal(row["earned_units"]))
         for row in score_store.contributions(epoch)

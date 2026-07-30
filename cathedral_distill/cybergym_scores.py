@@ -29,6 +29,32 @@ class CyberGymScoreError(RuntimeError):
     """Raised when a score cannot be recorded durably."""
 
 
+# Epoch lifecycle, persisted in the SAME database the mechanism adapter reads.
+# A composer that cannot see this marker cannot tell "nobody solved anything" from
+# "this validator lost the epoch's state", and those two produce the same empty,
+# 100%-burn vector.
+EPOCH_OPEN = "open"              # no scoring pass has completed for this epoch
+EPOCH_CLOSED = "closed"          # scored, complete, safe to compose and publish
+EPOCH_INCOMPLETE = "incomplete"  # scored but state was lost: composing under-credits
+
+
+def _require_durable_path(db_path: str, *, what: str) -> str:
+    """Refuse a database path that cannot survive a restart.
+
+    An in-memory store forgets everything on restart, which is precisely the
+    failure this store exists to prevent, and it fails OPEN: the epoch looks like
+    an epoch nobody solved.
+    """
+    if not isinstance(db_path, str) or not db_path.strip():
+        raise CyberGymScoreError(f"{what} requires a durable database path")
+    if db_path == ":memory:" or "mode=memory" in db_path:
+        raise CyberGymScoreError(
+            f"an in-memory {what} is not durable: a restart loses the epoch's state, "
+            "which is the failure it exists to prevent; pass a file path"
+        )
+    return db_path
+
+
 class CyberGymScoreStore:
     """SQLite-backed writer for the `cybergym_scores` mechanism table."""
 
@@ -49,7 +75,68 @@ class CyberGymScoreStore:
             "  receipt_id TEXT NOT NULL,"
             "  PRIMARY KEY (miner_hotkey, epoch))"
         )
+        # The completeness marker lives beside the scores, on purpose: the external
+        # mechanism adapter reads this database directly, so it must be able to see
+        # whether the epoch it is about to publish actually closed. Its query is
+        # `SELECT state FROM cybergym_epoch_status WHERE epoch=?`, and anything other
+        # than 'closed' (including a missing row) means do not publish.
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS cybergym_epoch_status ("
+            "  epoch INTEGER PRIMARY KEY,"
+            "  state TEXT NOT NULL,"
+            "  detail TEXT NOT NULL,"
+            "  scored_miners INTEGER NOT NULL,"
+            "  marked_at TEXT NOT NULL)"
+        )
         self._connection.commit()
+
+    # -- epoch lifecycle --------------------------------------------------- #
+    def mark_epoch(
+        self,
+        epoch: int,
+        *,
+        state: str,
+        detail: str = "",
+        scored_miners: int = 0,
+        at: str | None = None,
+    ) -> None:
+        """Record how an epoch's scoring pass ended. Fails closed on a bad state."""
+        if state not in (EPOCH_OPEN, EPOCH_CLOSED, EPOCH_INCOMPLETE):
+            raise CyberGymScoreError(f"unknown epoch state {state!r}")
+        from datetime import datetime, timezone
+
+        stamp = at or datetime.now(timezone.utc).isoformat()
+        try:
+            with self._connection:
+                self._connection.execute(
+                    "INSERT INTO cybergym_epoch_status"
+                    "(epoch, state, detail, scored_miners, marked_at) VALUES (?,?,?,?,?)"
+                    " ON CONFLICT(epoch) DO UPDATE SET state=excluded.state,"
+                    "  detail=excluded.detail, scored_miners=excluded.scored_miners,"
+                    "  marked_at=excluded.marked_at",
+                    (int(epoch), state, str(detail), int(scored_miners), stamp),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError("failed to record the epoch state") from exc
+
+    def epoch_state(self, epoch: int) -> tuple[str, str]:
+        """`(state, detail)` for an epoch. An unmarked epoch is `open`."""
+        row = self._connection.execute(
+            "SELECT state, detail FROM cybergym_epoch_status WHERE epoch=?", (int(epoch),)
+        ).fetchone()
+        if row is None:
+            return EPOCH_OPEN, "no scoring pass has been recorded for this epoch"
+        return str(row["state"]), str(row["detail"])
+
+    def require_closed_epoch(self, epoch: int) -> None:
+        """Raise unless this epoch closed cleanly. The gate every composer needs."""
+        state, detail = self.epoch_state(epoch)
+        if state != EPOCH_CLOSED:
+            raise CyberGymScoreError(
+                f"refusing to compose CyberGym epoch {int(epoch)}: its state is "
+                f"{state!r} ({detail}). Composing now would publish a vector that "
+                "cannot be distinguished from an epoch nobody solved."
+            )
 
     def record(self, receipt: Mapping[str, object]) -> None:
         """Persist the verified earned units for one (miner, epoch).
@@ -146,7 +233,7 @@ class CyberGymSolveStore:
     """
 
     def __init__(self, db_path: str) -> None:
-        self._db_path = db_path
+        self._db_path = _require_durable_path(db_path, what="CyberGymSolveStore")
         self._connection = sqlite3.connect(db_path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode=WAL")

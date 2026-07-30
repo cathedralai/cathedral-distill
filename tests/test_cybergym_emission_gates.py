@@ -29,7 +29,10 @@ from cathedral_distill import frontier as fr  # noqa: E402
 from cathedral_distill.bundle_registry import BundleRegistration, BundleRegistry  # noqa: E402
 from cathedral_distill.cybergym import Level  # noqa: E402
 from cathedral_distill.cybergym_batch import PooledTask, TaskPool  # noqa: E402
-from cathedral_distill.cybergym_scores import CyberGymScoreStore  # noqa: E402
+from cathedral_distill.cybergym_scores import (  # noqa: E402
+    EPOCH_CLOSED,
+    CyberGymScoreStore,
+)
 from cathedral_distill.cybergym_service import (  # noqa: E402
     compose_results_lane,
     compose_scores_lane,
@@ -97,6 +100,18 @@ def _store(tmp_path, name="scores.sqlite"):
     return CyberGymScoreStore(str(tmp_path / name))
 
 
+def _compose(store, allocation=Decimal("0.90")):
+    """Compose the persisted scores.
+
+    `compose_scores_lane` refuses an epoch that is not marked closed, so a test
+    that scores through `run_epoch` directly (no service) states the closure
+    itself. The service does this in `score_epoch`, and only when no durable solve
+    was lost.
+    """
+    store.mark_epoch(SOURCE_EPOCH, state=EPOCH_CLOSED, detail="scored in this test")
+    return compose_scores_lane(store, SOURCE_EPOCH, allocation=allocation)
+
+
 # --------------------------------------------------------------------------- #
 # No gate decision is not a default
 # --------------------------------------------------------------------------- #
@@ -121,7 +136,7 @@ def test_a_passing_epoch_persists_and_composes(tmp_path):
     results = _run(store, policy)
     assert results[0].creditable and results[0].gate_failures == ()
     assert store.epoch_scores(SOURCE_EPOCH) == {MINER: Decimal("8")}
-    lane = compose_scores_lane(store, SOURCE_EPOCH, allocation=Decimal("0.90"))
+    lane = _compose(store)
     assert [c.miner_hotkey for c in lane.contributions] == [MINER]
 
 
@@ -133,7 +148,7 @@ def test_an_unanchored_model_commitment_earns_nothing(tmp_path):
     assert set(results[0].gate_failures) == {fr.GATE_REGISTERED_BUNDLE, fr.GATE_NO_CONTAMINATION}
     assert not results[0].creditable
     assert store.epoch_scores(SOURCE_EPOCH) == {}          # nothing persisted
-    lane = compose_scores_lane(store, SOURCE_EPOCH, allocation=Decimal("0.90"))
+    lane = _compose(store)
     assert list(lane.contributions) == []                  # so the share burns
 
 
@@ -305,5 +320,5 @@ def test_a_repeated_dispatch_cannot_double_persist(tmp_path):
     second = _run(store, policy)[0]
     assert first.receipt == second.receipt              # byte-identical re-derivation
     assert store.epoch_scores(SOURCE_EPOCH) == {MINER: Decimal("8")}
-    lane = compose_scores_lane(store, SOURCE_EPOCH, allocation=Decimal("0.90"))
+    lane = _compose(store)
     assert len(lane.contributions) == 1

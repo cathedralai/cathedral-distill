@@ -33,7 +33,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cathedral_distill import cybergym_validator as cv  # noqa: E402
 from cathedral_distill.cybergym import Level  # noqa: E402
 from cathedral_distill.cybergym_batch import PooledTask, TaskPool  # noqa: E402
-from cathedral_distill.cybergym_scores import CyberGymScoreStore  # noqa: E402
+from cathedral_distill.cybergym_scores import (  # noqa: E402
+    EPOCH_CLOSED,
+    CyberGymScoreStore,
+)
 from cathedral_distill.cybergym_service import compose_scores_lane  # noqa: E402
 from cathedral_distill.cybergym_synthetic import (  # noqa: E402
     CRASH_EXIT,
@@ -135,6 +138,9 @@ def test_solved_synthetic_tasks_earn_zero_by_default(tmp_path):
     assert result.receipt["score"]["earned_units"] == "0"
     # nothing rewardable is persisted, so nothing composes and the share burns
     assert store.epoch_scores(SOURCE_EPOCH) == {MINER: Decimal("0")}
+    # composing requires an explicit statement that the epoch closed (the service
+    # does this in score_epoch; this test scores through run_epoch directly)
+    store.mark_epoch(SOURCE_EPOCH, state=EPOCH_CLOSED, detail="scored in this test")
     lane = compose_scores_lane(store, SOURCE_EPOCH, allocation=Decimal("0.90"))
     assert list(lane.contributions) == []
 
@@ -143,6 +149,9 @@ def test_the_same_solves_earn_only_under_the_explicit_override(tmp_path):
     store, results = _run_synthetic_epoch(tmp_path, credit=True, name="override.sqlite")
     assert Decimal(results[0].contribution["work_units"]) > 0
     assert store.epoch_scores(SOURCE_EPOCH)[MINER] > 0
+    # composing requires an explicit statement that the epoch closed (the service
+    # does this in score_epoch; this test scores through run_epoch directly)
+    store.mark_epoch(SOURCE_EPOCH, state=EPOCH_CLOSED, detail="scored in this test")
     lane = compose_scores_lane(store, SOURCE_EPOCH, allocation=Decimal("0.90"))
     assert [c.miner_hotkey for c in lane.contributions] == [MINER]
 

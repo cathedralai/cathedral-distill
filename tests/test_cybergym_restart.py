@@ -35,8 +35,15 @@ from cathedral_distill.cybergym_protocol import (  # noqa: E402
     ProtocolError,
     SubmissionEnvelope,
 )
-from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore  # noqa: E402
-from cathedral_distill.cybergym_service import CyberGymService  # noqa: E402
+from cathedral_distill.cybergym_scores import (  # noqa: E402
+    EPOCH_CLOSED,
+    EPOCH_INCOMPLETE,
+    EPOCH_OPEN,
+    CyberGymScoreError,
+    CyberGymScoreStore,
+    CyberGymSolveStore,
+)
+from cathedral_distill.cybergym_service import CyberGymService, compose_scores_lane  # noqa: E402
 from cathedral_distill.cybergym_validator import ChainContext  # noqa: E402
 from cathedral_distill.cybergym_verifier import poc_digest  # noqa: E402
 
@@ -182,6 +189,56 @@ def test_a_restart_with_no_durable_solve_store_refuses_to_publish(tmp_path):
     # exactly like an epoch nobody solved. Refuse instead.
     with pytest.raises(ProtocolError, match="refusing to compose"):
         restarted.compose_lane(allocation=Decimal("0.90"))
+
+
+def test_the_store_reading_composer_also_refuses_a_lost_epoch(tmp_path):
+    """The refusal has to live where the ADAPTER can see it.
+
+    `CyberGymService.compose_lane` knows about lost solves, but the exported
+    `compose_scores_lane` and the external mechanism adapter read the
+    `cybergym_scores` table directly, so they could not see that knowledge and
+    happily composed an empty 100%-burn lane after a restart lost the epoch. The
+    epoch's state is therefore persisted in the SAME database the adapter reads.
+    """
+    with pytest.warns(UserWarning, match="WITHOUT a durable solve store"):
+        killed = _service(tmp_path, durable=False)
+    _solve(killed)
+    del killed
+
+    with pytest.warns(UserWarning, match="WITHOUT a durable solve store"):
+        restarted = _service(tmp_path, durable=False)
+    restarted.score_epoch(issued_at=ISSUED)
+
+    state, detail = restarted._scores.epoch_state(SOURCE_EPOCH)
+    assert state == EPOCH_INCOMPLETE and "5Miner" in detail
+    # the store-reading composer refuses on the marker alone, with no access to the
+    # service object that noticed the loss
+    with pytest.raises(CyberGymScoreError, match="refusing to compose"):
+        compose_scores_lane(restarted._scores, SOURCE_EPOCH, allocation=Decimal("0.90"))
+
+
+def test_the_store_reading_composer_refuses_an_epoch_that_never_closed(tmp_path):
+    """An unmarked epoch is not composable either: "no scoring pass ran" and
+    "nobody solved anything" produce the same empty vector, so they must not be
+    treated the same."""
+    service = _service(tmp_path, durable=True)
+    _solve(service)
+    assert service._scores.epoch_state(SOURCE_EPOCH)[0] == EPOCH_OPEN
+    with pytest.raises(CyberGymScoreError, match="refusing to compose"):
+        compose_scores_lane(service._scores, SOURCE_EPOCH, allocation=Decimal("0.90"))
+
+    service.score_epoch(issued_at=ISSUED)
+    assert service._scores.epoch_state(SOURCE_EPOCH)[0] == EPOCH_CLOSED
+    lane = compose_scores_lane(service._scores, SOURCE_EPOCH, allocation=Decimal("0.90"))
+    assert [c.miner_hotkey for c in lane.contributions] == ["5Miner"]
+
+
+@pytest.mark.parametrize("path", ["", ":memory:", "file:x?mode=memory&cache=shared"])
+def test_a_non_durable_solve_store_is_refused(path):
+    """`CyberGymSolveStore(":memory:")` used to satisfy the service's "durable store
+    required" check while forgetting every solve on restart."""
+    with pytest.raises(CyberGymScoreError):
+        CyberGymSolveStore(path)
 
 
 def test_a_running_service_requires_a_durable_solve_store_by_default(tmp_path):
