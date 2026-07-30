@@ -317,8 +317,33 @@ class CyberGymService:
             self._miners[miner_hotkey] = _MinerState(commitment, None, dict(pocs))
 
     # -- dispatch (validator -> miner) ------------------------------------- #
-    def dispatch_for(self, miner_hotkey: str, model_commitment: str) -> DispatchMessage:
-        """Draw and serve this miner's sealed batch, remembering it for `submit`."""
+    def dispatch_for(self, miner_hotkey: str, model_commitment: str, *,
+                     authenticated_caller: str | None = None) -> DispatchMessage:
+        """Draw and serve this miner's sealed batch, remembering it for `submit`.
+
+        `authenticated_caller` is the identity the TRANSPORT proved made this call
+        (a Bittensor axon's `synapse.dendrite.hotkey`, or a signature the reference
+        server verifies) — never a value from the request body. Dispatch is
+        caller-bound: a re-commit that would ABANDON already-accepted solves must be
+        proven to come from the hotkey owner. Without that proof the destructive path
+        is refused, so an unauthenticated request cannot re-dispatch a victim's public
+        hotkey with a different commitment to delete that miner's verified solves.
+        """
+        if authenticated_caller is not None and authenticated_caller != miner_hotkey:
+            raise ProtocolError(
+                f"authenticated caller {authenticated_caller!r} may not dispatch for "
+                f"{miner_hotkey!r}")
+        previous = self._miners.get(miner_hotkey)
+        # A commitment change abandons the previous batch. When accepted solves would
+        # be dropped, require the caller to be the miner — otherwise this is a
+        # reward-denial attack, not a self-re-commit. Checked BEFORE drawing, so an
+        # unauthorized call has no side effects at all.
+        if (previous is not None and previous.model_commitment != model_commitment
+                and previous.pocs and authenticated_caller != miner_hotkey):
+            raise ProtocolError(
+                f"re-committing for {miner_hotkey!r} would abandon {len(previous.pocs)} "
+                "accepted solve(s); a commitment change that drops solves must be "
+                "authenticated as the miner, not an arbitrary dispatch request")
         message = dispatch(
             self.holdout.pool, self.chain,
             miner_hotkey=miner_hotkey, model_commitment=model_commitment,
@@ -330,7 +355,6 @@ class CyberGymService:
         # epoch still belong to it and are kept. A different commitment is a
         # different batch, so the old solves are for other tasks: drop them, and
         # drop them durably, or a later restart would resurrect them.
-        previous = self._miners.get(miner_hotkey)
         if previous is not None and previous.model_commitment == model_commitment:
             self._miners[miner_hotkey] = _MinerState(
                 model_commitment, message, dict(previous.pocs)
@@ -342,12 +366,11 @@ class CyberGymService:
                         epoch=self.chain.source_epoch, miner_hotkey=miner_hotkey
                     )
                 if previous.pocs:
-                    # This miner just abandoned the commitment its solves were drawn
-                    # against. The corpus rows survive, so without this marker the
-                    # miner would look "lost" forever and `compose_lane` would refuse
-                    # the WHOLE lane, permanently, on two miner-controlled RPCs. A
-                    # miner's own re-commit costs that miner its unscored solves; it
-                    # must never cost the lane.
+                    # This miner (authenticated above) abandoned the commitment its
+                    # solves were drawn against. The corpus rows survive, so without
+                    # this marker the miner would look "lost" forever and
+                    # `compose_lane` would refuse the WHOLE lane. A miner's own
+                    # re-commit costs that miner its unscored solves, never the lane.
                     self._mark_unscorable(
                         miner_hotkey,
                         "miner re-committed mid-epoch; solves drawn against "
@@ -455,8 +478,17 @@ class CyberGymService:
         except (ProtocolError, ValueError) as exc:
             return {"error": str(exc)}
 
-    def handle_dispatch(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        """{miner_hotkey, model_commitment} -> DispatchMessage dict (or {error})."""
+    def handle_dispatch(self, request: Mapping[str, Any], *,
+                        authenticated_caller: str | None = None) -> dict[str, Any]:
+        """{miner_hotkey, model_commitment} -> DispatchMessage dict (or {error}).
+
+        `authenticated_caller` is supplied by the TRANSPORT (an axon's verified
+        dendrite hotkey), never read from the body — the body's `miner_hotkey` is
+        untrusted. `dispatch_for` binds the two so a caller can only dispatch for
+        itself and an unauthenticated request cannot abandon another miner's solves.
+        A production transport MUST pass it; the unauthenticated reference server
+        leaves it None, which makes the solve-dropping re-commit path fail closed.
+        """
         if not isinstance(request, Mapping):
             return {"error": "dispatch request must be an object"}
         miner = request.get("miner_hotkey")
@@ -466,7 +498,8 @@ class CyberGymService:
         if not isinstance(commitment, str) or not commitment:
             return {"error": "model_commitment is required"}
         try:
-            return self.dispatch_for(miner, commitment).to_dict()
+            return self.dispatch_for(
+                miner, commitment, authenticated_caller=authenticated_caller).to_dict()
         except (ProtocolError, ValueError) as exc:
             return {"error": str(exc)}
 
@@ -659,9 +692,10 @@ def compose_scores_lane(
     check this function was the way around the restart guarantee: it reads the score
     table directly, so it could not see `CyberGymService.lost_durable_solvers()` and
     happily composed an empty, 100%-burn lane after the epoch's state was lost,
-    which is exactly the outcome the solve store exists to prevent. An external
-    adapter reading the table with its own SQL must apply the same gate:
-    `SELECT state FROM cybergym_epoch_status WHERE epoch=?` must be `closed`.
+    which is exactly the outcome the solve store exists to prevent. The cathedral
+    mechanism adapter applies the same gate
+    (`SELECT state FROM cybergym_epoch_status WHERE epoch=?` must be `closed`)
+    before mapping scores to uids.
     """
     score_store.require_closed_epoch(epoch)
     contributions = [

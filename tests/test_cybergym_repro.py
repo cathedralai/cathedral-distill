@@ -148,6 +148,45 @@ def test_backend_treats_a_timeout_as_no_crash():
     assert docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=timeout_run) == 0
 
 
+def test_verify_container_is_resource_bounded_and_named():
+    """An adversarial PoC (fork bomb / memory bomb / infinite loop) must not be able
+    to exhaust the validator host: the verify container carries finite cpu/mem/pids
+    caps and a name so it can be reaped."""
+    seen = []
+    def capture(argv, capture_output=False, timeout=None):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=CLEAN, stderr=b"")
+    docker_reproduce_backend("arvo:368", b"x", "vul", _run=capture)
+    argv = seen[0]
+    for cap in ("--memory", "--cpus", "--pids-limit"):
+        assert cap in argv, f"verify container is missing {cap}"
+    assert "--name" in argv and argv[argv.index("--name") + 1].startswith("cgverify-")
+
+
+def test_a_hung_container_is_force_removed_on_timeout():
+    """On a timeout the `docker run` client is killed but the container keeps running
+    under --rm, so the backend force-removes it by name — else a looping PoC lingers
+    and starves the host across tasks."""
+    calls = []
+    def run(argv, capture_output=False, timeout=None):
+        calls.append(argv)
+        if argv[1] == "run":
+            raise subprocess.TimeoutExpired(argv, timeout)
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=run) == 0
+    assert any(c[:3] == ["docker", "rm", "-f"] for c in calls), "hung container not reaped"
+
+
+def test_build_service_starts_and_dispatches():
+    """Regression: build_service must satisfy the constructor's fail-closed contract
+    (a durable solve store OR opt-out, a gate policy OR opt-out) or the reference
+    server raises on startup and cannot serve at all."""
+    from cathedral_distill.cybergym_repro_server import build_service
+    svc = build_service(["arvo:368"], private_key=Ed25519PrivateKey.generate())
+    msg = svc.dispatch_for("5Miner", MODEL)
+    assert msg.batch_id and [t.task_id for t in msg.tasks] == ["arvo:368"]
+
+
 # --------------------------------------------------------------------------- #
 # available_tasks — only serve what's pulled
 # --------------------------------------------------------------------------- #

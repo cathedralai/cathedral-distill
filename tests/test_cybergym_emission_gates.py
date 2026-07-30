@@ -79,7 +79,10 @@ def _backend(task_id, poc, mode):
 
 
 def _registry(*, hotkey=MINER, digest=COMMITMENT, registered_at=None):
-    at = registered_at or (NOW - timedelta(days=1))
+    # Default to a model registered BEFORE the private-disclosure window opened
+    # (`cutoff`), i.e. a legitimately non-contaminated model. A registration merely
+    # before the DRAW (as_of) is not enough — the contamination deadline is `cutoff`.
+    at = registered_at or (CUTOFF - timedelta(days=1))
     unsigned = BundleRegistration(
         miner_hotkey=hotkey,
         track=TRACK,
@@ -236,6 +239,20 @@ def test_an_explicit_commitment_deadline_is_enforced(tmp_path):
     )
     results = _run(store, policy)
     assert fr.GATE_NO_CONTAMINATION in results[0].gate_failures
+
+
+def test_a_model_registered_after_the_cutoff_is_contaminated_even_before_the_draw(tmp_path):
+    """The contamination deadline is the private-window START (`cutoff`), not the
+    draw time (`as_of`). A model registered inside `(cutoff, as_of]` postdates the
+    public disclosure of holdout tasks in that window, so it can solve them by lookup
+    and must NOT earn — even though it was registered before the batch was drawn.
+    Under the old `as_of` boundary this exact registration wrongly passed."""
+    store = _store(tmp_path)
+    # 07-26: after cutoff (07-20), before the draw (as_of = NOW = 07-27).
+    in_window = _registry(registered_at=NOW - timedelta(days=1))
+    results = _run(store, cv.EmissionGatePolicy(bundle_registry=in_window))
+    assert fr.GATE_NO_CONTAMINATION in results[0].gate_failures
+    assert store.epoch_scores(SOURCE_EPOCH) == {}
 
 
 def test_required_reproduction_is_not_satisfied_by_the_validators_own_receipt(tmp_path):

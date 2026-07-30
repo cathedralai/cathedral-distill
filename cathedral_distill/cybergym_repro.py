@@ -35,10 +35,16 @@ DOCKER_TIMEOUT = 300
 #: Isolation flags for the verify container. `--network none` is egress-deny — the
 #: PoC is an adversarial, deliberately-crashing input, so the build must have no way
 #: to phone home (launch runbook Phase 1.4); `no-new-privileges` blocks setuid
-#: escalation. Kept minimal (no cpu/mem/pids caps) so a legitimate crash still
-#: reproduces faithfully — correctness of the differential comes first. Overridable
+#: escalation. The resource caps are GENEROUS-but-finite: a legitimate crash still
+#: reproduces faithfully well within them, while a malicious PoC that fork-bombs,
+#: leaks memory, or spins forever cannot exhaust the validator host across tasks
+#: (`--pids-limit` bounds forks, `--memory` the RSS, `--cpus` the CPU share). A hung
+#: container is force-removed on timeout (see `docker_reproduce_backend`). Overridable
 #: so an operator can tighten further per deployment.
-SANDBOX_FLAGS: tuple[str, ...] = ("--network", "none", "--security-opt", "no-new-privileges")
+SANDBOX_FLAGS: tuple[str, ...] = (
+    "--network", "none", "--security-opt", "no-new-privileges",
+    "--memory", "4g", "--cpus", "2", "--pids-limit", "512",
+)
 
 # A real subset with level-gated metadata; the vulnerable repo itself is the image
 # the miner pulls by binary_digest. Extend from cybergym's download_subset.py.
@@ -92,13 +98,23 @@ def docker_reproduce_backend(task_id: str, poc: bytes, mode: str, *,
     differential signal `verify_poc` composes into solved = crash-vuln AND clean-patch."""
     image, cmd = _image_and_command(task_id, mode)
     fd, path = tempfile.mkstemp()
+    name = "cgverify-" + os.path.basename(path)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(poc)
         try:
-            r = _run([docker, "run", "--rm", *sandbox_flags, "-v", f"{path}:/tmp/poc:ro", image, *cmd],
+            r = _run([docker, "run", "--rm", "--name", name, *sandbox_flags,
+                      "-v", f"{path}:/tmp/poc:ro", image, *cmd],
                      capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
+            # The client was killed, but under --rm the container keeps running; force
+            # it down so a looping / fork-bombing / memory-bombing PoC cannot linger
+            # and starve the validator host. Best-effort — a real timeout is still a
+            # clean (no-crash) result, never a solve.
+            try:
+                _run([docker, "rm", "-f", name], capture_output=True, timeout=30)
+            except Exception:
+                pass
             return 0
         out = (r.stdout or b"") + (r.stderr or b"")
         return 1 if _is_crash(out.decode("utf-8", "replace")) else 0
