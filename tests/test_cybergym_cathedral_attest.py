@@ -171,7 +171,19 @@ def _boot_receipt(*, ssh_pubkey=SSH_PUB, kind="tdx-1.5", intel_verified=True,
 
 def test_a_genuine_boot_quote_binds_the_operator_ssh_key():
     a = verify_boot_attestation(_boot_receipt(), expected_ssh_pubkey=SSH_PUB)
-    assert a.attested and a.tee == "intel_tdx" and a.key_bound and a.reason == "attested_intel_tdx_boot"
+    assert a.attested and a.tee == "intel_tdx" and a.key_bound and a.miner_attested
+    assert a.reason == "attested_intel_tdx_boot_key_bound"
+    # SAFETY: a boot quote NEVER binds the PoC/trace, whatever else it proves
+    assert a.result_bound is False
+
+
+def test_boot_quote_without_a_key_is_environment_only_not_miner_bound():
+    # the unsafe footgun: no expected key -> proves a TDX worker booted, but nothing
+    # about WHICH miner. attested is true, but key_bound/miner_attested must be false.
+    a = verify_boot_attestation(_boot_receipt())
+    assert a.attested and not a.key_bound and not a.miner_attested
+    assert a.reason == "attested_intel_tdx_boot_environment_only"
+    assert a.result_bound is False
 
 
 def test_boot_quote_bound_to_a_different_key_is_refused():
