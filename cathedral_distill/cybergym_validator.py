@@ -141,31 +141,54 @@ def evaluate_emission_gates(
     """Return the required gates this miner's epoch does NOT satisfy.
 
     Empty tuple means every required gate passed on evidence. Everything fails
-    closed: unavailable evidence is a failure, never a skip.
+    closed: unavailable evidence is a failure, never a skip, and evidence that
+    cannot be READ (a registry lookup that raises, a timestamp with no timezone) is
+    a failure for THIS miner only. A gate evaluation must never be able to abort the
+    epoch for everyone else: that is a total lane outage from one bad row.
     """
     from cathedral_distill import frontier as fr
 
     failures: list[str] = []
 
+    def lookup(call, *args) -> Any:
+        """Registry access that fails this miner rather than the epoch."""
+        try:
+            return call(*args)
+        except Exception:  # noqa: BLE001 - unreadable evidence is a gate failure
+            return None
+
     registration = None
     if policy.bundle_registry is not None:
-        registration = policy.bundle_registry.claim_for(model_commitment)
+        registration = lookup(policy.bundle_registry.claim_for, model_commitment)
 
     if policy.require_registered_bundle:
         registered = bool(
             policy.bundle_registry is not None
-            and policy.bundle_registry.is_registered_by(model_commitment, miner_hotkey)
+            and lookup(
+                policy.bundle_registry.is_registered_by, model_commitment, miner_hotkey
+            )
         )
         if not registered:
             failures.append(fr.GATE_REGISTERED_BUNDLE)
 
     if policy.require_no_contamination:
         deadline = policy.commitment_deadline or drawn_at
+        registered_at = getattr(registration, "registered_at", None)
+        # A registration timestamp with no timezone cannot be compared with an aware
+        # deadline: Python raises, and that raise used to abort the epoch for every
+        # miner. It is also not evidence of anything, since the offset it means is
+        # unknown, so treat it as this miner's gate failure.
+        aware = (
+            registered_at is not None
+            and getattr(registered_at, "tzinfo", None) is not None
+            and registered_at.utcoffset() is not None
+        )
         proven_pre_commitment = bool(
             registration is not None
             and registration.miner_hotkey == miner_hotkey
             and deadline is not None
-            and registration.registered_at <= deadline
+            and aware
+            and registered_at <= deadline
         )
         if not proven_pre_commitment:
             failures.append(fr.GATE_NO_CONTAMINATION)
@@ -408,15 +431,20 @@ def run_epoch(
         # exactly the evidence a peer validator will, resolving the key by id.
         verified = cr.verify_receipt(receipt, key_registry, source_epoch=chain.source_epoch)
 
-        # Gates before the persisted score: this write is the reward.
+        # Gates before the persisted score: this write is the reward. Contained per
+        # miner, for the same reason receipt verification is: one miner's unreadable
+        # evidence must cost that miner, not every miner in the epoch.
         gate_failures: tuple[str, ...] = ()
         if gate_policy is not None:
-            gate_failures = evaluate_emission_gates(
-                gate_policy, miner_hotkey=miner.miner_hotkey,
-                model_commitment=miner.model_commitment, receipt=verified,
-                key_registry=key_registry, source_epoch=chain.source_epoch,
-                drawn_at=as_of,
-            )
+            try:
+                gate_failures = evaluate_emission_gates(
+                    gate_policy, miner_hotkey=miner.miner_hotkey,
+                    model_commitment=miner.model_commitment, receipt=verified,
+                    key_registry=key_registry, source_epoch=chain.source_epoch,
+                    drawn_at=as_of,
+                )
+            except Exception as exc:  # noqa: BLE001 - fail this miner, not the epoch
+                gate_failures = (f"gate_evaluation_failed:{type(exc).__name__}",)
         if not gate_failures:
             score_store.record(receipt)
         # A gated-out miner must not be able to earn through EITHER route. The

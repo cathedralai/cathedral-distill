@@ -188,6 +188,9 @@ class CyberGymService:
         self._dispatched: set[str] = set()   # task_ids actually served this epoch
         self._results: list[MinerResult] = []
         self._scored_miners: set[str] = set()  # miners this process actually scored
+        self._scoring_pass_ran = False         # whether score_epoch ran in this process
+        # miner_hotkey -> why its durable solves cannot be scored this epoch
+        self._unscorable: dict[str, str] = {}
         self._pin_epoch_manifest()
         self._restore_solves()
 
@@ -234,6 +237,58 @@ class CyberGymService:
                 f"refusing to resume CyberGym epoch {self.chain.source_epoch}: {exc}"
             ) from exc
 
+    def _mark_unscorable(self, miner_hotkey: str, reason: str) -> None:
+        """Record that a miner's durable solves for this epoch cannot be scored."""
+        self._unscorable[miner_hotkey] = reason
+        if self._solves is not None:
+            self._solves.record_unscorable(
+                epoch=self.chain.source_epoch, miner_hotkey=miner_hotkey, reason=reason
+            )
+
+    def _clear_unscorable(self, miner_hotkey: str) -> None:
+        """A miner that has produced a fresh accepted solve is scoreable again."""
+        if self._unscorable.pop(miner_hotkey, None) is None and self._solves is None:
+            return
+        if self._solves is not None:
+            self._solves.clear_unscorable(
+                epoch=self.chain.source_epoch, miner_hotkey=miner_hotkey
+            )
+
+    def acknowledge_unscorable_solves(self, *, reason: str) -> set[str]:
+        """Operator override: accept that some durable solves cannot be scored.
+
+        A fail-closed control an operator cannot clear is its own outage. This is the
+        clearing mechanism for the case the refusal is genuinely about: this
+        validator cannot reconstruct part of its own epoch (it ran without a durable
+        solve store, or the store was lost). It records the acknowledgement, with the
+        operator's reason, in the same durable stores the refusal reads, so the
+        refusal does not come back after the next restart.
+
+        It DELETES NOTHING. The corpus rows and any solve rows stay exactly where
+        they are; only the fact that they cannot be scored is recorded. The affected
+        miners earn nothing for this epoch, which is the honest outcome, and the rest
+        of the lane composes.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ProtocolError(
+                "an acknowledgement must carry a reason, which lands in the epoch's "
+                "audit trail"
+            )
+        lost = self.lost_durable_solvers()
+        for miner_hotkey in sorted(lost):
+            self._mark_unscorable(miner_hotkey, f"operator acknowledged: {reason}")
+        if lost and self._scoring_pass_ran:
+            # A scoring pass already ran, so the epoch's recorded state is stale.
+            self._scores.mark_epoch(
+                self.chain.source_epoch, state=EPOCH_CLOSED,
+                detail=(
+                    f"operator acknowledged {len(lost)} unscorable solve set(s) "
+                    f"({', '.join(sorted(lost))}): {reason}"
+                ),
+                scored_miners=len(self._scored_miners),
+            )
+        return lost
+
     def _restore_solves(self) -> None:
         """Rehydrate this epoch's accepted solves from the durable solve store.
 
@@ -244,6 +299,7 @@ class CyberGymService:
         """
         if self._solves is None:
             return
+        self._unscorable.update(self._solves.unscorable(self.chain.source_epoch))
         for miner_hotkey, (commitment, pocs) in self._solves.commits(
             self.chain.source_epoch
         ).items():
@@ -269,10 +325,23 @@ class CyberGymService:
                 model_commitment, message, dict(previous.pocs)
             )
         else:
-            if previous is not None and self._solves is not None:
-                self._solves.forget_miner(
-                    epoch=self.chain.source_epoch, miner_hotkey=miner_hotkey
-                )
+            if previous is not None:
+                if self._solves is not None:
+                    self._solves.forget_miner(
+                        epoch=self.chain.source_epoch, miner_hotkey=miner_hotkey
+                    )
+                if previous.pocs:
+                    # This miner just abandoned the commitment its solves were drawn
+                    # against. The corpus rows survive, so without this marker the
+                    # miner would look "lost" forever and `compose_lane` would refuse
+                    # the WHOLE lane, permanently, on two miner-controlled RPCs. A
+                    # miner's own re-commit costs that miner its unscored solves; it
+                    # must never cost the lane.
+                    self._mark_unscorable(
+                        miner_hotkey,
+                        "miner re-committed mid-epoch; solves drawn against "
+                        f"{previous.model_commitment} were abandoned",
+                    )
             self._miners[miner_hotkey] = _MinerState(model_commitment, message)
         self._by_batch[message.batch_id] = miner_hotkey
         self._dispatched.update(t.task_id for t in message.tasks)
@@ -302,6 +371,9 @@ class CyberGymService:
             except (ValueError, TypeError) as exc:  # pragma: no cover - process_submission already checked
                 raise ProtocolError("PoC is not valid base64") from exc
             state.pocs[envelope.task_id] = poc
+            # A fresh accepted solve makes this miner scoreable again, so any earlier
+            # "unscorable" marker (from a re-commit) no longer applies.
+            self._clear_unscorable(miner_hotkey)
             # Durable before acknowledged: the miner is told this solve counted, so
             # it has to survive a restart between now and epoch close.
             if self._solves is not None:
@@ -414,6 +486,7 @@ class CyberGymService:
             credit_synthetic_tasks=self._credit_synthetic_tasks,
         )
         self._scored_miners.update(m.miner_hotkey for m in miners)
+        self._scoring_pass_ran = True
         # Record how this pass ended IN THE SCORES DATABASE, which is what the
         # external mechanism adapter reads. Refusal that lives only on this object
         # is invisible to the adapter, and the adapter is the thing that publishes.
@@ -442,13 +515,23 @@ class CyberGymService:
         scoring state does not. A miner that appears in durable evidence but has
         neither a persisted score nor recoverable in-memory solves has had its
         epoch's work destroyed by the restart, and composing would burn its share.
+
+        Miners recorded as unscorable are NOT lost state: a miner that abandoned the
+        commitment it was drawn against, or a loss an operator has acknowledged, is a
+        settled outcome. Counting them here is what let one miner wedge the lane's
+        composition permanently with two RPCs.
         """
         epoch = self.chain.source_epoch
         durable_solvers = {row["miner_hotkey"] for row in self._corpus.rows(source_epoch=epoch)}
         if self._solves is not None:
             durable_solvers |= set(self._solves.commits(epoch))
         recoverable = {hk for hk, st in self._miners.items() if st.pocs}
-        return durable_solvers - recoverable - set(self._scores.epoch_scores(epoch))
+        return (
+            durable_solvers
+            - recoverable
+            - set(self._scores.epoch_scores(epoch))
+            - set(self._unscorable)
+        )
 
     def pending_solvers(self) -> set[str]:
         """Miners holding accepted solves that this run has not scored yet."""
@@ -474,9 +557,11 @@ class CyberGymService:
             raise ProtocolError(
                 "refusing to compose the CyberGym lane: durable evidence shows "
                 f"{len(lost)} miner(s) solved epoch {self.chain.source_epoch} but this "
-                f"run cannot score them ({', '.join(sorted(lost))}). Restart with the same "
-                "solve_store to recover the epoch; publishing now would forcibly burn "
-                "their share."
+                f"run cannot score them ({', '.join(sorted(lost))}); publishing now would "
+                "forcibly burn their share. Either resume the epoch with the solve store "
+                "that holds their solves, or, if that state is gone, call "
+                "acknowledge_unscorable_solves(reason=...) to record the loss and let the "
+                "rest of the lane compose."
             )
         pending = self.pending_solvers()
         if pending:

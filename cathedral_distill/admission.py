@@ -258,6 +258,10 @@ def _admit_eval(
             )
         except ReplayError as exc:
             return reject(str(exc))
+        except Exception as exc:  # noqa: BLE001 - one receipt's failure, not the loop's
+            # An unusable ledger must reject THIS submission, not abort an admission
+            # loop over every receipt. Fail closed, contained, and named in the detail.
+            return reject(f"replay ledger failed: {type(exc).__name__}: {exc}")
 
     work_units = Decimal(str(doc["score"]["work_units"]))
     return Admission(KIND_EVAL, lane, str(doc["receipt_id"]), miner, ADMIT, work_units, "verified")

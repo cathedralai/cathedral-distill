@@ -72,7 +72,16 @@ class BundleRegistration:
                 raise RegistrationError("a bundle cannot be its own parent")
 
     def signing_payload(self) -> bytes:
-        """Exact bytes the maintainer signs. Domain-separated, canonical."""
+        """Exact bytes the maintainer signs. Domain-separated, canonical.
+
+        `registered_at` is covered. It used to be outside the payload, which was
+        tolerable while it was only provenance metadata, and is not tolerable now
+        that it is REWARD EVIDENCE: `cybergym_validator.evaluate_emission_gates`
+        derives `no_contamination` from it (the commitment must pre-date the batch
+        draw), so an unsigned timestamp meant the default-ON anti-contamination gate
+        could be satisfied by backdating a field nobody signed. Signing it makes
+        backdating a forgery instead of an edit.
+        """
         body = {
             "schema": REGISTRATION_SCHEMA,
             "miner_hotkey": self.miner_hotkey,
@@ -80,6 +89,7 @@ class BundleRegistration:
             "bundle_digest": self.bundle_digest,
             "version": self.version,
             "parent_digest": self.parent_digest,
+            "registered_at": self.registered_at.isoformat(),
         }
         return REGISTRATION_DOMAIN + json.dumps(
             body, sort_keys=True, separators=(",", ":")

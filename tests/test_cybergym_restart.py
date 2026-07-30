@@ -356,3 +356,120 @@ def test_redispatch_with_a_new_commitment_drops_the_old_solves_durably(tmp_path)
     # and a restart must not resurrect the abandoned solves
     restarted = _service(tmp_path, durable=True)
     assert restarted._miners == {}
+
+
+# --------------------------------------------------------------------------- #
+# A miner's own re-commit costs that miner, never the lane
+# --------------------------------------------------------------------------- #
+
+def test_a_hostile_recommit_cannot_stop_the_lane_composing(tmp_path):
+    """The refusal must not be a weapon a miner can point at everyone else.
+
+    Two miner-controlled RPCs (solve, then dispatch under a new commitment) left the
+    miner's corpus row on disk with its solve rows deleted, so
+    `lost_durable_solvers()` reported it forever and `compose_lane` refused the WHOLE
+    lane, permanently, with no override and no recovery: a fail-closed control that
+    became its own outage, worse than the silent burn it replaced. A miner abandoning
+    its own commitment is now a settled outcome recorded as unscorable, so it costs
+    that miner its unscored solves and nothing else.
+    """
+    service = _service(tmp_path, durable=True)
+    _solve(service, miner="5Hostile")
+    _solve(service, miner="5Honest")
+
+    # the hostile miner re-commits mid-epoch, abandoning the batch it was drawn
+    service.dispatch_for("5Hostile", OTHER_MODEL)
+
+    assert service.lost_durable_solvers() == set()
+    assert "5Hostile" in service._unscorable
+    results = service.score_epoch(issued_at=ISSUED)
+    assert [r.miner_hotkey for r in results] == ["5Honest"]
+
+    lane = service.compose_lane(allocation=Decimal("0.90"))
+    assert [c.miner_hotkey for c in lane.contributions] == ["5Honest"]
+    assert service._scores.epoch_state(SOURCE_EPOCH)[0] == EPOCH_CLOSED
+
+
+def test_the_abandonment_survives_a_restart(tmp_path):
+    """The marker has to be durable, or the wedge returns on the next restart."""
+    service = _service(tmp_path, durable=True)
+    _solve(service, miner="5Hostile")
+    _solve(service, miner="5Honest")
+    service.dispatch_for("5Hostile", OTHER_MODEL)
+    del service
+
+    restarted = _service(tmp_path, durable=True)
+    assert restarted._unscorable.get("5Hostile")
+    assert restarted.lost_durable_solvers() == set()
+    restarted.score_epoch(issued_at=ISSUED)
+    lane = restarted.compose_lane(allocation=Decimal("0.90"))
+    assert [c.miner_hotkey for c in lane.contributions] == ["5Honest"]
+
+
+def test_a_recommitted_miner_that_solves_again_is_scoreable(tmp_path):
+    """Abandonment is not a ban: a fresh accepted solve clears the marker."""
+    service = _service(tmp_path, durable=True)
+    _solve(service, miner="5Miner")
+    service.dispatch_for("5Miner", OTHER_MODEL)
+    assert "5Miner" in service._unscorable
+
+    # solve again under the NEW commitment
+    dispatched = service._miners["5Miner"].dispatch
+    poc = b"exploit-bytes-for-arvo-1"
+    outcome = service.submit(SubmissionEnvelope(
+        batch_id=dispatched.batch_id, task_id="arvo:1", miner_hotkey="5Miner",
+        poc_base64=base64.b64encode(poc).decode(),
+        trace=_trace("arvo:1", poc_digest(poc)),
+    ))
+    assert outcome.creditable
+    assert "5Miner" not in service._unscorable
+    results = service.score_epoch(issued_at=ISSUED)
+    assert [r.miner_hotkey for r in results] == ["5Miner"]
+
+
+def test_an_operator_can_clear_a_genuine_loss_without_losing_data(tmp_path):
+    """The one refusal that remains has to be clearable, or it is still an outage."""
+    with pytest.warns(UserWarning, match="WITHOUT a durable solve store"):
+        killed = _service(tmp_path, durable=False)
+    _solve(killed)
+    del killed
+
+    with pytest.warns(UserWarning, match="WITHOUT a durable solve store"):
+        restarted = _service(tmp_path, durable=False)
+    restarted.score_epoch(issued_at=ISSUED)
+    assert restarted.lost_durable_solvers() == {"5Miner"}
+    with pytest.raises(ProtocolError, match="acknowledge_unscorable_solves"):
+        restarted.compose_lane(allocation=Decimal("0.90"))
+
+    with pytest.raises(ProtocolError, match="must carry a reason"):
+        restarted.acknowledge_unscorable_solves(reason="  ")
+
+    acknowledged = restarted.acknowledge_unscorable_solves(
+        reason="solve store was not configured before the restart; state is gone"
+    )
+    assert acknowledged == {"5Miner"}
+    # the durable evidence is untouched: nothing was deleted to clear the refusal
+    assert restarted._corpus.size() == 1
+    # and the lane composes again, with the acknowledgement in the epoch's record
+    lane = restarted.compose_lane(allocation=Decimal("0.90"))
+    assert list(lane.contributions) == []
+    state, detail = restarted._scores.epoch_state(SOURCE_EPOCH)
+    assert state == EPOCH_CLOSED and "operator acknowledged" in detail
+
+
+def test_an_acknowledged_loss_stays_acknowledged_across_a_restart(tmp_path):
+    killed = _service(tmp_path, durable=True)
+    _solve(killed)
+    del killed
+
+    # the solve store file is lost, but the corpus survives: genuinely unrecoverable
+    (tmp_path / "solves.sqlite").unlink()
+    restarted = _service(tmp_path, durable=True)
+    restarted.score_epoch(issued_at=ISSUED)
+    assert restarted.lost_durable_solvers() == {"5Miner"}
+    restarted.acknowledge_unscorable_solves(reason="solve store file lost")
+
+    again = _service(tmp_path, durable=True)
+    assert again.lost_durable_solvers() == set()
+    again.score_epoch(issued_at=ISSUED)
+    again.compose_lane(allocation=Decimal("0.90"))

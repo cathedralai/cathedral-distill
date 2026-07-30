@@ -248,6 +248,20 @@ class CyberGymSolveStore:
             "  poc BLOB NOT NULL,"
             "  PRIMARY KEY (epoch, miner_hotkey, task_id))"
         )
+        # Solves that exist in durable evidence (a corpus row) but can no longer be
+        # scored, with the reason. Two sources: a miner that abandoned the commitment
+        # they were drawn against (its own act, its own loss), and an operator
+        # acknowledging state this validator genuinely cannot reconstruct. Recording
+        # it is what stops the "durable or refuse" guard from becoming a permanent,
+        # miner-triggerable outage of the whole lane.
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS cybergym_unscorable ("
+            "  epoch INTEGER NOT NULL,"
+            "  miner_hotkey TEXT NOT NULL,"
+            "  reason TEXT NOT NULL,"
+            "  marked_at TEXT NOT NULL,"
+            "  PRIMARY KEY (epoch, miner_hotkey))"
+        )
         # The epoch's scoring inputs, so a restart cannot silently score the same
         # epoch under a different anchor. Recovering the PoCs is not enough for
         # byte-identical scoring: the batch nonce is derived from the finalized
@@ -372,6 +386,50 @@ class CyberGymSolveStore:
                 )
         except sqlite3.DatabaseError as exc:
             raise CyberGymScoreError("failed to clear cybergym solves") from exc
+
+    def record_unscorable(self, *, epoch: int, miner_hotkey: str, reason: str) -> None:
+        """Record that this miner's durable solves for this epoch cannot be scored.
+
+        Deletes nothing: the corpus rows and any surviving solve rows stay exactly
+        where they are, so an operator can still inspect what happened. This only
+        records that they are not scoreable, which is what keeps one miner's
+        abandoned commitment from blocking the whole lane's composition forever.
+        """
+        from datetime import datetime, timezone
+
+        try:
+            with self._connection:
+                self._connection.execute(
+                    "INSERT INTO cybergym_unscorable"
+                    "(epoch, miner_hotkey, reason, marked_at) VALUES (?,?,?,?)"
+                    " ON CONFLICT(epoch, miner_hotkey) DO UPDATE SET"
+                    "  reason=excluded.reason, marked_at=excluded.marked_at",
+                    (int(epoch), str(miner_hotkey), str(reason),
+                     datetime.now(timezone.utc).isoformat()),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError("failed to record an unscorable solve set") from exc
+
+    def clear_unscorable(self, *, epoch: int, miner_hotkey: str) -> None:
+        """Drop the marker, for a miner that has become scoreable again."""
+        try:
+            with self._connection:
+                self._connection.execute(
+                    "DELETE FROM cybergym_unscorable WHERE epoch=? AND miner_hotkey=?",
+                    (int(epoch), str(miner_hotkey)),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError("failed to clear an unscorable solve set") from exc
+
+    def unscorable(self, epoch: int) -> dict[str, str]:
+        """`{miner_hotkey: reason}` for this epoch."""
+        return {
+            row["miner_hotkey"]: str(row["reason"])
+            for row in self._connection.execute(
+                "SELECT miner_hotkey, reason FROM cybergym_unscorable WHERE epoch=?",
+                (int(epoch),),
+            )
+        }
 
     def commits(self, epoch: int) -> dict[str, tuple[str, dict[str, bytes]]]:
         """`{miner_hotkey: (model_commitment, {task_id: poc})}` for one epoch."""

@@ -244,6 +244,117 @@ def test_unknown_miner_coldkey_fails_the_independent_evaluator_gate(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# The gate's own evidence has to be sound, and unreadable evidence is contained
+# --------------------------------------------------------------------------- #
+
+def test_a_registry_that_raises_fails_one_miner_not_the_epoch(tmp_path):
+    """One registry lookup failure used to abort the whole epoch: a total lane
+    outage from a single bad row. The same containment rule receipts get."""
+    class ExplodingRegistry:
+        def claim_for(self, digest):
+            raise RuntimeError("registry backend unavailable")
+
+        def is_registered_by(self, digest, hotkey):
+            raise RuntimeError("registry backend unavailable")
+
+    store = _store(tmp_path)
+    results = _run(store, cv.EmissionGatePolicy(bundle_registry=ExplodingRegistry()), miners=[
+        cv.MinerCommit(miner_hotkey=MINER, model_commitment=COMMITMENT, pocs={"arvo:1": b"a"}),
+        cv.MinerCommit(miner_hotkey="5Bob", model_commitment=_dg("bob"), pocs={"arvo:1": b"b"}),
+    ])
+    # the epoch completed: both miners were evaluated and both failed closed
+    assert len(results) == 2
+    assert all(not r.creditable for r in results)
+    assert all(fr.GATE_REGISTERED_BUNDLE in r.gate_failures for r in results)
+    assert store.epoch_scores(SOURCE_EPOCH) == {}
+
+
+def test_a_gate_evaluation_that_raises_outright_is_contained(tmp_path):
+    """Even a gate evaluator that raises somewhere unanticipated costs one miner."""
+    class HostileRegistry:
+        def claim_for(self, digest):
+            return object()  # not a registration: attribute access will misbehave
+
+        def is_registered_by(self, digest, hotkey):
+            return True
+
+    store = _store(tmp_path)
+    results = _run(store, cv.EmissionGatePolicy(bundle_registry=HostileRegistry()))
+    assert not results[0].creditable
+    assert store.epoch_scores(SOURCE_EPOCH) == {}
+
+
+def test_a_timezone_naive_registration_fails_that_miner_only(tmp_path):
+    """`registered_at` arrives from a published row, so it can lack an offset. That
+    used to raise `TypeError` mid-comparison and abort the epoch for every miner; an
+    unknown offset is not evidence, so it is that miner's gate failure."""
+    naive = BundleRegistry()
+    naive.register(
+        BundleRegistration(miner_hotkey=MINER, track=TRACK, bundle_digest=COMMITMENT,
+                           version="v1", registered_at=datetime(2026, 7, 20, 12, 0),
+                           signature="not-checked-here"),
+        verify_signature=False,
+    )
+    store = _store(tmp_path)
+    results = _run(store, cv.EmissionGatePolicy(bundle_registry=naive), miners=[
+        cv.MinerCommit(miner_hotkey=MINER, model_commitment=COMMITMENT, pocs={"arvo:1": b"a"}),
+        cv.MinerCommit(miner_hotkey="5Bob", model_commitment=_dg("bob"), pocs={"arvo:1": b"b"}),
+    ])
+    by_miner = {r.miner_hotkey: r for r in results}
+    assert fr.GATE_NO_CONTAMINATION in by_miner[MINER].gate_failures
+    # and the registered-bundle gate still passed for it, so only the unreadable
+    # timestamp was held against it
+    assert fr.GATE_REGISTERED_BUNDLE not in by_miner[MINER].gate_failures
+    assert len(results) == 2
+    assert store.epoch_scores(SOURCE_EPOCH) == {}
+
+
+def test_backdating_a_registration_timestamp_is_a_forgery_not_an_edit():
+    """`no_contamination` is derived from `registered_at`, so that field is reward
+    evidence and has to be inside the signed payload. It was not: the same signature
+    covered a post-draw registration and a backdated one, which defeated a gate that
+    is ON by default."""
+    late = BundleRegistration(
+        miner_hotkey=MINER, track=TRACK, bundle_digest=COMMITMENT, version="v1",
+        registered_at=NOW + timedelta(hours=1), signature="sig",
+    )
+    backdated = BundleRegistration(
+        miner_hotkey=MINER, track=TRACK, bundle_digest=COMMITMENT, version="v1",
+        registered_at=NOW - timedelta(days=1), signature="sig",
+    )
+    assert late.signing_payload() != backdated.signing_payload()
+    assert b"registered_at" in late.signing_payload()
+
+
+def test_a_backdated_registration_does_not_verify_against_its_own_signature():
+    """End to end: signing the honest timestamp then editing it is caught."""
+    from cathedral_distill.bundle_registry import ed25519_registration_verifier
+
+    signer = Ed25519PrivateKey.from_private_bytes(bytes(range(9, 41)))
+    honest = BundleRegistration(
+        miner_hotkey=MINER, track=TRACK, bundle_digest=COMMITMENT, version="v1",
+        registered_at=NOW + timedelta(hours=1),
+    )
+    import base64
+    signature = base64.b64encode(signer.sign(honest.signing_payload())).decode()
+    honest = BundleRegistration(
+        miner_hotkey=MINER, track=TRACK, bundle_digest=COMMITMENT, version="v1",
+        registered_at=NOW + timedelta(hours=1), signature=signature,
+    )
+    verifier = ed25519_registration_verifier(
+        {MINER: signer.public_key().public_bytes_raw()}
+    )
+    BundleRegistry().register(honest, signature_verifier=verifier)  # accepted as signed
+
+    forged = BundleRegistration(
+        miner_hotkey=MINER, track=TRACK, bundle_digest=COMMITMENT, version="v1",
+        registered_at=NOW - timedelta(days=1), signature=signature,
+    )
+    with pytest.raises(Exception, match="signature does not verify"):
+        BundleRegistry().register(forged, signature_verifier=verifier)
+
+
+# --------------------------------------------------------------------------- #
 # A gated-out miner costs only itself
 # --------------------------------------------------------------------------- #
 

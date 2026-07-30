@@ -130,8 +130,14 @@ class ConsumptionLedger:
         if not isinstance(token, str) or not token:
             raise ReplayError("consumption token must be a non-empty string")
         stamp = (at or datetime.now()).isoformat()
-        connection = self._connect()
+        # Opening the connection is inside the try on purpose: a connect-time
+        # failure (missing directory, permissions, locked file) is a failure to
+        # record a consumption, so it has to surface as the typed error every caller
+        # contains. Escaping as a raw sqlite3.OperationalError would defeat exactly
+        # the containment this ledger promises.
+        connection = None
         try:
+            connection = self._connect()
             connection.execute("BEGIN IMMEDIATE")  # take the write lock first
             try:
                 connection.execute(
@@ -143,22 +149,27 @@ class ConsumptionLedger:
                 connection.execute("ROLLBACK")
                 raise ReplayError(f"token already consumed: {token}") from exc
             connection.execute("COMMIT")
-        except sqlite3.DatabaseError as exc:
+        except sqlite3.Error as exc:
             # Fail closed: an unrecordable consumption must not become a credit.
             raise ReplayError(
                 f"consumption ledger unavailable, refusing to credit {token}: {exc}"
             ) from exc
         finally:
-            connection.close()
+            if connection is not None:
+                connection.close()
 
     def is_consumed(self, token: str) -> bool:
-        connection = self._connect()
+        connection = None
         try:
+            connection = self._connect()
             row = connection.execute(
                 "SELECT 1 FROM consumed_tokens WHERE token=?", (token,)
             ).fetchone()
+        except sqlite3.Error as exc:
+            raise ReplayError(f"consumption ledger unavailable: {exc}") from exc
         finally:
-            connection.close()
+            if connection is not None:
+                connection.close()
         return row is not None
 
     def size(self) -> int:
