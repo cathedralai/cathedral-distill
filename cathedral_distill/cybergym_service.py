@@ -21,7 +21,7 @@ import base64
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -415,6 +415,37 @@ class CyberGymService:
         )
 
 
+def compose_results_lane(
+    results: Sequence[MinerResult],
+    *,
+    allocation: Decimal,
+    lane_id: str = CYBERGYM_LANE,
+) -> Lane:
+    """Compose a lane straight from `run_epoch` results, refusing gated-out ones.
+
+    The durable route is `compose_scores_lane` (the store is the record of what was
+    paid). This exists because callers do compose the returned results directly, and
+    when they do, a non-creditable `MinerResult` must be refused rather than
+    silently contributing: a failed gate means the miner earns nothing, through
+    every route.
+    """
+    contributions = []
+    for result in results:
+        if not result.creditable:
+            continue
+        units = Decimal(str(result.contribution["work_units"]))
+        if units <= 0:
+            continue
+        contributions.append(
+            LaneContribution(
+                str(result.contribution["miner_hotkey"]),
+                str(result.contribution["receipt_id"]),
+                units,
+            )
+        )
+    return Lane(lane_id, allocation, contributions)
+
+
 def compose_scores_lane(
     score_store: CyberGymScoreStore,
     epoch: int,
@@ -437,4 +468,6 @@ def compose_scores_lane(
     return Lane(lane_id, allocation, contributions)
 
 
-__all__ = ["CyberGymService", "compose_scores_lane", "CYBERGYM_LANE"]
+__all__ = [
+    "CyberGymService", "compose_scores_lane", "compose_results_lane", "CYBERGYM_LANE",
+]

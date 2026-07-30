@@ -69,6 +69,11 @@ class MinerResult:
     miner_hotkey: str
     batch: Batch
     receipt: Mapping[str, object]
+    # The lane contribution, ZEROED when a gate failed. The receipt still reports
+    # what the miner scored (audit), but the contribution is what a caller composes,
+    # and it must never offer units a gate refused. A caller that composes these
+    # directly rather than reading the score store therefore cannot credit a
+    # gated-out miner either.
     contribution: Mapping[str, object]
     # Anti-gaming gates that did NOT pass on the emission path. A non-empty tuple
     # means the score was NOT persisted, so this miner earns nothing this epoch:
@@ -414,11 +419,18 @@ def run_epoch(
             )
         if not gate_failures:
             score_store.record(receipt)
+        # A gated-out miner must not be able to earn through EITHER route. The
+        # score-store route is closed by not writing the row; the direct route (a
+        # caller composing `result.contribution`) is closed by zeroing the units
+        # here, so the two routes cannot disagree about who was paid.
+        contribution = dict(cr.lane_contribution(receipt))
+        if gate_failures:
+            contribution["work_units"] = "0"
+            contribution["gate_failures"] = list(gate_failures)
         results.append(
             MinerResult(
                 miner_hotkey=miner.miner_hotkey, batch=batch, receipt=receipt,
-                contribution=cr.lane_contribution(receipt),
-                gate_failures=gate_failures,
+                contribution=contribution, gate_failures=gate_failures,
             )
         )
     return results

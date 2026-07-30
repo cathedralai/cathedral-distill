@@ -30,7 +30,11 @@ from cathedral_distill.bundle_registry import BundleRegistration, BundleRegistry
 from cathedral_distill.cybergym import Level  # noqa: E402
 from cathedral_distill.cybergym_batch import PooledTask, TaskPool  # noqa: E402
 from cathedral_distill.cybergym_scores import CyberGymScoreStore  # noqa: E402
-from cathedral_distill.cybergym_service import compose_scores_lane  # noqa: E402
+from cathedral_distill.cybergym_service import (  # noqa: E402
+    compose_results_lane,
+    compose_scores_lane,
+)
+from cathedral_distill.lane_feed import Lane, LaneContribution, compose_vector  # noqa: E402
 
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
 CUTOFF = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
@@ -242,6 +246,54 @@ def test_one_gated_miner_does_not_stop_the_others(tmp_path):
     assert store.epoch_scores(SOURCE_EPOCH) == {MINER: Decimal("8")}
     # both receipts still exist for audit; only one was paid
     assert all(r.receipt["schema"] for r in results)
+
+
+def test_a_gated_miner_earns_nothing_through_the_returned_contribution_either(tmp_path):
+    """Both routes out of run_epoch have to agree about who was paid.
+
+    Blocking the score-store write is not enough on its own: callers do compose
+    `MinerResult.contribution` directly, and that dict used to carry the full
+    positive work_units of a receipt whose gates had failed, so a direct composer
+    credited a miner the store had refused.
+    """
+    store = _store(tmp_path)
+    results = _run(store, cv.EmissionGatePolicy(bundle_registry=BundleRegistry()))
+    result = results[0]
+
+    assert set(result.gate_failures) == {fr.GATE_REGISTERED_BUNDLE, fr.GATE_NO_CONTAMINATION}
+    assert not result.creditable
+    # route 1: the durable store
+    assert store.epoch_scores(SOURCE_EPOCH) == {}
+    # route 2: the returned contribution
+    assert result.contribution["work_units"] == "0"
+    assert result.contribution["gate_failures"] == list(result.gate_failures)
+    # the receipt still records what the miner scored, for audit
+    assert result.receipt["score"]["earned_units"] == "8"
+
+    # composing the results directly refuses the gated-out miner
+    lane = compose_results_lane(results, allocation=Decimal("0.90"))
+    assert list(lane.contributions) == []
+    # and even a naive composer that ignores `creditable` cannot credit it, because
+    # the units are zero
+    naive = Lane("cathedral_cybergym", Decimal("0.90"), [
+        LaneContribution(str(r.contribution["miner_hotkey"]),
+                         str(r.contribution["receipt_id"]),
+                         Decimal(str(r.contribution["work_units"])))
+        for r in results
+    ])
+    feed = compose_vector([naive], burn_hotkey="5Burn")
+    assert feed["weights"] == []
+    assert feed["burn_snapshot"]["forced_burn_percentage"] == pytest.approx(100.0)
+
+
+def test_a_passing_miner_still_composes_through_both_routes(tmp_path):
+    store = _store(tmp_path)
+    results = _run(store, cv.EmissionGatePolicy(bundle_registry=_registry()))
+    assert results[0].contribution["work_units"] == "8"
+    assert "gate_failures" not in results[0].contribution
+    lane = compose_results_lane(results, allocation=Decimal("0.90"))
+    assert [c.miner_hotkey for c in lane.contributions] == [MINER]
+    assert store.epoch_scores(SOURCE_EPOCH) == {MINER: Decimal("8")}
 
 
 def test_a_repeated_dispatch_cannot_double_persist(tmp_path):
