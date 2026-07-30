@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cathedral SN39 — verified vulnerability discovery</title>
 <meta name="description" content="Miners' models produce proof-of-concept exploits for already-patched bugs. A validator runs each one to score it — no judge model, no self-reported number.">
+<!--
+  Live status. Point this at a running validator's GET /v1/status
+  (cathedral_distill.status) and the "Live" section below fills itself in.
+  EMPTY BY DEFAULT ON PURPOSE: with no value the page makes no external request
+  at all and the section stays hidden, so these stay self-contained static pages
+  and a down or unconfigured endpoint can never degrade one.
+-->
+<meta name="cathedral-status-endpoint" content="">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -28,7 +36,7 @@
     <a class="btn btn-primary" href="https://github.com/cathedralai/cathedral-distill">Read the docs</a>
     <a class="btn btn-ghost" href="arena.html">Mine on SN39 →</a>
   </div>
-  <p class="hero-note">Mechanism built &amp; tested — 448 passing tests, hardware-free. Corpus, transport &amp; attested verification: integration in progress.</p>
+  <p class="hero-note">Mechanism built &amp; tested — 721 passing tests, hardware-free. Corpus, transport &amp; attested verification: integration in progress.</p>
 </div></header>
 
 <!-- LOUD: the differential -->
@@ -97,6 +105,46 @@ score = Σ <span class="a">weight[level]</span> × solved
   </div>
 </div></section>
 
+<!-- LIVE: filled from a validator's GET /v1/status, hidden until it answers -->
+<section id="live" hidden><div class="wrap">
+  <div class="sec-label">Live</div>
+  <h2>This epoch, from a running validator.</h2>
+  <p class="faint" style="font-size:14px;margin-top:8px;max-width:70ch">
+    Read straight off the validator's own score store. The leaderboard below is
+    earned units for the epoch shown — the same numbers that become on-chain
+    weights. <span id="live-source"></span>
+  </p>
+
+  <div class="grid g3" style="margin-top:24px">
+    <div class="card"><div class="k" id="live-epoch">—</div>
+      <h3 style="margin-top:8px">Epoch</h3>
+      <p id="live-epoch-detail">—</p></div>
+    <div class="card"><div class="k" id="live-window">—</div>
+      <h3 style="margin-top:8px">Authorized block window</h3>
+      <p>A receipt is only valid inside this range. Outside it, a submission fails.</p></div>
+    <div class="card"><div class="k" id="live-signer">—</div>
+      <h3 style="margin-top:8px">Signing key</h3>
+      <p id="live-signer-detail">The key every receipt this epoch is signed under.</p></div>
+  </div>
+
+  <div class="grid g2" style="margin-top:18px">
+    <div class="card">
+      <h3 style="margin-top:0">Participation</h3>
+      <table class="live-table" id="live-participation"><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Earned units</h3>
+      <table class="live-table" id="live-board"><tbody></tbody></table>
+      <p class="faint" id="live-board-empty" style="font-size:13px;margin-top:10px" hidden>
+        No scoring pass has completed for this epoch yet, so nothing is scored.
+        Participation above is what moves while an epoch is open.
+      </p>
+    </div>
+  </div>
+
+  <p class="faint" style="font-size:12px;margin-top:16px" id="live-stamp"></p>
+</div></section>
+
 <!-- BUILT VS TO BUILD -->
 <section style="background:var(--bg-2)"><div class="wrap">
   <div class="sec-label">Honest status</div>
@@ -114,7 +162,7 @@ score = Σ <span class="a">weight[level]</span> × solved
         <span class="pill on">synthetic holdout</span>
         <span class="pill on">signed receipts</span>
         <span class="pill on">score store + feed + burn</span>
-        <span class="pill on">448 passing tests</span>
+        <span class="pill on">721 passing tests</span>
       </div>
     </div>
     <div>
@@ -152,6 +200,124 @@ score = Σ <span class="a">weight[level]</span> × solved
     <a href="https://github.com/cathedralai/cathedral-distill">GitHub</a>
   </div>
 </div></footer>
+
+<script>
+/* Live status. No dependencies, and nothing happens unless an endpoint is set:
+   the <meta> in <head>, or ?status=<url> for a local validator. Every value is
+   inserted as text, never as HTML — a miner hotkey is remote input. */
+(function () {
+  var meta = document.querySelector('meta[name="cathedral-status-endpoint"]');
+  var override = new URLSearchParams(location.search).get('status');
+  var endpoint = (override || (meta && meta.content) || '').trim();
+  if (!endpoint) return;
+
+  var POLL_MS = 15000, TIMEOUT_MS = 8000;
+  var section = document.getElementById('live');
+  var timer = null;
+
+  function set(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function rows(table, pairs) {
+    var body = table.querySelector('tbody');
+    body.textContent = '';
+    pairs.forEach(function (pair) {
+      var tr = document.createElement('tr');
+      var th = document.createElement('th');
+      th.textContent = pair[0];
+      var td = document.createElement('td');
+      td.textContent = pair[1];
+      tr.appendChild(th);
+      tr.appendChild(td);
+      body.appendChild(tr);
+    });
+  }
+
+  function num(value) {
+    return (value === null || value === undefined) ? '—' : String(value);
+  }
+
+  function short(key) {
+    return key.length > 16 ? key.slice(0, 8) + '…' + key.slice(-6) : key;
+  }
+
+  /* Drop the "sha256:" prefix before shortening, or the ellipsis eats the hash
+     and leaves the algorithm name — which is the part nobody needs to read. */
+  function digest(value) {
+    return short(String(value).replace(/^[a-z0-9]+:/, ''));
+  }
+
+  function render(data) {
+    if (!data || data.schema !== 'cathedral.distill.status.v1') return false;
+    var epoch = data.epoch || {};
+    if (!epoch.available) return false;
+
+    set('live-epoch', '#' + num(epoch.source_epoch));
+    var state = (data.state && data.state.available) ? data.state.state : 'unknown';
+    set('live-epoch-detail',
+        epoch.network + ' · netuid ' + num(epoch.netuid) + ' · ' + state);
+    set('live-window', num(epoch.valid_from_block) + ' → ' + num(epoch.valid_until_block));
+    set('live-signer', num(epoch.signing_key_id));
+    set('live-signer-detail', 'Validator ' + short(num(epoch.validator_hotkey)) +
+        ' · manifest ' + digest(num(epoch.manifest_digest)));
+
+    var part = data.participation || {};
+    rows(document.getElementById('live-participation'), [
+      ['Committed', num(part.committed)],
+      ['Solved, awaiting scoring', num(part.pending)],
+      ['Scored', num(part.scored)],
+      ['Unscorable', num(part.unscorable)],
+      ['Durable solves on record', num(part.durable_solves)]
+    ]);
+
+    var board = data.leaderboard || {};
+    var top = (board.available && board.top) ? board.top : [];
+    rows(document.getElementById('live-board'), top.map(function (row) {
+      return [row.rank + '. ' + short(row.miner_hotkey), row.earned_units];
+    }));
+    var empty = document.getElementById('live-board-empty');
+    if (empty) empty.hidden = top.length > 0;
+
+    var age = (data.cache && data.cache.age_secs != null)
+      ? ' · cached ' + data.cache.age_secs + 's' : '';
+    set('live-stamp', 'Validator generated this at ' + num(data.generated_at) + age +
+        '. Polled every ' + (POLL_MS / 1000) + 's.');
+    set('live-source', 'One validator, not a network-wide view.');
+    section.hidden = false;
+    return true;
+  }
+
+  function poll() {
+    var ctrl = new AbortController();
+    var bail = setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS);
+    fetch(endpoint, { signal: ctrl.signal, credentials: 'omit', cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(render)
+      .catch(function () { /* leave the section as it was; the page is still correct */ })
+      .finally(function () { clearTimeout(bail); });
+  }
+
+  function start() {
+    if (timer) return;
+    poll();
+    timer = setInterval(poll, POLL_MS);
+  }
+
+  function stop() {
+    if (!timer) return;
+    clearInterval(timer);
+    timer = null;
+  }
+
+  /* Don't poll a hidden tab: it is pure load on a validator nobody is watching. */
+  document.addEventListener('visibilitychange', function () {
+    document.hidden ? stop() : start();
+  });
+  if (!document.hidden) start();
+})();
+</script>
 
 </body>
 </html>
