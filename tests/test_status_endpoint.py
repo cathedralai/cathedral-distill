@@ -210,6 +210,21 @@ def test_the_leaderboard_truncates_and_says_so(tmp_path):
     assert payload["leaderboard"]["scored_miners"] == 1
 
 
+def test_the_corpus_grows_only_with_verified_trainable_solves(tmp_path):
+    """size() IS the product (README: "the data is the product"), so it must move
+    only on a genuinely corpus-eligible solve, and be visible before scoring."""
+    svc = _service(tmp_path)
+    before = st.build_status(svc)["corpus"]
+    assert before == {"available": True, "total_rows": 0, "this_epoch_rows": 0}
+
+    _solve(svc)  # solved + trainable trace -> corpus-eligible, before any scoring pass
+
+    after = st.build_status(svc)["corpus"]
+    assert after["available"] is True
+    assert after["total_rows"] == 1
+    assert after["this_epoch_rows"] == 1
+
+
 # --------------------------------------------------------------------------- #
 # Failing soft
 # --------------------------------------------------------------------------- #
@@ -225,6 +240,16 @@ def test_one_unreadable_store_degrades_its_section_only(tmp_path):
     assert payload["state"]["available"] is False
     assert "detail" in payload["state"]
     assert payload["leaderboard"]["available"] is False
+
+
+def test_corpus_degrades_on_its_own_when_that_store_is_unreadable(tmp_path):
+    svc = _service(tmp_path)
+    svc._corpus.close()
+
+    payload = st.build_status(svc)
+    assert payload["epoch"]["available"] is True
+    assert payload["corpus"]["available"] is False
+    assert "detail" in payload["corpus"]
 
 
 def test_an_unreadable_manifest_does_not_take_the_payload_down(tmp_path):

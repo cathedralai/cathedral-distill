@@ -19,7 +19,10 @@ needed to verify one:
 * the epoch, its state, and the authorized block window a receipt is bound to;
 * the validator hotkey, `signing_key_id` and public-key digest, because a receipt
   whose signer cannot be resolved cannot be verified by anyone;
-* participation counts and the scored leaderboard, which become on-chain weights.
+* participation counts and the scored leaderboard, which become on-chain weights;
+* the aggregated training-corpus size — the subnet's actual product, per README's
+  "the data is the product" — since `CyberGymCorpusStore` only accepts rows that
+  already passed verification, trainability, and licensing.
 
 Every section fails soft. A dashboard that goes blank because one SQLite read was
 locked mid-verify is worse than one reporting a stale section, so a section that
@@ -122,6 +125,22 @@ def _leaderboard(scores: Any, epoch: int, limit: int) -> dict[str, Any]:
     }
 
 
+def _corpus_block(corpus: Any, epoch: int) -> dict[str, Any]:
+    """The aggregated training corpus this validator has produced.
+
+    `CyberGymCorpusStore.record` only accepts verified, trainable, licensed rows
+    (see its docstring), so `size()` is not a proxy for the corpus — it IS the
+    corpus: the README's "the data is the product" claim, made checkable. Reported
+    across all epochs (the product accumulates) and for this epoch (the rate).
+    """
+    try:
+        total = corpus.size()
+        this_epoch = len(corpus.rows(source_epoch=epoch))
+    except Exception as exc:  # noqa: BLE001 - a status read never raises
+        return _unavailable(exc)
+    return {"available": True, "total_rows": total, "this_epoch_rows": this_epoch}
+
+
 def _participation(service: Any, scores: Any, solves: Any, epoch: int) -> dict[str, Any]:
     """Who is in this epoch and what stage they are at.
 
@@ -178,6 +197,7 @@ def build_status(
 
     scores = getattr(service, "_scores", None)
     solves = getattr(service, "_solves", None)
+    corpus = getattr(service, "_corpus", None)
     epoch = epoch_block.get("source_epoch")
     if epoch is None or scores is None:
         detail = (
@@ -185,13 +205,17 @@ def build_status(
             if epoch is None
             else "this service has no score store"
         )
-        for key in ("state", "participation", "leaderboard"):
+        for key in ("state", "participation", "leaderboard", "corpus"):
             payload[key] = {"available": False, "detail": detail}
         return payload
 
     payload["state"] = _state_block(scores, epoch)
     payload["participation"] = _participation(service, scores, solves, epoch)
     payload["leaderboard"] = _leaderboard(scores, epoch, leaderboard_limit)
+    payload["corpus"] = (
+        _corpus_block(corpus, epoch) if corpus is not None
+        else {"available": False, "detail": "this service has no corpus store"}
+    )
     return payload
 
 
