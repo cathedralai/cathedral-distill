@@ -36,7 +36,7 @@
     <a class="btn btn-primary" href="https://github.com/cathedralai/cathedral-distill">Read the docs</a>
     <a class="btn btn-ghost" href="arena.html">Mine on SN39 →</a>
   </div>
-  <p class="hero-note">Mechanism built &amp; tested — 764 tests, hardware-free. Corpus, transport &amp; attested verification: integration in progress.</p>
+  <p class="hero-note">Mechanism built &amp; tested — 766 tests, hardware-free. Corpus, transport &amp; attested verification: integration in progress.</p>
 </div></header>
 
 <!-- LOUD: the differential -->
@@ -110,12 +110,13 @@ score = Σ <span class="a">weight[level]</span> × solved
   <div class="sec-label">Live</div>
   <h2>This epoch, from a running validator.</h2>
   <p class="faint" style="font-size:14px;margin-top:8px;max-width:70ch">
-    Read straight off the validator's own score store. The leaderboard below is
-    earned units for the epoch shown — the same numbers that become on-chain
-    weights. <span id="live-source"></span>
+    Read straight off the validator's own stores. The leaderboard below is earned
+    units for the epoch shown — the same numbers that become on-chain weights —
+    and the training corpus is every verified, trainable, licensed solve collected
+    so far. <span id="live-source"></span>
   </p>
 
-  <div class="grid g3" style="margin-top:24px">
+  <div class="grid g4" style="margin-top:24px">
     <div class="card"><div class="k" id="live-epoch">—</div>
       <h3 style="margin-top:8px">Epoch</h3>
       <p id="live-epoch-detail">—</p></div>
@@ -125,6 +126,9 @@ score = Σ <span class="a">weight[level]</span> × solved
     <div class="card"><div class="k" id="live-signer">—</div>
       <h3 style="margin-top:8px">Signing key</h3>
       <p id="live-signer-detail">The key every receipt this epoch is signed under.</p></div>
+    <div class="card"><div class="k" id="live-corpus">—</div>
+      <h3 style="margin-top:8px">Training corpus</h3>
+      <p id="live-corpus-detail">Verified, trainable, licensed rows — the subnet's actual product.</p></div>
   </div>
 
   <div class="grid g2" style="margin-top:18px">
@@ -162,7 +166,7 @@ score = Σ <span class="a">weight[level]</span> × solved
         <span class="pill on">synthetic holdout</span>
         <span class="pill on">signed receipts</span>
         <span class="pill on">score store + feed + burn</span>
-        <span class="pill on">764 tests</span>
+        <span class="pill on">766 tests</span>
       </div>
     </div>
     <div>
@@ -262,6 +266,16 @@ score = Σ <span class="a">weight[level]</span> × solved
     set('live-signer', num(epoch.signing_key_id));
     set('live-signer-detail', 'Validator ' + short(num(epoch.validator_hotkey)) +
         ' · manifest ' + digest(num(epoch.manifest_digest)));
+
+    var corpus = data.corpus || {};
+    if (corpus.available) {
+      set('live-corpus', num(corpus.total_rows) + ' rows');
+      set('live-corpus-detail', '+' + num(corpus.this_epoch_rows) + ' this epoch · ' +
+          'every row already verified, trainable, licensed.');
+    } else {
+      set('live-corpus', '—');
+      set('live-corpus-detail', 'Verified, trainable, licensed rows — the subnet’s actual product.');
+    }
 
     var part = data.participation || {};
     rows(document.getElementById('live-participation'), [

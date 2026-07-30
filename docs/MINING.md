@@ -76,6 +76,11 @@ All JSON over HTTP; bodies bounded at 2 MiB.
 | `POST /cybergym/artifact` | `{task_id}` | `{task_id, program}` — synthetic source; real builds are pulled by `binary_digest` |
 | `POST /cybergym/submit` | a `SubmissionEnvelope` (below) | `{accepted, solved, attested, creditable, trainable, work_units, bonus, reason, …}` |
 
+Two more, anonymous and read-only — where you are in the epoch, without submitting
+anything: `GET /v1/status` (participation, leaderboard, corpus growth) and
+`GET /v1/keys` (resolve who signed a receipt). Full field reference:
+[STATUS_API.md](STATUS_API.md).
+
 ### What you submit — the envelope
 
 ```json
@@ -213,6 +218,10 @@ Every one of these is enforced, not merely discouraged:
   nothing (solving them just proves you're alive).
 - **A padded or unlicensed trace** — it fails the quality floor, no bonus.
 - **A model that scores well but is too slow to serve** — the latency gate.
+- **Re-committing to a different model mid-epoch** — abandons your own prior
+  solves for the *old* commitment (they become unscorable). This only ever
+  costs your own unscored work, never anyone else's: dispatch is caller-bound,
+  so nobody but you can trigger it against your hotkey.
 
 ---
 
