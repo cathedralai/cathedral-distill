@@ -295,9 +295,24 @@ def test_cpu_quote_verifier_threads_through_the_pipeline():
     assert d2.verdict == "PASS"
 
 
-def test_decision_for_an_unconfigured_lane_is_refused():
+def test_decision_for_an_unconfigured_lane_earns_nothing_without_aborting():
+    """An unknown lane is refused *for that decision only*.
+
+    It used to raise, which meant one mislabelled decision destroyed the whole
+    epoch's vector: every lane, every miner. The unknown lane now simply earns
+    nothing (its would-be share stays in burn) and the audit says why, while the
+    legitimate contributions in the same composition still compose.
+    """
     resolved = _resolve(burn_config(), allocation_config(_ALLOCATIONS))
+    good = itf.ReceiptDecision(LANE_DISTILL, itf.KIND_DISTILL,
+                               "receipt-sha256:" + "1" * 64, "5Good", itf.PASS, Decimal("4"))
     rogue = itf.ReceiptDecision("cathedral_unknown_lane", itf.KIND_DISTILL,
                                 "receipt-sha256:" + "0" * 64, "5X", itf.PASS, Decimal("1"))
-    with pytest.raises(itf.IntegratedFeedError, match="not in the allocation config"):
-        itf.compose_integrated(resolved, [rogue])
+    composed = itf.compose_integrated(resolved, [good, rogue])
+    by_id = {r["receipt_id"]: r for r in composed["audit"]["receipts"]}
+    assert by_id[rogue.receipt_id]["credited"] is False
+    assert "not in the allocation config" in by_id[rogue.receipt_id]["drop_reason"]
+    assert by_id[rogue.receipt_id]["final_weight"] == 0.0
+    assert by_id[good.receipt_id]["credited"] is True
+    assert "5X" not in {w["miner_hotkey"] for w in composed["feed"]["weights"]}
+    assert "5Good" in {w["miner_hotkey"] for w in composed["feed"]["weights"]}

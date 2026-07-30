@@ -37,7 +37,10 @@ transport, and nothing else changes.
      disclosure feed.
    - `cybergym_synthetic.SyntheticTaskSource` — bugs **generated from the nonce**,
      so a challenge did not exist in *any* public dataset until the nonce created
-     it: no lookup, no disclosure lag, unlimited supply.
+     it: no lookup, no disclosure lag, unlimited supply. **Not rewardable today**:
+     the delivered artifact renders the magic guard and the buffer size in
+     plaintext, so a no-model regex extractor solves 8/8 level-0 tasks. Generated
+     tasks are dispatched and graded, and earn nothing (see step 6).
    - `cybergym_mix.MixedTaskSource` — a **deterministic weighted blend** of the
      above (e.g. 75% generated + 25% recent-real), apportioned and sub-nonced from
      the batch nonce so two validators still draw the byte-identical mixed batch.
@@ -71,10 +74,35 @@ transport, and nothing else changes.
    rewardable `work_units` from `per_level_solved × level_weights`, so the earned
    units are checkable from the receipt alone before scoring.
 
-6. **Persist the verified score.** `cybergym_scores.CyberGymScoreStore.record`
-   writes the level-weighted earned units to the `cybergym_scores` table keyed by
-   `(miner_hotkey, epoch)`, transactionally and idempotently; a conflicting
-   re-score is refused rather than silently overwriting a published frontier.
+6. **Gate, then persist the verified score.** The write to `cybergym_scores` *is*
+   the reward, so the anti-gaming gates run immediately before it, in `run_epoch`
+   (`EmissionGatePolicy` / `evaluate_emission_gates`). A gate evaluated anywhere
+   else, in `derive_cybergym_candidate` or in `Frontier.submit`, is not on this path
+   and does not stop a payment. Required by default and fail-closed:
+   `registered_bundle` (the commitment is registered *by this miner*) and
+   `no_contamination` (the registration pre-dates the draw). Configurable and OFF by
+   default, each an explicit owner decision: `reproduced` (needs a peer validator's
+   receipt for the same `batch_id`/`items_root` under a different validator hotkey,
+   which a single-validator deployment cannot produce) and `independent_evaluator`
+   (structurally unsatisfiable while the operator *is* the evaluator). A miner
+   failing any required gate is still scored, signed and returned for audit, but its
+   row is not written, so it earns nothing and its share burns. `run_epoch` and
+   `CyberGymService` refuse to run without a gate decision; `gates_required=False`
+   is the dev opt-out and warns loudly.
+
+   `CyberGymScoreStore.record` then writes the level-weighted earned units keyed by
+   `(miner_hotkey, epoch)`, transactionally and idempotently; a conflicting re-score
+   is refused rather than silently overwriting a published frontier.
+
+   **Synthetic tasks are graded but NOT rewarded** (`credit_synthetic_tasks=False`,
+   the default). `cybergym_synthetic.render_source` prints the 4-byte magic guard and
+   the exact `char buf[N]` size in plaintext, and the artifact route serves that
+   source at every level including level 0, so a no-model extractor with two regexes
+   solves 8/8 level-0 tasks (measured). Their solves are excluded from the scored
+   submissions, so the receipt itself reports zero units for them.
+   `credit_synthetic_tasks=True` is an explicit unsafe-for-rewards override, and it
+   changes the derived `items_root`, so every validator must agree on it exactly as
+   they agree on `level_weights`.
 
 7. **Compose the feed.** `cybergym_receipt.lane_contribution` yields
    `(miner_hotkey, receipt_id, work_units)`, which `lane_feed.compose_vector`
@@ -190,13 +218,32 @@ routes, and `cybergym_service.compose_scores_lane` turns the persisted
 `cybergym_scores` into a `lane_feed` contribution. The whole loop is exercised over
 a live HTTP server against the injected crash backend in `tests/test_cybergym_service.py`.
 
-The **task-source layer** is also complete and un-cheatable by construction: the
-nonce-seeded `SyntheticTaskSource` is wired into the live service
-(`tests/test_cybergym_synthetic_service.py`), and `cybergym_mix` adds the
-deterministic weighted blend + the off-reward public-canary channel
-(`tests/test_cybergym_mix.py`), so a validator can run generated + recent-real in a
-configured ratio and probe liveness on public tasks without ever letting a
-lookup-farmable task earn a reward.
+The **task-source layer** is also complete: the nonce-seeded `SyntheticTaskSource`
+is wired into the live service (`tests/test_cybergym_synthetic_service.py`), and
+`cybergym_mix` adds the deterministic weighted blend + the off-reward public-canary
+channel (`tests/test_cybergym_mix.py`), so a validator can run generated +
+recent-real in a configured ratio and probe liveness on public tasks without ever
+letting a lookup-farmable task earn a reward.
+
+> **The generated source is not yet "un-cheatable" in the sense that matters for
+> reward.** Its answer is absent from every public dataset, which was the claim, but
+> it is present in the artifact the validator itself delivers: the rendered
+> pseudo-C states the magic guard and the buffer size, so the task is solvable with
+> two regexes and no model (8/8 at level 0, `tests/test_cybergym_synthetic_reward.py`).
+> Generated tasks are therefore **non-rewarding by default**. Closing the oracle
+> (delivering a compiled artifact, or a source that does not state the trigger
+> parameters) is what would make them rewardable, and that is tracked, not done.
+
+**Crash recovery.** Accepted solves are written through to
+`cybergym_scores.CyberGymSolveStore` as they are accepted and rehydrated at
+construction, so a restart mid-epoch resumes with the same scoring input and scores
+byte-identically (`run_epoch` re-draws each batch from the chain-anchored nonce, so
+the commitment plus the PoC bytes are the whole input). A running service requires
+the store. Where recovery is impossible, `compose_lane` **refuses to publish** and
+names the miners it cannot account for, rather than composing an empty lane that is
+indistinguishable from an epoch nobody solved. Dispatch messages are still
+in-memory: after a restart a miner re-requests its batch (same commitment, same
+nonce, same batch) before it can submit again.
 
 **Tracked** (needs infrastructure or a cross-repo decision, not local code): the
 real vul/fix binary backend + the ~130 GB CyberGym dataset (plugs in behind the

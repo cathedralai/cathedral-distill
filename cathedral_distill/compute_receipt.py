@@ -180,6 +180,12 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
         dr.digest_field(channel["binding_digest"], "channel.binding_digest")
         if str(channel["status"]) not in ("passed", "failed", "unknown"):
             raise ComputeReceiptError("channel status is invalid")
+        # The confidential channel must have verified. The `channel` assurance
+        # claim below is checked too, but the raw status is the field the issuer
+        # sets from the actual channel binding, and a receipt that reports a failed
+        # channel is not evidence of confidential work whatever its claims say.
+        if str(channel["status"]) != "passed":
+            raise ComputeReceiptError("channel.status must be 'passed' for a creditable receipt")
 
         work = dr.exact_keys(doc["work"], dr.WORK_KEYS, "work")
         dr.digest_field(work["manifest_digest"], "work.manifest_digest")
@@ -267,12 +273,30 @@ def verify_receipt(
         # 4. Policy gating (when the validator supplies the signed-registry policy).
         if allowed_measurements is not None and doc["measurement"] not in allowed_measurements:
             raise ComputeReceiptError("measurement is not admitted by policy")
-        if allowed_tcb_statuses is not None and doc["tcb"]["status"] not in allowed_tcb_statuses:
-            raise ComputeReceiptError("tcb.status is not admitted by policy")
-        if allowed_advisories is not None and not set(doc["tcb"]["advisory_ids"]).issubset(
-            allowed_advisories
-        ):
-            raise ComputeReceiptError("tcb advisories are not admitted by policy")
+        # `status` and `advisory_ids` exist only in the Intel TDX TCB shape. The
+        # AMD SEV-SNP shape (tee_type/SVNs/reported_tcb) carries neither, so a
+        # direct index raises KeyError, which is NOT a ComputeReceiptError and
+        # therefore escapes every caller's `except`, aborting the whole
+        # composition instead of failing this one receipt. A policy the receipt's
+        # TCB shape cannot express must fail CLOSED, not crash.
+        if allowed_tcb_statuses is not None:
+            tcb_status = doc["tcb"].get("status")
+            if tcb_status is None:
+                raise ComputeReceiptError(
+                    "tcb.status policy cannot be evaluated for this TCB shape "
+                    f"(tee_type={doc['tcb'].get('tee_type', 'unknown')!r}); refusing to admit"
+                )
+            if tcb_status not in allowed_tcb_statuses:
+                raise ComputeReceiptError("tcb.status is not admitted by policy")
+        if allowed_advisories is not None:
+            advisories = doc["tcb"].get("advisory_ids")
+            if advisories is None:
+                raise ComputeReceiptError(
+                    "tcb.advisory_ids policy cannot be evaluated for this TCB shape "
+                    f"(tee_type={doc['tcb'].get('tee_type', 'unknown')!r}); refusing to admit"
+                )
+            if not set(advisories).issubset(allowed_advisories):
+                raise ComputeReceiptError("tcb advisories are not admitted by policy")
 
         # 5. Replay protection: bound to the authorized source epoch.
         if int(doc["source_epoch"]) != int(source_epoch):
@@ -304,6 +328,14 @@ def verify_receipt(
                 "tcb": doc["tcb"],
                 "platform_pseudonym": doc["platform_pseudonym"],
                 "policy_registry_digest": doc["policy_registry_digest"],
+                # Receipt identity, so an injected verifier can bind the raw quote
+                # to THIS receipt (report_data / nonce binding) instead of merely
+                # checking that some valid quote exists. Additive: existing
+                # verifiers read the keys they know and ignore these.
+                "receipt_id": doc["receipt_id"],
+                "subject_hotkey": doc["subject_hotkey"],
+                "source_epoch": doc["source_epoch"],
+                "epoch_id": doc["epoch_id"],
             }
             try:
                 ok = cpu_quote_verifier(evidence)
@@ -326,8 +358,27 @@ def verify_receipt(
                 raise ComputeReceiptError(
                     "a confidential-GPU receipt requires a GPU attestation verifier"
                 )
+            # The GPU block alone carries no receipt identity, so a verifier that
+            # only sees `gpu` cannot tell two receipts apart: one physical GPU and
+            # one genuine NRAS token can back N different hotkeys, because the
+            # only cross-check (`bound_measurement == measurement`) compares two
+            # fields the SAME signer controls. Hand the verifier the receipt
+            # identity so it can enforce GPU<->identity (anti-Sybil) binding and
+            # nonce/session freshness against the raw attestation report.
+            gpu_evidence = dict(gpu)
+            gpu_evidence.update(
+                {
+                    "receipt_id": doc["receipt_id"],
+                    "subject_hotkey": doc["subject_hotkey"],
+                    "source_epoch": doc["source_epoch"],
+                    "epoch_id": doc["epoch_id"],
+                    "cpu_tee": doc["platform"]["cpu_tee"],
+                    "cpu_measurement": doc["measurement"],
+                    "platform_pseudonym": doc["platform_pseudonym"],
+                }
+            )
             try:
-                ok = gpu_attestation_verifier(gpu)
+                ok = gpu_attestation_verifier(gpu_evidence)
             except Exception as exc:
                 raise ComputeReceiptError(f"GPU attestation verifier failed: {exc}") from exc
             if ok is not True:

@@ -44,20 +44,23 @@ def _chain(current_block=6_000_100, source_epoch=SOURCE_EPOCH):
 
 def test_distill_receipt_maps_to_admit():
     a = adm.verify_admission(adm.KIND_DISTILL, FX.distill_receipt(passed=28, graded=32),
-                             lane="distill", key_registry=FX.registry, chain=_chain())
+                             lane="distill", key_registry=FX.registry, chain=_chain(),
+                             consumption_ledger=adm.NO_REPLAY_LEDGER)
     assert a.verdict == adm.ADMIT and a.work_units == Decimal(28) and a.creditable
 
 
 def test_gpu_without_attestation_verifier_is_not_proven():
     a = adm.verify_admission(adm.KIND_COMPUTE_GPU, FX.gpu_receipt(),
-                             lane="compute", key_registry=FX.registry, chain=_chain())
+                             lane="compute", key_registry=FX.registry, chain=_chain(),
+                             consumption_ledger=adm.NO_REPLAY_LEDGER)
     assert a.verdict == adm.NOT_PROVEN and not a.creditable
 
 
 def test_epoch_mismatch_maps_to_reject():
     a = adm.verify_admission(adm.KIND_DISTILL, FX.distill_receipt(),
                              lane="distill", key_registry=FX.registry,
-                             chain=_chain(source_epoch=SOURCE_EPOCH + 1))
+                             chain=_chain(source_epoch=SOURCE_EPOCH + 1),
+                             consumption_ledger=adm.NO_REPLAY_LEDGER)
     assert a.verdict == adm.REJECT
 
 
@@ -94,13 +97,15 @@ def _cybergym_receipt():
 
 def test_cybergym_admits_inside_the_block_window():
     a = adm.verify_admission(adm.KIND_CYBERGYM, _cybergym_receipt(), lane="cybergym",
-                             key_registry=_CYBER_REG, chain=_chain(current_block=200))
+                             key_registry=_CYBER_REG, chain=_chain(current_block=200),
+                             consumption_ledger=adm.NO_REPLAY_LEDGER)
     assert a.verdict == adm.ADMIT and a.work_units > 0
 
 
 def test_cybergym_rejected_outside_the_block_window():
     a = adm.verify_admission(adm.KIND_CYBERGYM, _cybergym_receipt(), lane="cybergym",
-                             key_registry=_CYBER_REG, chain=_chain(current_block=999))
+                             key_registry=_CYBER_REG, chain=_chain(current_block=999),
+                             consumption_ledger=adm.NO_REPLAY_LEDGER)
     assert a.verdict == adm.REJECT and "outside" in a.detail
 
 
@@ -153,7 +158,7 @@ def _eval_receipt(*, attestation_kind="polaris_tdx", authorize=True, auth_over=N
 
 
 def _admit_eval(receipt, *, attestation_verified=True, current_block=6_000_100, at=_AUTH_AT,
-                ledger=None):
+                ledger=adm.NO_REPLAY_LEDGER):
     return adm.verify_admission(adm.KIND_EVAL, receipt, lane="eval", key_registry=_EVAL_REG,
                                 chain=_chain(current_block=current_block),
                                 attestation_verified=attestation_verified,
@@ -220,8 +225,8 @@ def test_eval_not_proven_without_authorization_resolve_time():
     assert a.verdict == adm.NOT_PROVEN
 
 
-def test_eval_replay_is_consumed_once():
-    ledger = ConsumptionLedger()
+def test_eval_replay_is_consumed_once(tmp_path):
+    ledger = ConsumptionLedger(str(tmp_path / "ledger.sqlite"))
     first = _admit_eval(_eval_receipt(), ledger=ledger)
     second = _admit_eval(_eval_receipt(), ledger=ledger)
     assert first.verdict == adm.ADMIT and second.verdict == adm.REJECT
@@ -229,4 +234,67 @@ def test_eval_replay_is_consumed_once():
 
 def test_unknown_kind_fails_closed():
     with pytest.raises(adm.AdmissionError):
-        adm.verify_admission("mystery", {}, lane="x", key_registry=FX.registry, chain=_chain())
+        adm.verify_admission("mystery", {}, lane="x", key_registry=FX.registry,
+                             chain=_chain(), consumption_ledger=adm.NO_REPLAY_LEDGER)
+
+
+# --------------------------------------------------------------------------- #
+# Consumption ordering: a rejected submission must not burn the one-time token
+# --------------------------------------------------------------------------- #
+
+def test_a_rejected_submission_leaves_the_receipt_unconsumed(tmp_path):
+    """Nothing is consumed until every non-mutating gate has passed.
+
+    The window gate used to be applied AFTER the typed verifier had already
+    consumed `receipt_id`, so anyone could take a signed CyberGym receipt,
+    submit it at a block outside its authorized window, and burn the receipt's
+    one-time token. The legitimate in-window submission then had nothing left to
+    consume and was rejected as a replay: a denial-of-reward with no forgery
+    required. The rejection must leave the token untouched.
+    """
+    ledger = ConsumptionLedger(str(tmp_path / "ledger.sqlite"))
+    receipt = _cybergym_receipt()
+
+    early = adm.verify_admission(
+        adm.KIND_CYBERGYM, receipt, lane="cybergym", key_registry=_CYBER_REG,
+        chain=_chain(current_block=99),  # one block BEFORE valid_from_block=100
+        consumption_ledger=ledger,
+    )
+    assert early.verdict == adm.REJECT
+    assert ledger.size() == 0
+    assert not ledger.is_consumed(str(receipt["receipt_id"]))
+
+    # the legitimate in-window submission of the SAME receipt still admits
+    admitted = adm.verify_admission(
+        adm.KIND_CYBERGYM, receipt, lane="cybergym", key_registry=_CYBER_REG,
+        chain=_chain(current_block=200), consumption_ledger=ledger,
+    )
+    assert admitted.verdict == adm.ADMIT and admitted.work_units > 0
+    assert ledger.is_consumed(str(receipt["receipt_id"]))
+
+    # and only then is a resubmission a replay
+    replay = adm.verify_admission(
+        adm.KIND_CYBERGYM, receipt, lane="cybergym", key_registry=_CYBER_REG,
+        chain=_chain(current_block=201), consumption_ledger=ledger,
+    )
+    assert replay.verdict == adm.REJECT and "already consumed" in replay.detail
+
+
+def test_a_forged_signature_leaves_the_receipt_unconsumed(tmp_path):
+    ledger = ConsumptionLedger(str(tmp_path / "ledger.sqlite"))
+    forged = dict(_cybergym_receipt())
+    forged["signature"] = dict(forged["signature"])
+    forged["signature"]["value_base64"] = "A" * len(forged["signature"]["value_base64"])
+    rejected = adm.verify_admission(
+        adm.KIND_CYBERGYM, forged, lane="cybergym", key_registry=_CYBER_REG,
+        chain=_chain(current_block=200), consumption_ledger=ledger,
+    )
+    assert rejected.verdict == adm.REJECT
+    assert ledger.size() == 0
+
+
+def test_admission_requires_an_explicit_replay_decision():
+    with pytest.raises(adm.AdmissionError, match="explicit replay decision"):
+        adm.verify_admission(adm.KIND_DISTILL, FX.distill_receipt(), lane="distill",
+                             key_registry=FX.registry, chain=_chain(),
+                             consumption_ledger=None)

@@ -21,6 +21,19 @@ verifiers (`integrated_feed.verify_lane_receipt`), so each check lives in exactl
 one place; this module owns the cross-cutting authorization and finalized-chain
 gates and folds them into a single decision. Everything fails closed: evidence
 that cannot be checked is `NOT_PROVEN`, never a silent `ADMIT`.
+
+Two ordering rules this module has to respect, because it is the caller that
+decides when the irreversible step happens:
+
+  * **A replay decision is explicit.** `consumption_ledger` is a required
+    argument: a `ConsumptionLedger`, or the typed `NO_REPLAY_LEDGER` opt-out.
+    Replay protection is not something you can lose by forgetting a keyword.
+  * **Nothing is consumed until every non-mutating gate has passed.** The
+    finalized block window is pushed DOWN into the typed verifier (which checks it
+    before it consumes) instead of being checked here afterwards. Consuming first
+    and checking the window second let an attacker submit a receipt outside its
+    window, burn its one-time token, and leave the legitimate in-window
+    submission with nothing left to consume.
 """
 from __future__ import annotations
 
@@ -31,6 +44,7 @@ from typing import Any, Callable, Mapping
 
 from cathedral_distill import eval_receipt as _eval
 from cathedral_distill import integrated_feed as _feed
+from cathedral_distill.consumption_ledger import NO_REPLAY_LEDGER
 
 # Admission verdicts (aligned with the feed's PASS/FAIL/NOT_PROVEN).
 ADMIT = "ADMIT"
@@ -106,6 +120,9 @@ def verify_admission(
     lane: str,
     key_registry: Any,
     chain: ChainContext,
+    # (4) registry / bundle state + replay. Required: a ConsumptionLedger, or the
+    # explicit NO_REPLAY_LEDGER opt-out. Never an implicit default.
+    consumption_ledger: Any,
     # (2) raw hardware evidence — injected verifiers / results, never caller booleans
     gpu_attestation_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
     cpu_quote_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
@@ -113,23 +130,27 @@ def verify_admission(
     # (3) signed authorization — its authority key registry (defaults to key_registry)
     authorization_key_registry: Any = None,
     authorization_at: datetime | None = None,
-    # (4) registry / bundle state + replay
-    consumption_ledger: Any = None,
     allowed_measurements: frozenset[str] | set[str] | None = None,
     allowed_tcb_statuses: frozenset[str] | set[str] | None = None,
     allowed_advisories: frozenset[str] | set[str] | None = None,
 ) -> Admission:
     """Verify one receipt against all five inputs and return its admission decision.
 
-    Compute/Distill/CyberGym delegate their receipt-body, hardware, and replay
-    checks to the typed verifier, then have the finalized block window enforced
-    here. Eval additionally requires a verified evaluator authorization and an
-    injected attestation result. Only `ADMIT` carries work units.
+    Compute/Distill/CyberGym delegate their receipt-body, hardware, block-window
+    and replay checks to the typed verifier (which orders consumption last). Eval
+    additionally requires a verified evaluator authorization and an injected
+    attestation result. Only `ADMIT` carries work units.
     """
     if kind not in _KINDS:
         raise AdmissionError(f"unknown admission kind {kind!r}")
     if not isinstance(chain, ChainContext):
         raise AdmissionError("chain must be a ChainContext")
+    if consumption_ledger is None:
+        raise AdmissionError(
+            "verify_admission requires an explicit replay decision: pass a "
+            "ConsumptionLedger, or consumption_ledger=NO_REPLAY_LEDGER to accept no "
+            "replay protection"
+        )
 
     if kind == KIND_EVAL:
         return _admit_eval(
@@ -139,10 +160,17 @@ def verify_admission(
             authorization_at=authorization_at, consumption_ledger=consumption_ledger,
         )
 
-    # (1)+(2)+(4): the typed verifier owns receipt body, hardware quote, and replay.
+    # (1)+(2)+(4)+(5): the typed verifier owns receipt body, hardware quote, the
+    # finalized block window, and replay, in that order, so the window is a gate
+    # BEFORE the ledger is touched. `current_block` must be passed for that to be
+    # true: without it the verifier consumed the token and the window was checked
+    # here afterwards, so a receipt submitted outside its window still burned its
+    # own one-time token and the legitimate in-window submission had nothing left
+    # to consume.
     decision = _feed.verify_lane_receipt(
         kind, receipt, lane=lane, key_registry=key_registry,
         source_epoch=chain.source_epoch, now_iso=chain.now_iso,
+        current_block=chain.current_block,
         gpu_attestation_verifier=gpu_attestation_verifier,
         cpu_quote_verifier=cpu_quote_verifier, consumption_ledger=consumption_ledger,
         allowed_measurements=allowed_measurements,
@@ -154,7 +182,9 @@ def verify_admission(
         work_units=decision.work_units, detail=decision.detail,
     )
 
-    # (5) finalized chain context: an admitted windowed receipt must cover this block.
+    # (5) again, belt and braces: the window is already enforced above for the
+    # kinds whose verifier reads it, and re-checking a windowed receipt here costs
+    # nothing and covers a kind whose verifier does not.
     if adm.verdict == ADMIT and kind in _BLOCK_WINDOW_KINDS:
         first, last = _block_window(receipt)
         if not (first <= chain.current_block < last):
@@ -215,8 +245,11 @@ def _admit_eval(
     except _eval.EvalReceiptError as exc:
         return reject(str(exc))
 
-    # (4) replay: consume the eval id exactly once.
-    if consumption_ledger is not None:
+    # (4) replay: consume the eval id exactly once, LAST, after the receipt body,
+    # the injected attestation result, and the signed authorization (which carries
+    # the finalized block window) have all passed, so a rejected submission never
+    # burns the token the legitimate one needs.
+    if consumption_ledger is not None and consumption_ledger is not NO_REPLAY_LEDGER:
         from cathedral_distill.consumption_ledger import ReplayError
 
         try:
@@ -225,13 +258,17 @@ def _admit_eval(
             )
         except ReplayError as exc:
             return reject(str(exc))
+        except Exception as exc:  # noqa: BLE001 - one receipt's failure, not the loop's
+            # An unusable ledger must reject THIS submission, not abort an admission
+            # loop over every receipt. Fail closed, contained, and named in the detail.
+            return reject(f"replay ledger failed: {type(exc).__name__}: {exc}")
 
     work_units = Decimal(str(doc["score"]["work_units"]))
     return Admission(KIND_EVAL, lane, str(doc["receipt_id"]), miner, ADMIT, work_units, "verified")
 
 
 __all__ = [
-    "ADMIT", "REJECT", "NOT_PROVEN",
+    "ADMIT", "REJECT", "NOT_PROVEN", "NO_REPLAY_LEDGER",
     "KIND_COMPUTE_CPU", "KIND_COMPUTE_GPU", "KIND_DISTILL", "KIND_CYBERGYM", "KIND_EVAL",
     "AdmissionError", "ChainContext", "Admission", "verify_admission",
 ]

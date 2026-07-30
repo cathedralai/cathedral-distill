@@ -250,11 +250,21 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
     _digest(channel["binding_digest"], "channel.binding_digest")
     if str(channel["status"]) not in ("passed", "failed", "unknown"):
         raise DistillReceiptError("channel status is invalid")
+    # A confidential channel that did not verify is not a confidential channel. The
+    # status was previously only checked against the vocabulary, so a correctly
+    # signed receipt with channel.status='failed' still credited a perfect score.
+    if str(channel["status"]) != "passed":
+        raise DistillReceiptError("channel.status must be 'passed' for a creditable receipt")
 
     work = _exact_keys(doc["work"], _WORK_KEYS, "work")
     _digest(work["manifest_digest"], "work.manifest_digest")
     _digest(work["result_digest"], "work.result_digest")
     work_units = _decimal(work["work_units"], "work.work_units")
+    # The evaluation must have SUCCEEDED. Compute has always required this; the
+    # Distill lane did not, despite the docstring claiming parity, so a receipt
+    # that recorded a failed or degraded evaluation was credited in full.
+    if str(work["status"]) != "passed":
+        raise DistillReceiptError("work.status must be 'passed' for a creditable receipt")
 
     assurance = _exact_keys(doc["assurance"], frozenset({"schema", "claims"}), "assurance")
     if assurance["schema"] != ASSURANCE_SCHEMA:
@@ -263,9 +273,12 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
     for name, claim in claims.items():
         if str(claim.get("status")) not in ("passed", "failed", "unknown"):
             raise DistillReceiptError(f"assurance claim {name} has an invalid status")
-    # A creditable receipt asserts hardware and software actually verified — the
-    # same requirement Compute's KEY_RELEASE/score-eligibility policies enforce.
-    for required in ("hardware", "software"):
+    # A creditable receipt asserts the confidential channel, the hardware, the
+    # software, AND the work itself actually verified: the exact set
+    # `compute_receipt.validate_structure` requires. Gating only hardware and
+    # software meant a receipt could carry a FAILED channel or work claim and
+    # still be admitted as verified work.
+    for required in ("channel", "hardware", "software", "work"):
         if str(claims[required].get("status")) != "passed":
             raise DistillReceiptError(f"assurance {required} claim must be passed")
 

@@ -210,7 +210,14 @@ def _service(tmp_path, fake):
         corpus_store=CyberGymCorpusStore(str(tmp_path / "corpus.sqlite")),
         score_store=CyberGymScoreStore(str(tmp_path / "scores.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
-        batch_size=1, cutoff=None, as_of=NOW, attestation_required=False)
+        batch_size=1, cutoff=None, as_of=NOW, attestation_required=False,
+        # These tests exercise the reproduce backend: not restart durability (they
+        # never restart the service) and not the anti-gaming gates (there is no
+        # bundle registry here). Both are now required precisely so that a real
+        # deployment cannot lose accepted solves, or pay an unregistered
+        # commitment, by omission. A dev/test path therefore has to say in as many
+        # words what it is giving up.
+        solve_durability_required=False, gates_required=False)
 
 
 def _trace(task_id, poc_sha):

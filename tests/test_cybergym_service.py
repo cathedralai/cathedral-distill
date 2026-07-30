@@ -28,7 +28,7 @@ from cathedral_distill import cybergym_http as chttp  # noqa: E402
 from cathedral_distill import lane_feed as lf  # noqa: E402
 from cathedral_distill.cybergym_holdout import HoldoutError, load_holdout  # noqa: E402
 from cathedral_distill.cybergym_protocol import CyberGymCorpusStore, ProtocolError, SubmissionEnvelope  # noqa: E402
-from cathedral_distill.cybergym_scores import CyberGymScoreStore  # noqa: E402
+from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore  # noqa: E402
 from cathedral_distill.cybergym_service import CyberGymService  # noqa: E402
 from cathedral_distill.cybergym_validator import ChainContext  # noqa: E402
 from cathedral_distill.cybergym_verifier import poc_digest  # noqa: E402
@@ -75,8 +75,10 @@ def _service(tmp_path, solved=("arvo:1",)):
         backend=_backend(set(solved)),
         corpus_store=CyberGymCorpusStore(str(tmp_path / "corpus.sqlite")),
         score_store=CyberGymScoreStore(str(tmp_path / "scores.sqlite")),
+        solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
         batch_size=2, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
+        gates_required=False,
     )
 
 

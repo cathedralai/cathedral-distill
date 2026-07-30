@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cathedral_distill import lane_feed as lf  # noqa: E402
 from cathedral_distill.cybergym_protocol import CyberGymCorpusStore, ProtocolError, SubmissionEnvelope  # noqa: E402
-from cathedral_distill.cybergym_scores import CyberGymScoreStore  # noqa: E402
+from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore  # noqa: E402
 from cathedral_distill.cybergym_service import CyberGymService  # noqa: E402
 from cathedral_distill.cybergym_synthetic import SyntheticTaskSource, synthetic_holdout  # noqa: E402
 from cathedral_distill.cybergym_validator import ChainContext  # noqa: E402
@@ -51,15 +51,17 @@ def _chain(*, source_epoch: int = SOURCE_EPOCH, block: int = 100, block_hash: st
                         source_epoch=source_epoch, valid_from_block=block, valid_until_block=block + 360)
 
 
-def _service(tmp_path, *, batch_size: int = 2, chain=None):
+def _service(tmp_path, *, batch_size: int = 2, chain=None, credit_synthetic_tasks: bool = False):
     holdout, backend = synthetic_holdout()
     return CyberGymService(
         holdout, chain or _chain(),
         backend=backend,
         corpus_store=CyberGymCorpusStore(str(tmp_path / "corpus.sqlite")),
         score_store=CyberGymScoreStore(str(tmp_path / "scores.sqlite")),
+        solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
         batch_size=batch_size, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
+        gates_required=False, credit_synthetic_tasks=credit_synthetic_tasks,
     )
 
 
@@ -101,7 +103,11 @@ def _envelope(dispatch_msg, task_id, poc_bytes, *, miner="5Miner"):
 # --------------------------------------------------------------------------- #
 
 def test_synthetic_dispatch_submit_score_compose_end_to_end(tmp_path):
-    svc = _service(tmp_path)
+    # credit_synthetic_tasks=True is the explicit unsafe-for-rewards override; it is
+    # what this test needs, because it exercises the full synthetic loop THROUGH the
+    # reward path. The default (synthetic earns nothing) is pinned in
+    # tests/test_cybergym_synthetic_reward.py.
+    svc = _service(tmp_path, credit_synthetic_tasks=True)
     d = svc.dispatch_for("5Miner", MODEL)
     assert len(d.tasks) == 2
     # level 0 (the batch's first task, per generate_holdout's level cycling) is blind
@@ -195,13 +201,25 @@ def test_artifact_delivered_over_the_http_wire(tmp_path):
 def test_artifact_is_solvable_blind_end_to_end(tmp_path):
     # The gap this closes: a level-0 (blind) task, unsolvable over the wire before
     # because no program was delivered, is now solvable from the artifact alone.
-    svc = _service(tmp_path)
+    # Scored with the explicit override, because the wire response now reports the
+    # units the epoch will actually pay, and a synthetic task pays zero by default
+    # (tests/test_cybergym_synthetic_reward.py pins that).
+    svc = _service(tmp_path, credit_synthetic_tasks=True)
     d = svc.dispatch_for("5Miner", MODEL)
     l0 = next(t for t in d.tasks if t.level == 0)
     program = svc.artifact_for(l0.task_id)                   # fetched, no hint
     poc = _craft_overflow(program)
     outcome = svc.submit(_envelope(d, l0.task_id, poc))
     assert outcome.solved and outcome.work_units == Decimal("8")  # level-0 weight
+
+    # and without the override the wire agrees with the emission decision
+    (tmp_path / "unpaid").mkdir(exist_ok=True)
+    unpaid = _service(tmp_path / "unpaid", credit_synthetic_tasks=False)
+    d2 = unpaid.dispatch_for("5Miner", MODEL)
+    l0b = next(t for t in d2.tasks if t.level == 0)
+    out2 = unpaid.submit(_envelope(d2, l0b.task_id, _craft_overflow(unpaid.artifact_for(l0b.task_id))))
+    assert out2.solved and out2.work_units == Decimal("0")
+    assert "non_rewardable_source:synthetic" in out2.reason
 
 
 def test_synthetic_cheater_with_a_looked_up_poc_does_not_solve(tmp_path):

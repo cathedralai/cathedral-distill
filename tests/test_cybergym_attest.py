@@ -251,21 +251,24 @@ def test_swapped_trace_earns_zero():
     assert out.solved and not out.attested and out.work_units == Decimal(0)
 
 
-def test_service_requires_attestation_policy_by_default():
+def test_service_requires_attestation_policy_by_default(tmp_path):
     """Fail-closed: the stateful service refuses to start without a policy unless
     the operator explicitly opts out (a forgotten kwarg must not credit unattested)."""
     from cathedral_distill.cybergym_holdout import Holdout
-    from cathedral_distill.cybergym_scores import CyberGymScoreStore
+    from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore
     from cathedral_distill.cybergym_protocol import CyberGymCorpusStore, ProtocolError
     from cathedral_distill.cybergym_service import CyberGymService
     from cathedral_distill.cybergym_validator import ChainContext
     chain = ChainContext(block=1, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
                          source_epoch=11, valid_from_block=1, valid_until_block=999)
     common = dict(backend=lambda *a: 0, corpus_store=CyberGymCorpusStore(":memory:"),
-                  score_store=CyberGymScoreStore(":memory:"), validator_hotkey="5V",
+                  score_store=CyberGymScoreStore(":memory:"),
+                  solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
+                  validator_hotkey="5V",
                   private_key=Ed25519PrivateKey.from_private_bytes(bytes(range(32))),
-                  signing_key_id="cybergym-1", batch_size=1, cutoff=None, as_of=None)
-    with pytest.raises(ProtocolError):                    # no policy + default required -> refuse
+                  signing_key_id="cybergym-1", batch_size=1, cutoff=None, as_of=None,
+                  gates_required=False)
+    with pytest.raises(ProtocolError, match="attestation policy"):  # no policy -> refuse
         CyberGymService(Holdout(pool=SyntheticTaskSource(), _context={}), chain, **common)
 
 
@@ -286,9 +289,9 @@ def test_verify_submission_attestation_accepts_and_rejects():
 # --------------------------------------------------------------------------- #
 # service-level: only attested solvers earn AND compose into the lane
 # --------------------------------------------------------------------------- #
-def test_service_only_attested_miner_earns_and_composes():
+def test_service_only_attested_miner_earns_and_composes(tmp_path):
     from cathedral_distill.cybergym_holdout import Holdout
-    from cathedral_distill.cybergym_scores import CyberGymScoreStore
+    from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore
     from cathedral_distill.cybergym_protocol import CyberGymCorpusStore
     from cathedral_distill.cybergym_service import CyberGymService
     from cathedral_distill.cybergym_validator import ChainContext
@@ -299,10 +302,14 @@ def test_service_only_attested_miner_earns_and_composes():
     svc = CyberGymService(
         Holdout(pool=source, _context={}), chain, backend=source.backend,
         corpus_store=CyberGymCorpusStore(":memory:"), score_store=CyberGymScoreStore(":memory:"),
+        solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
         validator_hotkey="5Validator",
         private_key=Ed25519PrivateKey.from_private_bytes(bytes(range(32))),
         signing_key_id="cybergym-1", batch_size=2, cutoff=None, as_of=None,
-        attestation_policy=POLICY, attestation_now=NOW,
+        attestation_policy=POLICY, attestation_now=NOW, gates_required=False,
+        # this test scores synthetic tasks on purpose, to prove the ATTESTATION gate
+        # decides the reward; synthetic tasks are non-rewarding by default
+        credit_synthetic_tasks=True,
     )
     commit = "sha256:" + hashlib.sha256(b"m").hexdigest()
 

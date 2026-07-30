@@ -36,7 +36,7 @@ from cathedral_distill.cybergym_mix import (  # noqa: E402
     probe_liveness,
 )
 from cathedral_distill.cybergym_protocol import CyberGymCorpusStore, SubmissionEnvelope  # noqa: E402
-from cathedral_distill.cybergym_scores import CyberGymScoreStore  # noqa: E402
+from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore  # noqa: E402
 from cathedral_distill.cybergym_service import CyberGymService  # noqa: E402
 from cathedral_distill.cybergym_synthetic import SyntheticTaskSource, generate_bug  # noqa: E402
 from cathedral_distill.cybergym_validator import ChainContext  # noqa: E402
@@ -310,8 +310,13 @@ def test_mix_runs_through_the_live_service_end_to_end(tmp_path):
         Holdout(pool=mix, _context={}), chain, backend=mix.backend,
         corpus_store=CyberGymCorpusStore(str(tmp_path / "c.sqlite")),
         score_store=CyberGymScoreStore(str(tmp_path / "s.sqlite")),
+        solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
-        batch_size=4, cutoff=CUTOFF, as_of=NOW, attestation_required=False)
+        batch_size=4, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
+        # the mix under test is built from two SYNTHETIC sources, which are
+        # non-rewarding by default; this test is about the blend reaching the score
+        # path, so it takes the explicit unsafe-for-rewards override
+        gates_required=False, credit_synthetic_tasks=True)
 
     d = svc.dispatch_for("5Miner", MODEL)
     assert len(d.tasks) == 4

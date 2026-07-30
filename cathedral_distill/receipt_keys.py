@@ -87,6 +87,33 @@ class ReceiptKeyRegistry:
             raise ReceiptKeyError(f"signing key {key_id!r} is retired, revoked, or out of window")
         return Ed25519PublicKey.from_public_bytes(key.public_key)
 
+    def evidence_identity(self) -> dict[str, object]:
+        """Stable semantic identity for restart-pinned reward evidence.
+
+        Reproduction admission depends on key bytes, status and validity windows.
+        Those exact inputs are canonicalized here so changing a key registry while
+        an epoch is in flight cannot silently change which peer receipt verifies.
+        """
+        rows = [
+            {
+                "key_id": key.key_id,
+                "public_key_base64": base64.b64encode(key.public_key).decode("ascii"),
+                "valid_from": key.valid_from.isoformat(),
+                "valid_until": key.valid_until.isoformat(),
+                "status": key.status,
+            }
+            for key in sorted(self._keys.values(), key=lambda item: item.key_id)
+        ]
+        body = {
+            "schema": "cathedral_receipt_key_registry_identity_v1",
+            "keys": rows,
+        }
+        return {
+            "schema": body["schema"],
+            "digest": "sha256:" + hashlib.sha256(canonical_bytes(body)).hexdigest(),
+            "keys": len(rows),
+        }
+
     @classmethod
     def from_keys(
         cls,
