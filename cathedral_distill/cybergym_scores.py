@@ -6,7 +6,9 @@ scores from a `cybergym_scores` table and maps them to uids. Nothing wrote that
 table; this is the writer. It records the level-weighted work units from a
 verified `cathedral_cybergym_receipt_v1`, keyed by (miner_hotkey, epoch), so the
 adapter's `SELECT miner_hotkey, score FROM cybergym_scores WHERE epoch=?` returns
-exactly the verified frontier this validator scored.
+exactly the verified frontier this validator scored. The adapter also requires
+`cybergym_epoch_status.state = 'closed'` for that epoch before publishing —
+the same gate as `require_closed_epoch` / `compose_scores_lane` here.
 
 The `score` column is the level-weighted **earned units** (the adapter's
 "level-weighted sum of verified PoC solves"), stored as REAL to match the
