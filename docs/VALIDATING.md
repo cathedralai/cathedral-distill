@@ -189,6 +189,92 @@ the challenge box.
 
 ---
 
+## Live status for a dashboard
+
+`GET /v1/status` is a public, anonymous read of what this validator can currently
+attest to: the epoch and its state, the authorized block window, the signing key
+a receipt resolves against, participation counts, and the scored leaderboard.
+`cathedral_distill.status.build_status` builds it; the route is served by both
+`make_server` and `make_threaded_server`, alongside `GET /healthz`.
+
+```bash
+curl -s http://127.0.0.1:8080/v1/status | python -m json.tool
+```
+
+```
+epoch        source_epoch, network, netuid, state, valid_from_block/valid_until_block
+signer       validator_hotkey, signing_key_id, signing_public_key_digest
+             manifest_digest  (the FULL manifest's digest, not its contents)
+participation committed, pending, scored, unscorable, durable_solves
+leaderboard  scored_miners, total_earned_units, top[{rank, miner_hotkey, earned_units}]
+```
+
+What it deliberately does **not** publish: `batch_size`, `cutoff`, `as_of`, the
+level weights, and the gate policy. Those are in `epoch_manifest()`, and they are
+exactly what would let a miner time and shape a submission for maximum credit
+while the epoch is open. `manifest_digest` is published instead, so anyone holding
+the manifest can confirm which one this validator is running without the endpoint
+handing out the draw parameters. A field added to the manifest later stays private
+until it is added to `status._PUBLIC_MANIFEST_KEYS`.
+
+Operational notes:
+
+- **Read-only.** It calls no mutating handler; a public read cannot touch an epoch.
+- **Cached 5s.** The reads hit the same SQLite the submit path writes, so the work
+  an anonymous caller can provoke is bounded by the TTL, not by their request rate.
+  On the threaded server the build takes the same lock the POST handlers use, so
+  an uncached status read can queue behind a slow verify — use `/healthz`, which is
+  lock-free, for liveness probing.
+- **Fails soft per section.** An unreadable store reports
+  `{"available": false, "detail": …}` for that section and the rest still serves.
+- **CORS is open on this route only.** The mutating POST routes stay same-origin,
+  because a browser that could drive dispatch/submit cross-site would let any page
+  a miner visits act as that miner.
+- The site's opt-in **Live** section consumes exactly this payload; see
+  [`../site/README.md`](../site/README.md).
+
+## Serving the key registry — `GET /v1/keys`
+
+A receipt carries a `signing_key_id`; the root-signed key registry is what turns that
+into a public key. Until consumers can fetch one, **no live receipt has a resolvable
+signer**. Serve it alongside the other routes:
+
+```python
+from cathedral_distill.served_keys import ServedKeyRegistry
+
+registry = ServedKeyRegistry("/etc/cathedral/registry.signed.json",
+                             {"root": root_pub_bytes})
+server = make_threaded_server(service, port=8080, key_registry=registry)
+```
+
+The trust is the root signature and the anchored `root.pub`, not the transport, so
+serving it from a validator is safe. What this adds over a static file server is that
+it refuses to hand out anything its own consumers would reject:
+
+- **Verified before served**, on every load, against the anchored root. The root is a
+  required constructor argument: a relay that cannot verify what it relays cannot tell
+  a rotation from a mistake, and an unverifiable registry served here fails at every
+  consumer at once instead of once here with a reason.
+- **Verbatim bytes**, with an `ETag` of the registry digest and `304` on
+  `If-None-Match`. `registry_digest` hashes the raw bytes, so re-serialising the JSON
+  would change the published digest even where the signature still verified.
+- **Rotation without a restart** — replace the file and the next request re-reads and
+  re-verifies. A replacement that does not verify leaves the previous good registry
+  serving and reports why.
+
+> **⚠ It goes stale in 24 hours, whatever `valid_until` says.**
+> `verify_key_registry` bounds `generated_at + max_age_seconds` (default `86400`)
+> *independently* of the registry's validity window. A registry signed with a
+> year-long `valid_until` is refused by every default-configured fetcher the next day
+> (`key registry is too stale`). **Re-sign and re-serve daily.** Once stale,
+> `GET /v1/keys` returns 503 naming the deadline rather than serving bytes nobody
+> will accept, and `GET /v1/status` carries a `key_registry` block with `state`
+> (`served` / `stale` / `unverified`), `digest`, `generated_at` and `fresh_until` — so
+> `epoch.signing_key_id` and the registry that resolves it can be checked together in
+> one request.
+
+---
+
 ## Infrastructure
 
 - **Disk** — the CyberGym binary corpus is ~130 GB (binary-only) to ~10 TB (full).

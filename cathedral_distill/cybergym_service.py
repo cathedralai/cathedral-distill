@@ -706,6 +706,51 @@ def compose_scores_lane(
     return Lane(lane_id, allocation, contributions)
 
 
+def lane_allocation_for(resolved, lane_id: str = CYBERGYM_LANE) -> Decimal:
+    """This lane's share from a verified allocation config, or a refusal naming what is.
+
+    The signed `cathedral_lane_allocation_v1` is authoritative on lane *names*, and
+    the composing code has to be given the same one. Nothing else checks that they
+    agree, and disagreeing is silent in the worst way: both configs verify, the
+    vector composes, and every contribution is dropped as "lane not in the
+    allocation config" — a 100% burn epoch whose only trace is a `drop_reason` in
+    an audit row nobody reads. Every miner earns nothing and the run looks normal.
+
+    The name is easy to get wrong because a CyberGym deployment carries two ids in
+    two different namespaces:
+
+        lane id       `cathedral_cybergym`  (`CYBERGYM_LANE`) — names the lane in
+                      the signed allocation config, and is what `compose_*_lane`
+                      and `integrated_feed.compose_integrated` match on
+        mechanism id  `cybergym_v0` — names the MechanismSpec registered with the
+                      cathedral publisher (`PUT /mechanisms/{id}`)
+
+    They are unrelated strings, and putting the mechanism id in the `lane` field is
+    the mistake this function exists to turn into an error.
+
+    Look the allocation up through here rather than hand-passing a number to
+    `compose_scores_lane(allocation=...)`, and the mismatch fails loudly, before an
+    epoch is composed.
+    """
+    allocations = getattr(resolved, "lane_allocations", None)
+    if allocations is None:
+        raise ProtocolError(
+            "expected a ResolvedAllocation from signed_config.resolve_allocation, "
+            f"got {type(resolved).__name__}"
+        )
+    if lane_id not in allocations:
+        funded = ", ".join(sorted(allocations)) or "(none)"
+        raise ProtocolError(
+            f"the signed allocation config does not fund lane {lane_id!r}; it funds: "
+            f"{funded}. Composing anyway would drop every contribution to this lane "
+            "and publish a 100% burn vector. If this is the CyberGym lane, the "
+            f"allocation config's `lane` must be {CYBERGYM_LANE!r} — note that "
+            "`cybergym_v0` is the publisher's MechanismSpec id, not a lane id."
+        )
+    return allocations[lane_id]
+
+
 __all__ = [
-    "CyberGymService", "compose_scores_lane", "compose_results_lane", "CYBERGYM_LANE",
+    "CyberGymService", "compose_scores_lane", "compose_results_lane",
+    "lane_allocation_for", "CYBERGYM_LANE",
 ]

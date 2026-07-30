@@ -187,8 +187,21 @@ footer a { color: var(--ink-dim); }
 .cta-block h2 { margin-bottom: 14px; }
 .cta-block .hero-cta { justify-content: center; }
 
+/* Live status tables (index.html #live). Key/value rows, values monospaced so
+   block numbers and earned units line up column-wise. */
+.live-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.live-table th, .live-table td { padding: 9px 0; border-bottom: 1px solid var(--line); }
+.live-table tr:last-child th, .live-table tr:last-child td { border-bottom: 0; }
+.live-table th { text-align: left; font-weight: 400; color: var(--ink-dim); }
+.live-table td {
+  text-align: right; font-family: var(--mono); font-size: 13px; color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.live-table tbody:empty::after { content: ""; }
+
 @media (max-width: 860px) {
   .g2, .g3, .g4 { grid-template-columns: 1fr; }
   .nav-links { display: none; }
   section { padding: 52px 0; }
+  .live-table { font-size: 13px; }
 }
