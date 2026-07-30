@@ -67,7 +67,13 @@ def build_service(ids, *, private_key: Ed25519PrivateKey, corpus_db: str = ":mem
         Holdout(pool=src, _context={}), chain, backend=src.backend,
         corpus_store=CyberGymCorpusStore(corpus_db), score_store=CyberGymScoreStore(score_db),
         validator_hotkey=validator_hotkey, private_key=private_key, signing_key_id="cybergym-1",
-        batch_size=1, cutoff=None, as_of=datetime.now(UTC), attestation_required=False)
+        batch_size=1, cutoff=None, as_of=datetime.now(UTC), attestation_required=False,
+        # This reference server is a dry-run harness (ephemeral signing key, in-memory
+        # stores by default), so it explicitly opts out of the durable-solve-store and
+        # anti-gaming-gate requirements the constructor otherwise enforces fail-closed
+        # — without these it raises and the server cannot start at all. A real validator
+        # MUST instead pass a durable solve_store and a real EmissionGatePolicy.
+        solve_durability_required=False, gates_required=False)
 
 
 def main() -> None:

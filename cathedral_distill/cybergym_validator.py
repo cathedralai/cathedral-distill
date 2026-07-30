@@ -125,10 +125,12 @@ class EmissionGatePolicy:
         A presence-only or unverified registry row is provenance, not reward
         evidence. No verified registry means no miner can prove its model is
         registered, so all fail.
-      * `no_contamination`: the committed model must have been registered before
-        the batch was drawn (`registered_at <= commitment_deadline`, defaulting to
-        the epoch's `as_of` draw time). A commitment made after the draw cannot be
-        proven to pre-date the drawn set.
+      * `no_contamination`: the committed model must have been registered before the
+        private-disclosure window OPENED (`registered_at <= commitment_deadline`,
+        defaulting to the epoch's `cutoff`). `as_of` (the draw time) is the WRONG
+        boundary: a holdout task disclosed inside `(cutoff, as_of]` could be trained
+        on by a model registered before the draw but after that public disclosure, so
+        the deadline must be the window start, never its end.
       * `reproduced`: a peer validator's receipt for the same `batch_id` with the
         same `items_root` and a DIFFERENT `validator_hotkey`, verified against the
         anchored key registry. Off by default: a single-validator deployment has no
@@ -274,7 +276,7 @@ def evaluate_emission_gates(
     receipt: Mapping[str, object],
     key_registry: Any,
     source_epoch: int,
-    drawn_at: datetime | None,
+    commitment_cutoff: datetime | None,
 ) -> tuple[str, ...]:
     """Return the required gates this miner's epoch does NOT satisfy.
 
@@ -315,7 +317,11 @@ def evaluate_emission_gates(
             failures.append(fr.GATE_REGISTERED_BUNDLE)
 
     if policy.require_no_contamination:
-        deadline = policy.commitment_deadline or drawn_at
+        # The contamination deadline is the START of the private-disclosure window
+        # (`cutoff`), not the draw time: a model must pre-date every holdout task it
+        # could be scored on. If neither an explicit deadline nor a cutoff is known,
+        # `deadline` is None and the gate fails closed (non-contamination unprovable).
+        deadline = policy.commitment_deadline or commitment_cutoff
         registered_at = getattr(registration, "registered_at", None)
         # A registration timestamp with no timezone cannot be compared with an aware
         # deadline: Python raises, and that raise used to abort the epoch for every
@@ -584,7 +590,7 @@ def run_epoch(
                     gate_policy, miner_hotkey=miner.miner_hotkey,
                     model_commitment=miner.model_commitment, receipt=verified,
                     key_registry=key_registry, source_epoch=chain.source_epoch,
-                    drawn_at=as_of,
+                    commitment_cutoff=cutoff,
                 )
             except Exception as exc:  # noqa: BLE001 - fail this miner, not the epoch
                 gate_failures = (f"gate_evaluation_failed:{type(exc).__name__}",)
