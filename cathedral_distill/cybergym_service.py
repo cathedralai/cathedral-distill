@@ -39,6 +39,7 @@ from cathedral_distill.cybergym_protocol import (
 from cathedral_distill.cybergym_scores import (
     EPOCH_CLOSED,
     EPOCH_INCOMPLETE,
+    CyberGymScoreError,
     CyberGymScoreStore,
     CyberGymSolveStore,
 )
@@ -187,16 +188,59 @@ class CyberGymService:
         self._dispatched: set[str] = set()   # task_ids actually served this epoch
         self._results: list[MinerResult] = []
         self._scored_miners: set[str] = set()  # miners this process actually scored
+        self._pin_epoch_manifest()
         self._restore_solves()
 
     # -- crash recovery ---------------------------------------------------- #
+    def epoch_manifest(self) -> dict[str, object]:
+        """Every input that decides what this epoch draws and what it signs.
+
+        Recovering the accepted PoCs is not enough for byte-identical scoring: the
+        batch nonce is derived from the finalized block and block hash, and the
+        receipt binds the network, netuid, block window, validator identity and
+        signing key. A restart that resumed the same `source_epoch` under a
+        different anchor drew a different batch and signed a different receipt, and
+        nothing noticed. This manifest is what makes "the same epoch" checkable.
+        """
+        def stamp(value: object) -> object:
+            return value.isoformat() if hasattr(value, "isoformat") else value
+
+        return {
+            "schema": "cathedral_cybergym_epoch_manifest_v1",
+            "source_epoch": int(self.chain.source_epoch),
+            "network": str(self.chain.network),
+            "netuid": int(self.chain.netuid),
+            "block": int(self.chain.block),
+            "block_hash": str(self.chain.block_hash),
+            "valid_from_block": int(self.chain.valid_from_block),
+            "valid_until_block": int(self.chain.valid_until_block),
+            "batch_size": int(self._batch_size),
+            "cutoff": stamp(self._cutoff),
+            "as_of": stamp(self._as_of),
+            "validator_hotkey": str(self._validator_hotkey),
+            "signing_key_id": str(self._signing_key_id),
+            "level_weights": {str(int(level)): str(w) for level, w in self._weights.items()},
+            "credit_synthetic_tasks": bool(self._credit_synthetic_tasks),
+        }
+
+    def _pin_epoch_manifest(self) -> None:
+        """Pin the epoch's inputs on first run; refuse a restart that changed them."""
+        if self._solves is None:
+            return
+        try:
+            self._solves.record_manifest(self.chain.source_epoch, self.epoch_manifest())
+        except CyberGymScoreError as exc:
+            raise ProtocolError(
+                f"refusing to resume CyberGym epoch {self.chain.source_epoch}: {exc}"
+            ) from exc
+
     def _restore_solves(self) -> None:
         """Rehydrate this epoch's accepted solves from the durable solve store.
 
         Byte-identical recovery: `run_epoch` re-draws each miner's batch from the
         chain-anchored nonce (derived from its hotkey and committed model), so the
-        model commitment plus the accepted PoC bytes are the complete input. A
-        restarted service scores exactly what the killed one would have.
+        model commitment plus the accepted PoC bytes are the complete input, GIVEN
+        the same epoch anchor, which `_pin_epoch_manifest` is what enforces.
         """
         if self._solves is None:
             return
@@ -346,6 +390,11 @@ class CyberGymService:
         Reuses the canonical `run_epoch` scorer (it re-draws each miner's batch
         from the same chain-anchored nonce and re-verifies, so the persisted score
         is the one any peer validator would derive). Records to `cybergym_scores`.
+
+        `issued_at` is PINNED on the first scoring pass for the epoch and reused by
+        every later one. The receipt bytes include it, so a retry or a restart that
+        passed a fresh timestamp would sign a different receipt for the same epoch
+        and "recovered byte-identically" would not be true.
         """
         # Only miners with at least one verified solve are scored — a miner that
         # solved nothing has no rewardable units and no receipt to persist.
@@ -353,6 +402,8 @@ class CyberGymService:
             MinerCommit(miner_hotkey=hk, model_commitment=st.model_commitment, pocs=dict(st.pocs))
             for hk, st in self._miners.items() if st.pocs
         ]
+        if self._solves is not None:
+            issued_at = self._solves.pin_issued_at(self.chain.source_epoch, issued_at)
         self._results = run_epoch(
             miners, self.holdout.pool, self.chain,
             validator_hotkey=self._validator_hotkey, private_key=self._private_key,

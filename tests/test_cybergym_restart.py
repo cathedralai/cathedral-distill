@@ -94,7 +94,7 @@ def _trace(task_id, poc_sha256):
             "steps": steps, "licence": "cathedral-corpus-v1", "model_seal": _dg("seal")}
 
 
-def _service(tmp_path, *, durable: bool):
+def _service(tmp_path, *, durable: bool, chain=None, batch_size: int = 2):
     """A service over the SAME storage every time, so a new one is a restart."""
     kwargs = {}
     if durable:
@@ -102,11 +102,11 @@ def _service(tmp_path, *, durable: bool):
     else:
         kwargs["solve_durability_required"] = False
     return CyberGymService(
-        load_holdout(_manifest()), _chain(), backend=_backend,
+        load_holdout(_manifest()), chain or _chain(), backend=_backend,
         corpus_store=CyberGymCorpusStore(str(tmp_path / "corpus.sqlite")),
         score_store=CyberGymScoreStore(str(tmp_path / "scores.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
-        batch_size=2, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
+        batch_size=batch_size, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
         gates_required=False, **kwargs,
     )
 
@@ -148,23 +148,107 @@ def test_a_restart_before_epoch_close_recovers_the_accepted_solves(tmp_path):
 
 
 def test_recovered_scoring_is_byte_identical_to_the_uninterrupted_run(tmp_path):
-    """Recovery must reproduce the receipt, not merely a similar score."""
+    """Recovery must reproduce the RECEIPT, not merely a similar score.
+
+    The two runs deliberately do NOT share a chain fixture: the clean run is
+    anchored by one literally-constructed ChainContext and the crashed one by
+    another, so the equality is a property of equal INPUTS rather than of a shared
+    object, which is what the earlier version of this test actually proved.
+
+    `issued_at` is the epoch-close timestamp the caller supplies, and it is part of
+    the receipt bytes, so both runs pass the same one, exactly as an epoch scheduler
+    would derive it from the epoch. What is NOT the caller's problem is a re-score:
+    once a pass has run, the timestamp is pinned and reused, which
+    `test_a_rescore_reuses_the_pinned_issue_timestamp` covers.
+    """
     clean_run = tmp_path / "a"
     crashed_run = tmp_path / "b"
     clean_run.mkdir()
     crashed_run.mkdir()
 
-    uninterrupted = _service(clean_run, durable=True)
+    clean_chain = ChainContext(
+        block=100, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
+        source_epoch=SOURCE_EPOCH, valid_from_block=100, valid_until_block=460,
+    )
+    crashed_chain = ChainContext(
+        block=100, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
+        source_epoch=SOURCE_EPOCH, valid_from_block=100, valid_until_block=460,
+    )
+    assert clean_chain is not crashed_chain
+
+    uninterrupted = _service(clean_run, durable=True, chain=clean_chain)
     _solve(uninterrupted)
     expected = uninterrupted.score_epoch(issued_at=ISSUED)[0]
 
-    killed = _service(crashed_run, durable=True)
+    killed = _service(crashed_run, durable=True, chain=crashed_chain)
     _solve(killed)
     del killed
-    recovered = _service(crashed_run, durable=True).score_epoch(issued_at=ISSUED)[0]
+    restarted = _service(crashed_run, durable=True, chain=crashed_chain)
+    recovered = restarted.score_epoch(issued_at=ISSUED)[0]
 
     assert recovered.receipt == expected.receipt
     assert recovered.contribution == expected.contribution
+
+
+def test_a_rescore_reuses_the_pinned_issue_timestamp(tmp_path):
+    """A second scoring pass over the same epoch must not re-sign it at a new time.
+
+    `issued_at` is inside the receipt bytes, so a retry with a fresh wall-clock
+    timestamp would produce a different receipt (and a different receipt_id) for the
+    same epoch's work. The first pass pins it; later passes reuse it.
+    """
+    service = _service(tmp_path, durable=True)
+    _solve(service)
+    first = service.score_epoch(issued_at=ISSUED)[0]
+
+    later = _service(tmp_path, durable=True)
+    again = later.score_epoch(issued_at="2026-07-27T18:45:00.000000Z")[0]
+    assert again.receipt["issued_at"] == ISSUED
+    assert again.receipt == first.receipt
+
+
+def test_a_restart_under_a_different_chain_anchor_is_refused(tmp_path):
+    """Recovering the PoCs is not recovering the epoch.
+
+    The batch nonce is derived from the finalized block and block hash, so a restart
+    that resumed the same `source_epoch` at a different block drew a different batch
+    and signed a different receipt for that epoch, and nothing noticed: the score
+    persisted and no refusal fired. The epoch's inputs are pinned, so this now
+    refuses and names what changed.
+    """
+    killed = _service(tmp_path, durable=True)
+    _solve(killed)
+    del killed
+
+    moved_on = ChainContext(
+        block=512, block_hash="0x" + "ab" * 32, network="finney", netuid=39,
+        source_epoch=SOURCE_EPOCH, valid_from_block=100, valid_until_block=460,
+    )
+    with pytest.raises(ProtocolError, match="already pinned to different scoring inputs"):
+        _service(tmp_path, durable=True, chain=moved_on)
+
+
+def test_a_restart_that_changes_the_batch_size_is_refused(tmp_path):
+    """Any input that changes what the epoch draws or signs counts, not just the
+    block: a different batch size draws a different set from the same nonce."""
+    killed = _service(tmp_path, durable=True)
+    _solve(killed)
+    del killed
+    with pytest.raises(ProtocolError, match="batch_size"):
+        _service(tmp_path, durable=True, batch_size=1)
+
+
+def test_the_pinned_epoch_manifest_covers_every_scoring_input(tmp_path):
+    service = _service(tmp_path, durable=True)
+    manifest = service.epoch_manifest()
+    assert set(manifest) == {
+        "schema", "source_epoch", "network", "netuid", "block", "block_hash",
+        "valid_from_block", "valid_until_block", "batch_size", "cutoff", "as_of",
+        "validator_hotkey", "signing_key_id", "level_weights", "credit_synthetic_tasks",
+    }
+    pinned = service._solves.manifest_for(SOURCE_EPOCH)
+    assert pinned["manifest"] == manifest
+    assert pinned["digest"].startswith("sha256:")
 
 
 # --------------------------------------------------------------------------- #

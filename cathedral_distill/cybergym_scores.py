@@ -18,6 +18,8 @@ overwritten, so a re-score cannot quietly change a published frontier.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from decimal import Decimal
 from typing import Mapping
@@ -246,7 +248,100 @@ class CyberGymSolveStore:
             "  poc BLOB NOT NULL,"
             "  PRIMARY KEY (epoch, miner_hotkey, task_id))"
         )
+        # The epoch's scoring inputs, so a restart cannot silently score the same
+        # epoch under a different anchor. Recovering the PoCs is not enough for
+        # byte-identical scoring: the batch nonce is derived from the finalized
+        # block and block hash, so a restart that supplied a different block drew a
+        # different batch and produced a different receipt for the same epoch.
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS cybergym_epoch_manifest ("
+            "  epoch INTEGER PRIMARY KEY,"
+            "  manifest_json TEXT NOT NULL,"
+            "  manifest_digest TEXT NOT NULL,"
+            "  issued_at TEXT)"
+        )
         self._connection.commit()
+
+    # -- the epoch's scoring inputs ---------------------------------------- #
+    @staticmethod
+    def canonical_manifest(manifest: Mapping[str, object]) -> tuple[str, str]:
+        """`(canonical_json, digest)` for an epoch manifest. Sorted, ASCII, no floats."""
+        text = json.dumps(dict(manifest), sort_keys=True, ensure_ascii=True,
+                          separators=(",", ":"), allow_nan=False)
+        return text, "sha256:" + hashlib.sha256(text.encode("ascii")).hexdigest()
+
+    def record_manifest(self, epoch: int, manifest: Mapping[str, object]) -> str:
+        """Pin this epoch's scoring inputs, or fail if they disagree with the pin.
+
+        First write wins and every later run must match it exactly. The error names
+        the fields that differ, because "your restart is scoring epoch N under
+        block 512 but the epoch was drawn at block 500" is the operator's actual
+        problem.
+        """
+        text, digest = self.canonical_manifest(manifest)
+        existing = self.manifest_for(epoch)
+        if existing is not None:
+            if existing["digest"] == digest:
+                return digest
+            differing = sorted(
+                key for key in set(existing["manifest"]) | set(manifest)
+                if existing["manifest"].get(key) != dict(manifest).get(key)
+            )
+            raise CyberGymScoreError(
+                f"epoch {int(epoch)} was already pinned to different scoring inputs; "
+                f"refusing to score it again. Differing: {', '.join(differing)}"
+            )
+        try:
+            with self._connection:
+                self._connection.execute(
+                    "INSERT INTO cybergym_epoch_manifest"
+                    "(epoch, manifest_json, manifest_digest, issued_at) VALUES (?,?,?,NULL)",
+                    (int(epoch), text, digest),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError("failed to record the epoch manifest") from exc
+        return digest
+
+    def manifest_for(self, epoch: int) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT manifest_json, manifest_digest, issued_at FROM cybergym_epoch_manifest "
+            "WHERE epoch=?",
+            (int(epoch),),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "manifest": json.loads(row["manifest_json"]),
+            "digest": str(row["manifest_digest"]),
+            "issued_at": row["issued_at"],
+        }
+
+    def pin_issued_at(self, epoch: int, issued_at: str) -> str:
+        """Pin the epoch's issue timestamp on first use and return the pinned one.
+
+        The receipt bytes include `issued_at`, so a retry or a restart that passed a
+        fresh timestamp would produce a different receipt for the same epoch and
+        "recovered byte-identically" would be false. The first value wins and every
+        later pass reuses it.
+        """
+        row = self._connection.execute(
+            "SELECT issued_at FROM cybergym_epoch_manifest WHERE epoch=?", (int(epoch),)
+        ).fetchone()
+        if row is None:
+            raise CyberGymScoreError(
+                f"epoch {int(epoch)} has no pinned manifest; record_manifest first"
+            )
+        if row["issued_at"]:
+            return str(row["issued_at"])
+        try:
+            with self._connection:
+                self._connection.execute(
+                    "UPDATE cybergym_epoch_manifest SET issued_at=? WHERE epoch=?",
+                    (str(issued_at), int(epoch)),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError("failed to pin the epoch issue timestamp") from exc
+        return str(issued_at)
 
     def record(
         self, *, epoch: int, miner_hotkey: str, model_commitment: str, task_id: str, poc: bytes
