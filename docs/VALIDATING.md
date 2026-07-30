@@ -169,11 +169,18 @@ a slow verify never refuses sockets), serialised stateful handlers (one Docker
 differential at a time), and a lock-free `GET /healthz`:
 
 ```bash
-docker pull n132/arvo:368-vul && docker pull n132/arvo:368-fix   # pull the subset first
+# Pull + digest-pin the vul+fix pair for every task, into a manifest (Phase 1.4:
+# a re-pull can't swap the image under a running validator and change a verdict):
+cathedral-cybergym-pull --tasks arvo:368 arvo:10400 --out /srv/cgd/corpus_images.json
 PORT=8666 CYBERGYM_CORPUS_DB=/srv/cgd/corpus.sqlite \
 CYBERGYM_SIGNING_SEED=$(openssl rand -hex 32) \
   python -m cathedral_distill.cybergym_repro_server            # or: cathedral-cybergym-server
 ```
+
+`corpus_images.py` records each image's content digest; `unpinned()` flags any task
+whose vul or fix build did not pull, so a deployment refuses to serve a half-pinned
+task rather than dispatch one the verifier can't run. The verify container itself runs
+`--network none` (egress-deny) — the PoC is adversarial.
 
 The mapping, crash-detection, draw determinism, and the full dispatch→submit→verify
 loop are covered by `tests/test_cybergym_repro.py` with the subprocess runner
