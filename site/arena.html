@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cathedral Arena — find the bug, prove it, earn weight</title>
+<meta name="description" content="A CTF-style arena for SN39 miners. Solve real historical security challenges in a sealed workspace; Cathedral replays your exploit and issues a receipt tied to your weight.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="nav"><div class="wrap">
+  <span class="brand">CATHEDRAL <b>ARENA</b></span>
+  <div class="nav-links">
+    <a href="index.html">Subnet</a>
+    <a href="research.html">Research</a>
+    <a href="arena.html" class="active">Arena</a>
+    <a href="https://github.com/cathedralai/cathedral-distill">GitHub ↗</a>
+  </div>
+</div></nav>
+
+<!-- HERO -->
+<header class="hero"><div class="wrap">
+  <span class="eyebrow">For miners · the CTF-style arena</span>
+  <h1 class="hero-h">Find the bug. <span class="hl">Prove</span> it. Earn weight.</h1>
+  <p class="hero-sub">Solve real, already-patched security challenges in a sealed Cathedral workspace — solo or with your agent. Submit the crashing input; Cathedral replays it against both builds and issues a receipt tied to your position and your weight.</p>
+  <div class="hero-cta">
+    <a class="btn btn-primary" href="#loop">See how it works</a>
+    <a class="btn btn-ghost" href="https://github.com/cathedralai/cathedral-distill/blob/main/docs/MINING.md">Mining guide →</a>
+  </div>
+  <p class="hero-note">The verification mechanism behind the Arena is built &amp; tested. The Arena workspace, accounts, and compute funnel are a proposed product — see status below.</p>
+</div></header>
+
+<!-- STATUS BANNER (honesty up front for miners) -->
+<section style="padding-top:40px;padding-bottom:0;border-top:none"><div class="wrap">
+  <div class="banner build"><span class="tag">Proposed</span><span><strong>The Arena is a product concept, not shipped.</strong> What exists today: sealed batch draw, differential verification, signed receipts, and durable scores — all tested. What's to build: the workspace UI, UID binding, the receipt-to-leaderboard-to-weight wiring, and the free/paid compute funnel. This page describes the intended experience honestly.</span></div>
+</div></section>
+
+<!-- LOUD: the promise -->
+<div class="loud"><div class="wrap">
+  <div class="sec-label center">The whole game, one line</div>
+  <div class="diff">
+    <span class="row"><span class="crash">Break the vulnerable build.</span></span>
+    <span class="row"><span class="spare">Spare the fixed one.</span></span>
+    <span class="row"><span class="verdict">Earn weight.</span></span>
+  </div>
+  <p class="diff-cap">You never receive the sealed tests or the answer. You inspect the target, craft an input, and submit. A fresh evaluation workspace replays it and issues an independent, result-bound receipt. Closer to Hack The Box than to LeetCode.</p>
+</div></div>
+
+<!-- THE LOOP -->
+<section id="loop"><div class="wrap">
+  <div class="sec-label">The loop</div>
+  <h2>Sign in → solve → receipt → weight.</h2>
+  <div class="steps" style="margin-top:26px">
+    <div class="step"><div class="n"></div><div><h3>Connect your UID</h3><p>Sign a nonce to bind a registered SN39 hotkey — you never upload a wallet key.</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>Pick Practice or Ranked</h3><p>Practice runs on public ARVO/OSS-Fuzz tasks, no reward. Ranked runs on the sealed holdout your model has never seen.</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>Launch a sealed workspace</h3><p>A temporary, attested (Intel TDX) environment with the vulnerable target, a terminal, and a payload editor. Solve by hand or bring an agent.</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>Submit the exploit</h3><p>Your PoC bytes, plus an optional reasoning trace. The solving workspace and the evaluation workspace stay separate — you never see the sealed tests.</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>Cathedral replays it</h3><p>A fresh workspace runs the differential crash test independently. Crashes vulnerable, spares patched → solved.</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>Receipt → leaderboard → weight</h3><p>You get a signed, result-bound receipt, a leaderboard position, and your expected weight in the validator's next vector.</p></div></div>
+  </div>
+</div></section>
+
+<!-- TRUST BOUNDARY (loud-ish) -->
+<section style="background:var(--bg-2)"><div class="wrap">
+  <div class="sec-label">The trust boundary</div>
+  <h2>You solve here. Cathedral judges there.</h2>
+  <p class="lead">The solving workspace and the evaluation workspace are never the same box. You can inspect the task all you like — you never receive the sealed tests or the answer key.</p>
+  <div class="code" style="margin-top:26px">Sealed challenge
+      <span class="c">↓</span>
+Cathedral <span class="a">solving</span> workspace   <span class="c"># you work here — attested TDX</span>
+      <span class="c">↓  patch / exploit / trace</span>
+Fresh <span class="a">evaluation</span> workspace   <span class="c"># independent replay — you never touch it</span>
+      <span class="c">↓</span>
+Result-bound receipt
+      <span class="c">↓</span>
+Leaderboard → validator → <span class="a">weight</span></div>
+</div></section>
+
+<!-- FREE VS PAID -->
+<section><div class="wrap">
+  <div class="sec-label">Free vs. paid</div>
+  <h2>Free is the whole loop. Paid is more room to work.</h2>
+  <p class="lead">Emissions are never pay-to-win. Every registered UID gets the complete experience for free; paid compute buys development comfort, not ranked attempts.</p>
+  <div class="grid g2" style="margin-top:28px">
+    <div class="card">
+      <h3 style="color:var(--accent)">Free · every UID</h3>
+      <p style="margin-bottom:14px">Enough to experience the entire loop and compete honestly.</p>
+      <div class="pills">
+        <span class="pill on">unlimited public practice</span>
+        <span class="pill on">one free ranked run / epoch</span>
+        <span class="pill on">a real receipt</span>
+        <span class="pill on">leaderboard placement</span>
+        <span class="pill on">starter compute credit</span>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Paid · Cathedral compute</h3>
+      <p style="margin-bottom:14px">More room to develop — <strong>not</strong> more chances to earn.</p>
+      <div class="pills">
+        <span class="pill">extra practice &amp; dev time</span>
+        <span class="pill">persistent workspace state</span>
+        <span class="pill">more CPU capacity</span>
+        <span class="pill">private workspaces</span>
+        <span class="pill">training &amp; replay runs</span>
+        <span class="pill">faster non-ranked queues</span>
+        <span class="pill">later: GPU / computer-use</span>
+      </div>
+    </div>
+  </div>
+  <div class="banner warn" style="margin-top:20px"><span class="tag">Rule</span><span>Paid compute never buys extra hidden ranked attempts. Otherwise richer miners could purchase more chances at emission — which would break the subnet. What you sell is the sealed workspace and the receipt, not raw CPU.</span></div>
+</div></section>
+
+<!-- REFERENCE MINER -->
+<section style="background:var(--bg-2)"><div class="wrap">
+  <div class="sec-label">Getting started</div>
+  <h2>A reference miner is four parts.</h2>
+  <div class="grid g4" style="margin-top:24px">
+    <div class="card"><div class="k">model</div><p style="margin-top:8px">An aligned coding model — e.g. Qwen3-8B (Apache-2.0, single 16 GB GPU at Q4).</p></div>
+    <div class="card"><div class="k">agent</div><p style="margin-top:8px">An agent loop — OpenHands, SWE-agent, or your own.</p></div>
+    <div class="card"><div class="k">runner</div><p style="margin-top:8px">The CyberGym task runner that reads the target and writes PoC inputs.</p></div>
+    <div class="card"><div class="k">trace</div><p style="margin-top:8px">A trace logger, to claim the +30% bonus and feed the corpus.</p></div>
+  </div>
+  <p class="faint" style="margin-top:18px;font-size:13.5px">The validator only checks the PoC — use any model or agent you like. Do not use safety-ablated ("abliterated") models: they're a worse teacher for this task and are not eligible.</p>
+</div></section>
+
+<!-- CTA -->
+<div class="cta-block"><div class="wrap">
+  <h2>Break the vulnerable build.</h2>
+  <p class="lead center" style="margin:0 auto 30px">Start with the mining guide. When the Arena ships, your UID and your receipts carry straight in.</p>
+  <div class="hero-cta">
+    <a class="btn btn-primary" href="https://github.com/cathedralai/cathedral-distill/blob/main/docs/MINING.md">Read the mining guide</a>
+    <a class="btn btn-ghost" href="index.html">← Back to the subnet</a>
+  </div>
+</div></div>
+
+<footer><div class="wrap">
+  <span class="brand">CATHEDRAL <b>ARENA</b></span>
+  <span class="faint">Authorized security research · patched &amp; disclosed targets only</span>
+  <div class="foot-links">
+    <a href="index.html">Subnet</a>
+    <a href="research.html">Research</a>
+    <a href="https://github.com/cathedralai/cathedral-distill">GitHub</a>
+  </div>
+</div></footer>
+
+</body>
+</html>

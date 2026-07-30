@@ -15,8 +15,9 @@ become an open training corpus that makes the next model better.
 > ungated open weights. See [Responsible use](#responsible-use).
 
 **Status:** the scoring, sealing, verification, and reward mechanism is implemented
-and tested hardware-free (**198 tests**). The network transport, the real binary
-backend, and the on-chain wiring are the remaining integration work — see
+and tested hardware-free (**448 passing tests**), and the CyberGym lane now runs
+end to end as a service. The real binary backend, the Bittensor transport, and the
+attested-verification lane are the remaining integration work — see
 [What is built](#what-is-built).
 
 ---
@@ -166,6 +167,17 @@ tested:
   batches, fail-closed verification, managing the private holdout, spot-checks, the
   confidential-compute ladder, and corpus aggregation.
 
+## Launch & positioning
+
+- **[Positioning](docs/POSITIONING.md)** — the one-pager: what SN39 is, why
+  verified discovery, the miner contract, built vs. to-build.
+- **[Competitive landscape](docs/COMPETITIVE_LANDSCAPE.md)** — vs. Snyk / Semgrep /
+  GitHub Advanced Security / Bitsec: alert vs. proof, with sources.
+- **[Launch copy](docs/LAUNCH_COPY.md)** — X thread, Discord announcement, FAQ.
+- **Site** — `site/index.html` (the subnet), `site/research.html` (the technical
+  case), `site/arena.html` (the proposed Cathedral Arena). Open locally or serve
+  the `site/` directory.
+
 ## Run the tests
 
 Requires Python 3.11+.
@@ -176,8 +188,8 @@ pip install -e '.[dev]'
 pytest
 ```
 
-Expected: `198 passed`. All hardware-free — the verifier backend is injected, so
-the full mechanism is exercised without the CyberGym binary corpus.
+Expected: `448 passed, 1 skipped`. All hardware-free — the verifier backend is
+injected, so the full mechanism is exercised without the CyberGym binary corpus.
 
 ---
 

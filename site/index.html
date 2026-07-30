@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cathedral SN39 — verified vulnerability discovery</title>
+<meta name="description" content="Miners' models produce proof-of-concept exploits for already-patched bugs. A validator runs each one to score it — no judge model, no self-reported number.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="nav"><div class="wrap">
+  <span class="brand">CATHEDRAL <b>SN39</b></span>
+  <div class="nav-links">
+    <a href="index.html" class="active">Subnet</a>
+    <a href="research.html">Research</a>
+    <a href="arena.html">Arena</a>
+    <a href="https://github.com/cathedralai/cathedral-distill">GitHub ↗</a>
+  </div>
+</div></nav>
+
+<!-- HERO -->
+<header class="hero"><div class="wrap">
+  <span class="eyebrow">Bittensor · verified vulnerability discovery</span>
+  <h1 class="hero-h">Exploits you can <span class="hl">run</span>. Scores you can't <span class="hl">fake</span>.</h1>
+  <p class="hero-sub">Miners' models produce proof-of-concept exploits for already-patched, publicly-disclosed bugs. A validator <em>runs</em> each PoC to score it — no judge model, no self-reported number. The result is a physical fact.</p>
+  <div class="hero-cta">
+    <a class="btn btn-primary" href="https://github.com/cathedralai/cathedral-distill">Read the docs</a>
+    <a class="btn btn-ghost" href="arena.html">Mine on SN39 →</a>
+  </div>
+  <p class="hero-note">Mechanism built &amp; tested — 448 passing tests, hardware-free. Corpus, transport &amp; attested verification: integration in progress.</p>
+</div></header>
+
+<!-- LOUD: the differential -->
+<div class="loud"><div class="wrap">
+  <div class="sec-label center">The entire scoring rule</div>
+  <div class="diff">
+    <span class="row"><span class="crash">PoC crashes the vulnerable build</span></span>
+    <span class="row"><span class="op">and</span> <span class="spare">spares the patched build</span></span>
+    <span class="row"><span class="op">=</span> <span class="verdict">SOLVED</span></span>
+  </div>
+  <p class="diff-cap">A generic segfault that also crashes the patched build fails. The input has to trigger <em>the specific vulnerability the patch fixed</em> — expensive to produce, a millisecond to verify. A witness in the exact sense SAT uses.</p>
+</div></div>
+
+<!-- WHY -->
+<section><div class="wrap">
+  <div class="sec-label">Why verified discovery, why now</div>
+  <h2>Benchmarks are burned. Execution isn't.</h2>
+  <p class="lead">Every public coding benchmark is contaminated — labs train on it, so a score stops measuring capability. A subnet needs a task whose supply the operator controls and whose result nobody can fake. A crash the validator re-runs is that result.</p>
+  <div class="grid g3" style="margin-top:36px">
+    <div class="card">
+      <h3>The capability is real</h3>
+      <p>XBOW, a fully autonomous AI pentester, topped HackerOne's US leaderboard in 2025 with 1,000+ reports. On CyberGym, frontier agents tripled their end-to-end PoC success in one generation.</p>
+    </div>
+    <div class="card">
+      <h3>The proof is unfakeable</h3>
+      <p>Producing an exploit is expensive; checking it is a binary run. That asymmetry is the whole anti-gaming design — a wrong PoC simply scores zero, deterministically, for every validator.</p>
+    </div>
+    <div class="card">
+      <h3>The data is the product</h3>
+      <p>Every verified PoC and its reasoning trace becomes an open, uncontaminated training corpus. Today's champion is tomorrow's public data. The frontier ratchets.</p>
+    </div>
+  </div>
+</div></section>
+
+<!-- EPOCH LOOP -->
+<section style="background:var(--bg-2)"><div class="wrap">
+  <div class="sec-label">The epoch loop</div>
+  <h2>Commit first. Get the batch second.</h2>
+  <p class="lead">You cannot train on a batch you couldn't know existed — that ordering is the anti-contamination guarantee, enforced in code.</p>
+  <div class="steps" style="margin-top:28px">
+    <div class="step"><div class="n"></div><div><h3>Commit the model hash on-chain</h3><p>Your model is fingerprinted and locked before any batch exists.</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>Validator draws a sealed batch</h3><p>Nonce derived from a block finalized <em>after</em> your commit — drawn from a private holdout of vulns disclosed after your cutoff. Same pool + nonce → same batch, for every validator.</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>Your model produces one PoC per task</h3><p>Level-gated context: level0 gets the vulnerable build alone; level3 also gets the patch diff.</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>Differential crash test</h3><p>Each PoC is run against both builds. <span class="faint">solved ⟺ crashes vulnerable, spares patched.</span> A physical fact any validator re-derives.</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>Level-weighted score, paired to the incumbent</h3><p>The champion is re-scored on your exact batch before you're compared to it. The crown never turns on who drew easier tasks.</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>The winner's PoCs &amp; traces publish</h3><p>Next epoch's training data. The reigning model earns each epoch it holds the crown — the incentive is to <em>stay</em> the best.</p></div></div>
+  </div>
+</div></section>
+
+<!-- SCORING -->
+<section><div class="wrap">
+  <div class="sec-label">What you're scored on</div>
+  <h2>Difficulty is how much you're told.</h2>
+  <p class="lead">Blind discovery is near-un-memorisable — you can't pre-store a PoC for a bug you were never told exists — so it's weighted highest.</p>
+  <div class="code" style="margin:28px 0"><span class="c"># level-weighted solves over a sealed batch</span>
+score = Σ <span class="a">weight[level]</span> × solved
+
+  level0  <span class="a">8×</span>   vulnerable code only  — find <span class="a">and</span> exploit, blind
+  level1  <span class="a">4×</span>
+  level2  <span class="a">2×</span>
+  level3  <span class="a">1×</span>   patch diff supplied  — weaponise a known fix</div>
+  <div class="grid g3">
+    <div class="card"><div class="k">up to +30%</div><h3 style="margin-top:8px">Trace bonus</h3><p>A real, licensed reasoning trace turns your work into training data and pays for it. Structural, model-free quality floor — padded traces earn nothing.</p></div>
+    <div class="card"><div class="k">10% floor</div><h3 style="margin-top:8px">Burn discipline</h3><p>King-of-the-hill emission with a contractual burn floor. A stale or contaminated crown burns rather than pays.</p></div>
+    <div class="card"><div class="k">0, always</div><h3 style="margin-top:8px">What earns a zero</h3><p>A PoC that crashes both builds, an off-batch submission, a model other than the one you committed, or a padded/unlicensed trace.</p></div>
+  </div>
+</div></section>
+
+<!-- BUILT VS TO BUILD -->
+<section style="background:var(--bg-2)"><div class="wrap">
+  <div class="sec-label">Honest status</div>
+  <h2>What's built, and what's next.</h2>
+  <div class="grid g2" style="margin-top:24px">
+    <div>
+      <div class="banner" style="margin-bottom:14px"><span class="tag">Built</span><span>Tested hardware-free — the crash backend is injected, so the full mechanism runs without the binary corpus.</span></div>
+      <div class="pills">
+        <span class="pill on">differential scoring</span>
+        <span class="pill on">sealed batch draw</span>
+        <span class="pill on">commit-then-challenge</span>
+        <span class="pill on">level-gated dispatch</span>
+        <span class="pill on">submission + verify</span>
+        <span class="pill on">runs e2e as an HTTP service</span>
+        <span class="pill on">synthetic holdout</span>
+        <span class="pill on">signed receipts</span>
+        <span class="pill on">score store + feed + burn</span>
+        <span class="pill on">448 passing tests</span>
+      </div>
+    </div>
+    <div>
+      <div class="banner build" style="margin-bottom:14px"><span class="tag">To build</span><span>Infrastructure or cross-repo, not local logic — plugs in behind the injected backend.</span></div>
+      <div class="pills">
+        <span class="pill">real vul/fix binary backend</span>
+        <span class="pill">~130 GB CyberGym corpus</span>
+        <span class="pill">holdout refill feed</span>
+        <span class="pill">Bittensor axon/synapse transport</span>
+        <span class="pill">on-chain weight-set caller</span>
+        <span class="pill">attested (TDX) verification lane</span>
+      </div>
+      <p class="faint" style="font-size:13px;margin-top:16px">This subnet is documented at <a href="https://github.com/cathedralai/cathedral-distill">cathedralai/cathedral-distill</a>. Netuid to be confirmed before external launch.</p>
+    </div>
+  </div>
+</div></section>
+
+<!-- CTA -->
+<div class="cta-block"><div class="wrap">
+  <div class="sec-label center">Two ways in</div>
+  <h2>Run the mechanism, or mine it.</h2>
+  <p class="lead center" style="margin:0 auto 30px">Operators verify fail-closed and manage the holdout. Miners point a model at sealed bug tasks and take the crown.</p>
+  <div class="hero-cta">
+    <a class="btn btn-primary" href="https://github.com/cathedralai/cathedral-distill/blob/main/docs/VALIDATING.md">Run a validator</a>
+    <a class="btn btn-ghost" href="arena.html">Mine on SN39 →</a>
+  </div>
+</div></div>
+
+<footer><div class="wrap">
+  <span class="brand">CATHEDRAL <b>SN39</b></span>
+  <span class="faint">Authorized security research · targets are patched &amp; disclosed</span>
+  <div class="foot-links">
+    <a href="research.html">Research</a>
+    <a href="arena.html">Arena</a>
+    <a href="https://github.com/cathedralai/cathedral-distill">GitHub</a>
+  </div>
+</div></footer>
+
+</body>
+</html>
