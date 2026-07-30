@@ -10,7 +10,10 @@ missing-lane-to-burn rule, and emits an audit trail that ties each step together
 
 `verify_lane_receipt` is the single verification entry for all four receipt kinds
 (Compute CPU, Compute GPU, Distill, CyberGym); each returns a `ReceiptDecision`
-with a `PASS` / `FAIL` / `NOT_PROVEN` verdict. `compose_integrated` takes a
+with a `PASS` / `FAIL` / `NOT_PROVEN` verdict, and each call requires the same
+explicit `consumption_ledger` decision (a `ConsumptionLedger`, or the typed
+`NO_REPLAY_LEDGER` opt-out) that the plural entry and `admission.verify_admission`
+demand. `compose_integrated` takes a
 `ResolvedAllocation` (from `signed_config.resolve_allocation`) and the decisions,
 and returns the composed feed plus the audit trail. A lane the config expects but
 that produced no `PASS` contribution is composed as empty, so its share goes to
@@ -137,11 +140,11 @@ def verify_lane_receipt(
     lane: str,
     key_registry: Any,
     source_epoch: int,
+    consumption_ledger: Any,
     now_iso: str | None = None,
     current_block: int | None = None,
     gpu_attestation_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
     cpu_quote_verifier: Callable[[Mapping[str, Any]], bool] | None = None,
-    consumption_ledger: Any = None,
     defer_consumption: bool = False,
     allowed_measurements: frozenset[str] | set[str] | None = None,
     allowed_tcb_statuses: frozenset[str] | set[str] | None = None,
@@ -152,6 +155,14 @@ def verify_lane_receipt(
     A verifier that proves the receipt wrong -> `FAIL`. Evidence that cannot be
     checked at all (a GPU receipt with no attestation verifier configured) ->
     `NOT_PROVEN`, never a silent pass. Only `PASS` contributes weight.
+
+    `consumption_ledger` is required: a `ConsumptionLedger`, or the typed
+    `NO_REPLAY_LEDGER` opt-out. This is the entry the external validator calls per
+    receipt (INTEGRATION_CONTRACT section 8), and it used to default to no ledger,
+    so a caller that never learned the keyword existed had no replay gate at all:
+    the same receipt was creditable on every resubmission. Forgetting the keyword
+    is now an error, the same rule `verify_lane_receipts` and
+    `admission.verify_admission` already apply.
 
     `current_block` is the finalized chain height: when supplied, a CyberGym
     receipt outside its signed `[valid_from_block, valid_until_block)` window is
@@ -175,6 +186,9 @@ def verify_lane_receipt(
     """
     if kind not in _KINDS:
         raise IntegratedFeedError(f"unknown receipt kind {kind!r}")
+    # Resolved before any receipt data is read: a missing replay decision is a
+    # caller error that must surface immediately, not a per-receipt FAIL.
+    ledger = _resolve_ledger(consumption_ledger, entry="verify_lane_receipt")
     receipt_id = _raw(receipt, "receipt_id")
     try:
         if kind in (KIND_COMPUTE_CPU, KIND_COMPUTE_GPU):
@@ -270,7 +284,6 @@ def verify_lane_receipt(
     # earlier would let a receipt that is about to be rejected still burn its own
     # one-time token, which an attacker can use to destroy a legitimate
     # submission's only chance to be credited.
-    ledger = None if consumption_ledger is NO_REPLAY_LEDGER else consumption_ledger
     if ledger is not None and defer_consumption:
         return ReceiptDecision(
             lane, kind, contribution_id, contribution_miner, PASS, work_units,

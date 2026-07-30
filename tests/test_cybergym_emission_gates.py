@@ -35,8 +35,11 @@ from cathedral_distill.bundle_registry import (  # noqa: E402
 )
 from cathedral_distill.cybergym import Level  # noqa: E402
 from cathedral_distill.cybergym_batch import PooledTask, TaskPool  # noqa: E402
+from cathedral_distill.cybergym_protocol import ProtocolError  # noqa: E402
 from cathedral_distill.cybergym_scores import (  # noqa: E402
     EPOCH_CLOSED,
+    EPOCH_INCOMPLETE,
+    CyberGymScoreError,
     CyberGymScoreStore,
 )
 from cathedral_distill.cybergym_service import (  # noqa: E402
@@ -459,7 +462,9 @@ def test_a_gated_miner_earns_nothing_through_the_returned_contribution_either(tm
     assert result.receipt["score"]["earned_units"] == "8"
 
     # composing the results directly refuses the gated-out miner
-    lane = compose_results_lane(results, allocation=Decimal("0.90"))
+    store.mark_epoch(SOURCE_EPOCH, state=EPOCH_CLOSED, detail="scored in this test")
+    lane = compose_results_lane(results, score_store=store, epoch=SOURCE_EPOCH,
+                                allocation=Decimal("0.90"))
     assert list(lane.contributions) == []
     # and even a naive composer that ignores `creditable` cannot credit it, because
     # the units are zero
@@ -479,9 +484,54 @@ def test_a_passing_miner_still_composes_through_both_routes(tmp_path):
     results = _run(store, cv.EmissionGatePolicy(bundle_registry=_registry()))
     assert results[0].contribution["work_units"] == "8"
     assert "gate_failures" not in results[0].contribution
-    lane = compose_results_lane(results, allocation=Decimal("0.90"))
+    store.mark_epoch(SOURCE_EPOCH, state=EPOCH_CLOSED, detail="scored in this test")
+    lane = compose_results_lane(results, score_store=store, epoch=SOURCE_EPOCH,
+                                allocation=Decimal("0.90"))
     assert [c.miner_hotkey for c in lane.contributions] == [MINER]
     assert store.epoch_scores(SOURCE_EPOCH) == {MINER: Decimal("8")}
+
+
+def test_compose_results_lane_refuses_an_epoch_that_never_closed(tmp_path):
+    """`compose_results_lane` took only the results, so it structurally could not
+    consult the epoch lifecycle the sibling composers gate on: it composed epochs
+    the store marks `incomplete` (which `compose_scores_lane` and
+    `CyberGymService.compose_lane` both refuse). It now requires the score store
+    and applies the same closed-epoch gate."""
+    store = _store(tmp_path)
+    results = _run(store, cv.EmissionGatePolicy(bundle_registry=_registry()))
+    # run_epoch alone never marks the epoch: still open, so composing must refuse
+    with pytest.raises(CyberGymScoreError, match="refusing to compose"):
+        compose_results_lane(results, score_store=store, epoch=SOURCE_EPOCH,
+                             allocation=Decimal("0.90"))
+    store.mark_epoch(SOURCE_EPOCH, state=EPOCH_INCOMPLETE, detail="state was lost")
+    with pytest.raises(CyberGymScoreError, match="incomplete"):
+        compose_results_lane(results, score_store=store, epoch=SOURCE_EPOCH,
+                             allocation=Decimal("0.90"))
+
+
+def test_compose_results_lane_refuses_the_lost_solve_epoch_not_an_empty_lane(tmp_path):
+    """The restart shape: durable evidence says miners solved, this process cannot
+    score them, so `score_epoch` marks the epoch incomplete and returns no
+    results. Composing that `[]` used to publish the silent, empty, 100%-burn
+    lane the solve store exists to prevent; it must refuse instead."""
+    store = _store(tmp_path)
+    store.mark_epoch(SOURCE_EPOCH, state=EPOCH_INCOMPLETE,
+                     detail="1 miner(s) with durable solves could not be scored: 5Alice")
+    with pytest.raises(CyberGymScoreError, match="incomplete"):
+        compose_results_lane([], score_store=store, epoch=SOURCE_EPOCH,
+                             allocation=Decimal("0.90"))
+
+
+def test_compose_results_lane_refuses_results_from_another_epoch(tmp_path):
+    """The closed-epoch marker is per epoch, so it only vouches for the epoch the
+    results were actually scored under: epoch N+1 closing cleanly must not admit
+    results scored under epoch N."""
+    store = _store(tmp_path)
+    results = _run(store, cv.EmissionGatePolicy(bundle_registry=_registry()))
+    store.mark_epoch(SOURCE_EPOCH + 1, state=EPOCH_CLOSED, detail="a different epoch")
+    with pytest.raises(ProtocolError, match="scored under epoch"):
+        compose_results_lane(results, score_store=store, epoch=SOURCE_EPOCH + 1,
+                             allocation=Decimal("0.90"))
 
 
 def test_a_repeated_dispatch_cannot_double_persist(tmp_path):

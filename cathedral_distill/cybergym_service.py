@@ -646,6 +646,8 @@ class CyberGymService:
 def compose_results_lane(
     results: Sequence[MinerResult],
     *,
+    score_store: CyberGymScoreStore,
+    epoch: int,
     allocation: Decimal,
     lane_id: str = CYBERGYM_LANE,
 ) -> Lane:
@@ -656,9 +658,30 @@ def compose_results_lane(
     when they do, a non-creditable `MinerResult` must be refused rather than
     silently contributing: a failed gate means the miner earns nothing, through
     every route.
+
+    `score_store` and `epoch` are required because results alone cannot show
+    whether the epoch actually closed. Taking only `results`, this function
+    composed epochs the store marks `incomplete` (which `compose_scores_lane` and
+    `CyberGymService.compose_lane` both refuse), and after lost state
+    (`score_epoch` returns `[]`) it composed a silent, empty, 100%-burn lane: the
+    exact outcome the epoch-status marker exists to prevent. A lost or unscored
+    epoch is never marked `closed` (`score_epoch` marks it `incomplete` when
+    `lost_durable_solvers` is non-empty), so the one closed-epoch gate covers the
+    lost-solve refusal on this route too.
     """
+    score_store.require_closed_epoch(epoch)
     contributions = []
     for result in results:
+        # The closed-epoch marker vouches only for the epoch it names: results
+        # scored under a different epoch must not ride in on this epoch's clean
+        # close.
+        receipt_epoch = result.receipt.get("source_epoch")
+        if receipt_epoch is None or int(str(receipt_epoch)) != int(epoch):
+            raise ProtocolError(
+                f"refusing to compose the CyberGym lane for epoch {int(epoch)}: "
+                f"the result for miner {result.miner_hotkey} was scored under "
+                f"epoch {receipt_epoch!r}"
+            )
         if not result.creditable:
             continue
         units = Decimal(str(result.contribution["work_units"]))

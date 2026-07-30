@@ -12,8 +12,8 @@ Config (all via env):
   CYBERGYM_SIGNING_SEED   ed25519 seed, 64 hex chars        (default: ephemeral — receipts
                                                              won't verify across restarts)
   CYBERGYM_VALIDATOR_HOTKEY  validator hotkey ss58          (default cathedral-repro-validator)
-  CYBERGYM_CORPUS_DB      corpus sqlite path                (default :memory:)
-  CYBERGYM_SCORE_DB       score sqlite path                 (default :memory:)
+  CYBERGYM_CORPUS_DB      corpus sqlite path                (default: a fresh per-boot temp file)
+  CYBERGYM_SCORE_DB       score sqlite path                 (default: a fresh per-boot temp file)
   CYBERGYM_TASKS          comma-separated task ids to serve (default: the pulled subset)
 
 Only tasks whose vul+fix images are actually pulled are dispatched, so a miner
@@ -25,6 +25,7 @@ Run:  PORT=8666 CYBERGYM_CORPUS_DB=/srv/cgd/corpus.sqlite \
 from __future__ import annotations
 
 import os
+import tempfile
 from datetime import UTC, datetime
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -40,9 +41,23 @@ from cathedral_distill.cybergym_validator import ChainContext
 
 def _signing_key() -> tuple[Ed25519PrivateKey, bool]:
     seed = os.environ.get("CYBERGYM_SIGNING_SEED", "").strip()
-    if seed:
-        return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed)), False
-    return Ed25519PrivateKey.generate(), True  # ephemeral: fine for a dry run, not production
+    if not seed:
+        return Ed25519PrivateKey.generate(), True  # ephemeral: fine for a dry run, not production
+    # A mistyped seed used to die with a raw cryptography traceback ("Expected 32
+    # bytes") that never named the env var; refuse with the variable and the fix.
+    try:
+        raw = bytes.fromhex(seed)
+    except ValueError:
+        raise SystemExit(
+            "CYBERGYM_SIGNING_SEED must be 64 hex characters (a 32-byte ed25519 "
+            f"seed); got {len(seed)} characters that are not valid hex"
+        ) from None
+    if len(raw) != 32:
+        raise SystemExit(
+            "CYBERGYM_SIGNING_SEED must be 64 hex characters (a 32-byte ed25519 "
+            f"seed); got {len(seed)} hex characters"
+        )
+    return Ed25519PrivateKey.from_private_bytes(raw), False
 
 
 def resolve_tasks() -> list[str]:
@@ -53,11 +68,20 @@ def resolve_tasks() -> list[str]:
     return available_tasks(ids) or ids
 
 
-def build_service(ids, *, private_key: Ed25519PrivateKey, corpus_db: str = ":memory:",
-                  score_db: str = ":memory:",
+def build_service(ids, *, private_key: Ed25519PrivateKey, corpus_db: str | None = None,
+                  score_db: str | None = None,
                   validator_hotkey: str = "cathedral-repro-validator") -> CyberGymService:
     """Wire a `CyberGymService` over the real source + Docker backend. Importable so
-    the wiring is testable with an injected backend and in-memory stores."""
+    the wiring is testable with an injected backend and per-run temp stores."""
+    if corpus_db is None or score_db is None:
+        # Fresh per-boot files rather than ":memory:": the score store refuses an
+        # in-memory path outright (it exists to be read as a file by the external
+        # mechanism adapter), and the shipped reference server has to keep booting
+        # with zero configuration. A dry run intentionally starts clean each boot;
+        # a real deployment sets CYBERGYM_CORPUS_DB / CYBERGYM_SCORE_DB.
+        run_dir = tempfile.mkdtemp(prefix="cybergym-repro-")
+        corpus_db = corpus_db or os.path.join(run_dir, "corpus.sqlite")
+        score_db = score_db or os.path.join(run_dir, "scores.sqlite")
     src = ReproTaskSource(ids)
     # Placeholder chain window; a live validator reads this from the subtensor and
     # only needs it to compose weights, not to run the dispatch/verify/score loop.
@@ -68,11 +92,12 @@ def build_service(ids, *, private_key: Ed25519PrivateKey, corpus_db: str = ":mem
         corpus_store=CyberGymCorpusStore(corpus_db), score_store=CyberGymScoreStore(score_db),
         validator_hotkey=validator_hotkey, private_key=private_key, signing_key_id="cybergym-1",
         batch_size=1, cutoff=None, as_of=datetime.now(UTC), attestation_required=False,
-        # This reference server is a dry-run harness (ephemeral signing key, in-memory
-        # stores by default), so it explicitly opts out of the durable-solve-store and
-        # anti-gaming-gate requirements the constructor otherwise enforces fail-closed
-        # — without these it raises and the server cannot start at all. A real validator
-        # MUST instead pass a durable solve_store and a real EmissionGatePolicy.
+        # This reference server is a dry-run harness (ephemeral signing key, per-boot
+        # temp stores by default), so it explicitly opts out of the durable-solve-store
+        # and anti-gaming-gate requirements the constructor otherwise enforces
+        # fail-closed: without these it raises and the server cannot start at all. A
+        # real validator MUST instead pass a durable solve_store and a real
+        # EmissionGatePolicy.
         solve_durability_required=False, gates_required=False)
 
 
@@ -83,8 +108,11 @@ def main() -> None:
     ids = resolve_tasks()
     svc = build_service(
         ids, private_key=key,
-        corpus_db=os.environ.get("CYBERGYM_CORPUS_DB", ":memory:"),
-        score_db=os.environ.get("CYBERGYM_SCORE_DB", ":memory:"),
+        # An unset or empty variable falls through to build_service's per-boot temp
+        # files; ":memory:" is no longer a bootable score-store path (the store
+        # refuses it, because the external adapter reads the database as a file).
+        corpus_db=os.environ.get("CYBERGYM_CORPUS_DB") or None,
+        score_db=os.environ.get("CYBERGYM_SCORE_DB") or None,
         validator_hotkey=os.environ.get("CYBERGYM_VALIDATOR_HOTKEY", "cathedral-repro-validator"))
     server = make_threaded_server(svc, host=host, port=port,
                                   healthz={"status": "ok", "tasks": ids,

@@ -443,6 +443,26 @@ def test_a_non_durable_solve_store_is_refused(path):
         CyberGymSolveStore(path)
 
 
+@pytest.mark.parametrize("path", ["", "  ", ":memory:", "file:x?mode=memory&cache=shared"])
+def test_a_non_durable_score_store_is_refused(path):
+    """The score store is the table the external mechanism adapter reads, as a
+    FILE, from another process. An in-memory score store could be marked closed
+    and composed in-process while the adapter saw an empty database and published
+    100% burn: the same durability rule the solve store applies, on the store
+    whose whole purpose is to be read externally."""
+    with pytest.raises(CyberGymScoreError, match="durable"):
+        CyberGymScoreStore(path)
+
+
+def test_the_score_store_durability_check_has_a_named_opt_out():
+    # Test-only: the opt-out has to be typed in full, so a production wiring
+    # cannot end up in memory by forgetting an argument.
+    store = CyberGymScoreStore(":memory:", durability_required=False)
+    store.mark_epoch(3, state=EPOCH_CLOSED, detail="in-memory, explicitly opted out")
+    assert store.epoch_state(3)[0] == EPOCH_CLOSED
+    store.close()
+
+
 def test_a_running_service_requires_a_durable_solve_store_by_default(tmp_path):
     with pytest.raises(ProtocolError, match="durable solve store"):
         CyberGymService(

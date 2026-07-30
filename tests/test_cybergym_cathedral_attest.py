@@ -15,6 +15,8 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cathedral_distill.cybergym_cathedral_attest import (  # noqa: E402
@@ -173,7 +175,8 @@ SSH_PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexampleexamplekey cathedral"
 
 
 def _boot_receipt(*, ssh_pubkey=SSH_PUB, kind="tdx-1.5", intel_verified=True,
-                  binding_verified=True, verified=True, status="ready", nonce="9c99da63"):
+                  binding_verified=True, verified=True, status="ready", nonce="9c99da63",
+                  started="2026-07-30T11:59:00Z"):
     """A custom.v1 boot receipt whose report_data binds the ssh key, per the real recipe
     report_data[0:32] = sha256(nonce_hex || base64(ssh_pubkey))."""
     pub_b64 = base64.b64encode(ssh_pubkey.strip().encode()).decode()
@@ -182,50 +185,84 @@ def _boot_receipt(*, ssh_pubkey=SSH_PUB, kind="tdx-1.5", intel_verified=True,
             "kind": kind, "intel_verified": intel_verified, "intel_status": "verified",
             "binding_verified": binding_verified, "verified": verified,
             "nonce": nonce, "pubkey_b64": pub_b64, "report_data": rd,
-            "quote_b64": "BAACAIEA…"}
+            "quote_b64": "BAACAIEA…", "started_at": started}
+
+
+def _boot(receipt, *, key=SSH_PUB, now=NOW, **kw):
+    return verify_boot_attestation(receipt, expected_ssh_pubkey=key, now=now, **kw)
 
 
 def test_a_genuine_boot_quote_binds_the_operator_ssh_key():
-    a = verify_boot_attestation(_boot_receipt(), expected_ssh_pubkey=SSH_PUB)
+    a = _boot(_boot_receipt())
     assert a.attested and a.tee == "intel_tdx" and a.key_bound and a.miner_attested
     assert a.reason == "attested_intel_tdx_boot_key_bound"
     # SAFETY: a boot quote NEVER binds the PoC/trace, whatever else it proves
     assert a.result_bound is False
 
 
-def test_boot_quote_without_a_key_is_environment_only_not_miner_bound():
-    # the unsafe footgun: no expected key -> proves a TDX worker booted, but nothing
-    # about WHICH miner. attested is true, but key_bound/miner_attested must be false.
-    a = verify_boot_attestation(_boot_receipt())
-    assert a.attested and not a.key_bound and not a.miner_attested
-    assert a.reason == "attested_intel_tdx_boot_environment_only"
-    assert a.result_bound is False
+def test_boot_quote_without_an_expected_key_never_attests():
+    # the closed footgun: with no expected key, attested=True could only mean "SOME
+    # genuine TDX worker booted", which any party with any TDX worker satisfies.
+    # The key is now a required argument, and an absent value refuses outright
+    # rather than returning an attested-but-unbound result a caller could credit.
+    with pytest.raises(TypeError, match="expected_ssh_pubkey"):
+        verify_boot_attestation(_boot_receipt())
+    a = verify_boot_attestation(_boot_receipt(), expected_ssh_pubkey=None, now=NOW)
+    assert not a.attested and not a.key_bound and not a.miner_attested
+    assert "never credit" in a.reason
+    a = verify_boot_attestation(_boot_receipt(), expected_ssh_pubkey="  ", now=NOW)
+    assert not a.attested and "never credit" in a.reason
 
 
 def test_boot_quote_bound_to_a_different_key_is_refused():
     # a boot quote for someone else's key can't vouch for our reproduction
-    a = verify_boot_attestation(_boot_receipt(ssh_pubkey="ssh-ed25519 AAAAotherkey x"),
-                                expected_ssh_pubkey=SSH_PUB)
+    a = _boot(_boot_receipt(ssh_pubkey="ssh-ed25519 AAAAotherkey x"))
     assert not a.attested and "bind the expected ssh key" in a.reason
 
 
-def test_boot_quote_issuer_trust_without_a_key_still_requires_verified_flags():
-    assert verify_boot_attestation(_boot_receipt()).attested                       # verified flags true
-    assert not verify_boot_attestation(_boot_receipt(intel_verified=False, verified=False)).attested
-    assert not verify_boot_attestation(_boot_receipt(binding_verified=False, verified=False)).attested
-    assert not verify_boot_attestation(_boot_receipt(verified=False)).attested
+def test_boot_quote_issuer_trust_still_requires_verified_flags():
+    assert _boot(_boot_receipt()).attested                       # verified flags true
+    assert not _boot(_boot_receipt(intel_verified=False, verified=False)).attested
+    assert not _boot(_boot_receipt(binding_verified=False, verified=False)).attested
+    assert not _boot(_boot_receipt(verified=False)).attested
 
 
 def test_boot_quote_refuses_wrong_tee_and_unready():
-    assert not verify_boot_attestation(_boot_receipt(kind="sev-snp-1")).attested
-    assert not verify_boot_attestation(_boot_receipt(status="provisioning")).attested
+    assert not _boot(_boot_receipt(kind="sev-snp-1")).attested
+    assert not _boot(_boot_receipt(status="provisioning")).attested
+
+
+def test_a_stale_boot_quote_is_refused():
+    a = _boot(_boot_receipt(started="2026-07-01T00:00:00Z"))
+    assert not a.attested and "stale" in a.reason
+
+
+def test_a_future_dated_boot_quote_is_refused():
+    a = _boot(_boot_receipt(started="2026-07-30T13:00:00Z"))  # an hour past NOW
+    assert not a.attested and "future" in a.reason
+
+
+def test_a_boot_quote_without_a_timestamp_fails_closed():
+    # omitting started_at must not disable the freshness window, or an
+    # old-but-genuine boot receipt replays forever by dropping the field
+    r = _boot_receipt()
+    del r["started_at"]
+    a = _boot(r)
+    assert not a.attested and "timestamp" in a.reason
+
+
+def test_the_same_boot_quote_cannot_verify_indefinitely():
+    # bounded like verify_cathedral_attestation: one enclave boot must not keep
+    # vouching for submissions days or months later
+    r = _boot_receipt()
+    assert _boot(r, now=NOW).attested
+    assert not _boot(r, now=NOW + timedelta(days=2)).attested
 
 
 def test_boot_quote_trustless_mode_checks_the_raw_quote():
     seen = {}
-    ok = verify_boot_attestation(_boot_receipt(intel_verified=False, verified=False),
-                                 expected_ssh_pubkey=SSH_PUB,
-                                 quote_verifier=lambda q, rd: seen.setdefault("q", q) or True)
+    ok = _boot(_boot_receipt(intel_verified=False, verified=False),
+               quote_verifier=lambda q, rd: seen.setdefault("q", q) or True)
     assert ok.attested and seen["q"].startswith("BAAC")
-    bad = verify_boot_attestation(_boot_receipt(), quote_verifier=lambda q, rd: False)
+    bad = _boot(_boot_receipt(), quote_verifier=lambda q, rd: False)
     assert not bad.attested and "raw boot quote" in bad.reason

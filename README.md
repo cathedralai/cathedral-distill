@@ -13,7 +13,7 @@ become an open training corpus that makes the next model better.
 > *requires* the patched build to exist. The subnet does not target live systems,
 > See [Responsible use](#responsible-use).
 
-**Status:** the mechanism is implemented and tested hardware-free (**733 tests**), and the CyberGym lane runs end to end. The **real binary backend** (the
+**Status:** the mechanism is implemented and tested hardware-free (**764 tests**), and the CyberGym lane runs end to end. The **real binary backend** (the
 ARVO + OSS-Fuzz differential) and both **Intel-TDX attestation adapters** are now
 built and proven on real vulnerabilities — including a genuine ARVO bug solved
 *inside* a sealed Intel TDX enclave. What remains is the full ~130 GB+ corpus at

@@ -390,11 +390,14 @@ def test_integrated_feed_enforces_the_finalized_block_window():
 
     r = _receipt()  # valid_from_block=100, valid_until_block=460
     passes = itf.verify_lane_receipt(itf.KIND_CYBERGYM, r, lane="cathedral_cybergym",
-                                     key_registry=KEYREG, source_epoch=SOURCE_EPOCH)
+                                     key_registry=KEYREG, source_epoch=SOURCE_EPOCH,
+                                     consumption_ledger=itf.NO_REPLAY_LEDGER)
     assert passes.verdict == "PASS"                                   # no current_block: unchecked
     in_window = itf.verify_lane_receipt(itf.KIND_CYBERGYM, r, lane="cathedral_cybergym",
-                                        key_registry=KEYREG, source_epoch=SOURCE_EPOCH, current_block=200)
+                                        key_registry=KEYREG, source_epoch=SOURCE_EPOCH, current_block=200,
+                                        consumption_ledger=itf.NO_REPLAY_LEDGER)
     assert in_window.verdict == "PASS"
     out = itf.verify_lane_receipt(itf.KIND_CYBERGYM, r, lane="cathedral_cybergym",
-                                  key_registry=KEYREG, source_epoch=SOURCE_EPOCH, current_block=999)
+                                  key_registry=KEYREG, source_epoch=SOURCE_EPOCH, current_block=999,
+                                  consumption_ledger=itf.NO_REPLAY_LEDGER)
     assert out.verdict == "FAIL" and "outside authorized window" in out.detail

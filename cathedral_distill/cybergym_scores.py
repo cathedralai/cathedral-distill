@@ -62,7 +62,16 @@ def _require_durable_path(db_path: str, *, what: str) -> str:
 class CyberGymScoreStore:
     """SQLite-backed writer for the `cybergym_scores` mechanism table."""
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, *, durability_required: bool = True) -> None:
+        # The same refusal the solve store makes, and for a sharper reason: this
+        # table's whole purpose is to be read as a FILE by the external mechanism
+        # adapter, from another process. An in-memory score store could be marked
+        # EPOCH_CLOSED and composed in-process while the adapter saw an empty
+        # database and published 100% burn. The opt-out is named in full so a
+        # test can say what it is giving up and production cannot do it by
+        # accident (mirrors the service's solve_durability_required).
+        if durability_required:
+            db_path = _require_durable_path(db_path, what="CyberGymScoreStore")
         self._db_path = db_path
         # check_same_thread=False so a server thread can persist scores; the
         # single-threaded service serialises access (no concurrent writers).

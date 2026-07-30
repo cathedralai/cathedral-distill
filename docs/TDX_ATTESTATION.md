@@ -55,9 +55,11 @@ the quote.
 
 **Safety — this attests the environment, not the solve.** Two limits:
 
-1. You *must* pass the miner's registered `expected_ssh_pubkey`. Without it, a pass only
-   proves "*some* TDX worker booted" — which any party with any `custom.v1` worker
-   satisfies — so `key_bound=False` must never credit a miner.
+1. The miner's registered `expected_ssh_pubkey` is required. Without it, a pass could
+   only prove "*some* TDX worker booted", which any party with any `custom.v1` worker
+   satisfies, so the verifier refuses outright (`attested=False`) instead of returning
+   a key-unbound pass. A stale, future-dated, or timestamp-less receipt is refused on
+   the same freshness bounds as `verify_cathedral_attestation`.
 2. Even key-bound, the quote does **not** bind the PoC (`result_bound` is always false):
    the customer holds the SSH private key, so a miner could present a valid key-bound boot
    quote alongside a PoC obtained anywhere (looked up). It is defense-in-depth /
