@@ -199,29 +199,37 @@ class BootAttestation:
 
 
 def verify_boot_attestation(
-    receipt: Mapping[str, Any], *, expected_ssh_pubkey: str | None = None,
+    receipt: Mapping[str, Any], *, expected_ssh_pubkey: str | None,
+    now: datetime | None = None, max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
     quote_verifier: QuoteVerifier | None = None,
 ) -> BootAttestation:
-    """Verify a Cathedral `custom.v1` **boot** quote — a sealed Intel-TDX worker that
+    """Verify a Cathedral `custom.v1` **boot** quote: a sealed Intel-TDX worker that
     keeps the real corpus image running with SSH access after a verified boot.
 
-    ⚠️  SAFETY — a boot quote attests the ENVIRONMENT, not the solve:
+    SAFETY (a boot quote attests the ENVIRONMENT, not the solve):
       * It binds the machine boot + the **customer's SSH key**
         (`report_data[0:32] = sha256(nonce_hex || base64(ssh_pubkey))`).
-        `trust.workload_result_binding` is false — the PoC/trace are NOT in the quote,
+        `trust.workload_result_binding` is false: the PoC/trace are NOT in the quote,
         so `result_bound` is always False.
-      * You MUST pass the miner's REGISTERED key as `expected_ssh_pubkey`. Without it
-        (`key_bound=False`) a pass only proves "*some* genuine TDX worker booted", which
-        any party with any TDX worker satisfies — it must NEVER credit a miner.
-      * Even key-bound this is NOT a sufficient anti-cheat gate: the customer holds the
-        SSH private key, so a miner can present a valid key-bound boot quote alongside a
-        PoC obtained anywhere (looked up). The quote does not tie the PoC to the enclave.
+      * `expected_ssh_pubkey` is REQUIRED and must be the miner's REGISTERED key.
+        Without one, a pass could only prove "*some* genuine TDX worker booted",
+        which any party with any TDX worker satisfies; this used to return
+        `attested=True, key_bound=False`, an advisory shape one missed
+        `key_bound` check away from crediting anybody, so an absent key now
+        refuses outright (`attested=False`).
+      * Freshness is bounded exactly as `verify_cathedral_attestation` bounds it:
+        a stale or future-dated `started_at` is refused, and a missing one fails
+        closed, so one enclave boot cannot keep vouching indefinitely.
+      * Even key-bound and fresh this is NOT a sufficient anti-cheat gate: the
+        customer holds the SSH private key, so a miner can present a valid
+        key-bound boot quote alongside a PoC obtained anywhere (looked up). The
+        quote does not tie the PoC to the enclave.
 
     Use for environment attestation / defense-in-depth. A *creditable* solve must be
-    RESULT-bound — `attest.v1`'s result quote (`verify_cathedral_attestation`), or a
-    persistent worker whose ENCLAVE holds the signing key and signs the (task, poc, trace)
-    commitment. Trusted-issuer by default; a `quote_verifier` checks the raw quote via
-    Intel DCAP. Fails closed.
+    RESULT-bound: `attest.v1`'s result quote (`verify_cathedral_attestation`), or a
+    persistent worker whose ENCLAVE holds the signing key and signs the (task, poc,
+    trace) commitment. Trusted-issuer by default; a `quote_verifier` checks the raw
+    quote via Intel DCAP. Fails closed.
     """
     rid = str(receipt.get("receipt_id") or receipt.get("worker_id") or "")
 
@@ -234,17 +242,35 @@ def verify_boot_attestation(
     if tee != REQUIRED_TEE:
         return no(f"CyberGym requires an Intel TDX worker, got tee={tee!r}")
 
-    key_bound = False
-    if expected_ssh_pubkey is not None:
-        pub_b64 = base64.b64encode(expected_ssh_pubkey.strip().encode()).decode()
-        nonce = str(receipt.get("nonce", ""))
-        rd = str(receipt.get("report_data", ""))
-        expect = hashlib.sha256((nonce + pub_b64).encode()).hexdigest()
-        if not rd or not rd.startswith(expect):
-            return no("boot quote report_data does not bind the expected ssh key")
-        if str(receipt.get("pubkey_b64", "")) != pub_b64:
-            return no("receipt pubkey_b64 does not match the expected ssh key")
-        key_bound = True
+    # The docstring rule, enforced rather than advised: an unbound boot quote can
+    # be produced by anyone with any TDX worker, so an absent key is a refusal,
+    # never an attested-but-unbound result a caller could misread as credit.
+    if not isinstance(expected_ssh_pubkey, str) or not expected_ssh_pubkey.strip():
+        return no("no expected ssh pubkey: an unbound boot quote proves only that "
+                  "some TDX worker booted and must never credit a miner")
+
+    # Freshness, the same bounds as `verify_cathedral_attestation` (fail closed: a
+    # missing or unparseable timestamp refuses, else an old-but-genuine receipt
+    # could be replayed forever by omitting it). Without a bound, one enclave boot
+    # vouched for submissions indefinitely.
+    started = _iso(receipt.get("started_at"))
+    ref = now or datetime.now(UTC)
+    if started is None:
+        return no("missing or invalid boot attestation timestamp")
+    age = (ref - started).total_seconds()
+    if age > max_age_seconds:
+        return no(f"boot attestation is stale ({int(age)}s > {max_age_seconds}s)")
+    if age < -300:
+        return no("boot attestation is from the future")
+
+    pub_b64 = base64.b64encode(expected_ssh_pubkey.strip().encode()).decode()
+    nonce = str(receipt.get("nonce", ""))
+    rd = str(receipt.get("report_data", ""))
+    expect = hashlib.sha256((nonce + pub_b64).encode()).hexdigest()
+    if not rd or not rd.startswith(expect):
+        return no("boot quote report_data does not bind the expected ssh key")
+    if str(receipt.get("pubkey_b64", "")) != pub_b64:
+        return no("receipt pubkey_b64 does not match the expected ssh key")
 
     if quote_verifier is not None:
         q = str(receipt.get("quote_b64", ""))
@@ -258,8 +284,8 @@ def verify_boot_attestation(
         if receipt.get("verified") is not True:
             return no("boot quote not verified (intel chain and/or binding failed)")
 
-    reason = "attested_intel_tdx_boot_" + ("key_bound" if key_bound else "environment_only")
-    return BootAttestation(True, REQUIRED_TEE, reason, rid, key_bound)
+    return BootAttestation(True, REQUIRED_TEE, "attested_intel_tdx_boot_key_bound",
+                           rid, True)
 
 
 def _expected_report_data_hex(receipt: Mapping[str, Any]) -> str | None:
