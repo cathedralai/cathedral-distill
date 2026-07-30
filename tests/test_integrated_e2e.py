@@ -162,12 +162,15 @@ def _accept_gpu(_gpu):
 def _verify_all(*, gpu_verifier=_accept_gpu, distill=None):
     return [
         itf.verify_lane_receipt(itf.KIND_COMPUTE_CPU, cpu_receipt(), lane=LANE_CPU,
-                                key_registry=KEYREG, source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO),
+                                key_registry=KEYREG, source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO,
+                                consumption_ledger=itf.NO_REPLAY_LEDGER),
         itf.verify_lane_receipt(itf.KIND_COMPUTE_GPU, gpu_receipt(), lane=LANE_GPU,
                                 key_registry=KEYREG, source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO,
-                                gpu_attestation_verifier=gpu_verifier),
+                                gpu_attestation_verifier=gpu_verifier,
+                                consumption_ledger=itf.NO_REPLAY_LEDGER),
         itf.verify_lane_receipt(itf.KIND_DISTILL, distill or distill_receipt(), lane=LANE_DISTILL,
-                                key_registry=KEYREG, source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO),
+                                key_registry=KEYREG, source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO,
+                                consumption_ledger=itf.NO_REPLAY_LEDGER),
     ]
 
 
@@ -286,12 +289,14 @@ def test_cpu_quote_verifier_threads_through_the_pipeline():
     # an injected CPU quote verifier that rejects turns the compute-CPU lane to FAIL
     d = itf.verify_lane_receipt(
         itf.KIND_COMPUTE_CPU, cpu_receipt(), lane=LANE_CPU, key_registry=KEYREG,
-        source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO, cpu_quote_verifier=lambda _e: False)
+        source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO, cpu_quote_verifier=lambda _e: False,
+        consumption_ledger=itf.NO_REPLAY_LEDGER)
     assert d.verdict == "FAIL" and "CPU-TEE quote" in d.detail
     # and admits when it passes
     d2 = itf.verify_lane_receipt(
         itf.KIND_COMPUTE_CPU, cpu_receipt(), lane=LANE_CPU, key_registry=KEYREG,
-        source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO, cpu_quote_verifier=lambda _e: True)
+        source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO, cpu_quote_verifier=lambda _e: True,
+        consumption_ledger=itf.NO_REPLAY_LEDGER)
     assert d2.verdict == "PASS"
 
 

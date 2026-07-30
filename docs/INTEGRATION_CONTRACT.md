@@ -257,7 +257,9 @@ miner's share of the **total** emission equals its configured allocation.
 ## 6. One pipeline + audit trail (`integrated_feed.py`)
 
 `verify_lane_receipt(kind, receipt, …)` is the single verification entry for all four
-receipt kinds and returns a `PASS` / `FAIL` / `NOT_PROVEN` decision.
+receipt kinds and returns a `PASS` / `FAIL` / `NOT_PROVEN` decision; its
+`consumption_ledger` is required (a `ConsumptionLedger`, or the typed
+`NO_REPLAY_LEDGER` opt-out), so replay protection cannot be lost by omission.
 `verify_lane_receipts(...)` (plural) is the entry an **epoch loop** should call, and
 `compose_integrated` takes a resolved config + the decisions and returns
 `{feed, audit}`, where the audit ties each step:
@@ -273,8 +275,9 @@ This is the operator's "why did this miner get this weight" record.
 **Epoch-level rules the plural entry and the composer enforce** (each one exists
 because the alternative was observed):
 
-- **A replay decision is required, not defaulted.** `verify_lane_receipts` and
-  `admission.verify_admission` take `consumption_ledger` as a required argument:
+- **A replay decision is required, not defaulted.** `verify_lane_receipt`,
+  `verify_lane_receipts`, and `admission.verify_admission` take
+  `consumption_ledger` as a required argument:
   either a `ConsumptionLedger` (durable path; an in-memory or pathless ledger is
   refused, because forgetting a consumed token on restart fails OPEN) or the typed
   `NO_REPLAY_LEDGER` opt-out. Before this, the ledger was optional and nothing in
@@ -332,6 +335,7 @@ inflates another lane. Tests: `tests/test_compute_receipt.py`,
 
 `cathedral-validator` depends on this package (the `cathedral_distill` modules above)
 and, in a default-OFF shadow lane, pulls the signed configs, verifies each lane's
-receipts through `verify_lane_receipt`, composes with `compose_integrated`, and logs
+receipts through `verify_lane_receipt` (whose required `consumption_ledger` makes the
+validator state its replay decision), composes with `compose_integrated`, and logs
 the audit trail — without touching the live `validated_supply_v2` thin path. Turning
 the composed feed into the signed, broadcast vector is the separate owner activation.

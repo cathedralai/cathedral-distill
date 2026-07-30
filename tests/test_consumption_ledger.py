@@ -151,10 +151,27 @@ def test_replayed_receipt_becomes_fail_in_the_pipeline(tmp_path):
     assert replay.work_units == Decimal(0)
 
 
-def test_without_a_ledger_behaviour_is_unchanged():
+def test_omitting_the_ledger_on_the_singular_entry_fails_closed():
+    """The replay decision is required on `verify_lane_receipt` too, not only the
+    plural entry: the external validator calls the singular entry per receipt, and
+    a caller that never learned the keyword existed used to get PASS with no
+    replay gate, so the same receipt was creditable on every resubmission."""
+    fx = IntegrationFixtures()
+    kwargs = dict(lane=LANE_CPU, key_registry=fx.registry,
+                  source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO)
+    with pytest.raises(TypeError, match="consumption_ledger"):
+        itf.verify_lane_receipt(itf.KIND_COMPUTE_CPU, fx.cpu_receipt(), **kwargs)
+    with pytest.raises(itf.IntegratedFeedError, match="explicit replay decision"):
+        itf.verify_lane_receipt(itf.KIND_COMPUTE_CPU, fx.cpu_receipt(),
+                                consumption_ledger=None, **kwargs)
+
+
+def test_no_replay_ledger_is_the_deliberate_opt_out():
     fx = IntegrationFixtures()
     for _ in range(2):
         d = itf.verify_lane_receipt(
             itf.KIND_COMPUTE_CPU, fx.cpu_receipt(), lane=LANE_CPU, key_registry=fx.registry,
-            source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO)
-        assert d.verdict == "PASS"  # no ledger -> no replay gate (opt-in)
+            source_epoch=SOURCE_EPOCH, now_iso=NOW_ISO,
+            consumption_ledger=itf.NO_REPLAY_LEDGER)
+        # typed opt-out: verifies without a replay gate, and says so in the decision
+        assert d.verdict == "PASS" and d.replay == itf.REPLAY_NONE
