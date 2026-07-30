@@ -118,11 +118,20 @@ def test_gpu_verifier_receives_subject_hotkey_and_epoch():
     assert ev["source_epoch"] == SOURCE_EPOCH
 
 
-def test_one_gpu_report_cannot_silently_back_two_hotkeys():
-    """With identity in hand, a verifier can enforce one-GPU-one-identity.
+def test_an_injected_verifier_can_now_reject_one_gpu_report_backing_two_hotkeys():
+    """With identity in hand, an injected verifier CAN enforce one-GPU-one-identity.
 
     Pre-fix this was impossible: both receipts presented byte-identical evidence
     to the verifier, so nothing downstream could tell them apart.
+
+    Scope, stated precisely because the earlier name for this test overclaimed: what
+    is proven here is that the evidence now carries the identity, so a verifier like
+    the stateful one below can reject the duplicate. The verifier SHIPPED in
+    `attestation.gpu_attestation_verifier` does NOT do this: it compares one constant
+    `expected_report_data` and ignores the receipt identity, so it accepts one token
+    for two hotkeys. Closing that is a change to the shipped factory (bind
+    hotkey/epoch/receipt_id into the expected report data, and compare the attested
+    GPU measurement to the receipt's) and is recorded as outstanding, not done.
     """
     claimed: dict[str, str] = {}
 

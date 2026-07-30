@@ -34,8 +34,10 @@ a verified result to the same contribution tuple:
 > the anchored signing key sets the number, and no quantity in the receipt body
 > (`challenge_id`, `manifest_digest`, `result_digest`, `status`) lets a validator
 > re-derive the work to check it against. The only bound today is the decimal
-> grammar (at most 30 digits), which is input sanity, not a work bound: one receipt
-> at that limit takes essentially the whole Compute lane after normalization.
+> grammar (at most 30 integer digits and 12 decimal places, so the supremum is
+> `999999999999999999999999999999.999999999999`; a literal `10^30` has 31 digits and
+> is refused), which is input sanity, not a work bound: one receipt at that limit
+> takes essentially the whole Compute lane after normalization.
 > `tests/test_launch_surface.py` pins this behaviour as a documented gap.
 >
 > Closing it is an **owner decision on the signed receipt contract**, not something
@@ -151,7 +153,18 @@ Two injection seams carry the raw-quote checks, both threaded through
 
 - **`gpu_attestation_verifier`** — *required* for a `confidential_gpu` receipt (a
   confidential GPU is separate hardware the CPU-TEE signature can't vouch for);
-  absent, the GPU lane is `NOT_PROVEN`.
+  absent, the GPU lane is `NOT_PROVEN`. The verifier now receives the receipt's
+  identity (`receipt_id`, `subject_hotkey`, `source_epoch`, `epoch_id`, `cpu_tee`,
+  `cpu_measurement`, `platform_pseudonym`) so GPU-to-identity binding is expressible.
+
+  > **The verifier SHIPPED in `attestation.gpu_attestation_verifier` does not yet use
+  > that identity.** It compares a single constant `expected_report_data` and ignores
+  > the receipt fields, so it accepts one genuine attestation token for two different
+  > hotkeys and receipt ids: an anti-Sybil binding that is now *possible* but not yet
+  > *enforced by the shipped factory*. An operator who needs it must inject a verifier
+  > that binds hotkey/epoch/receipt_id (as `tests/test_ccgpu_required_fixes.py`
+  > demonstrates) until the factory takes a per-evidence report-data derivation the way
+  > the CPU factory already does.
 - **`cpu_quote_verifier`** — *optional* for the CPU TEE. Absent, the receipt is
   admitted on the anchored signature (the trusted-issuer model — the authorized
   signer attested the TEE before signing, which is how the live platform issues
@@ -236,6 +249,18 @@ because the alternative was observed):
   uncredited with an audited `drop_reason`.
 - **Burn is never an earner.** A receipt whose subject is the configured burn hotkey
   is refused as a contribution.
+
+> **What the dedup rule does NOT do: bind a receipt's KIND to its lane.** `lane` is
+> caller-supplied, and no receipt family carries the lane it belongs to, so a valid
+> Compute receipt offered to a configured Distill lane verifies and composes there,
+> capturing that lane's allocation. Global dedup stops it earning twice; it does not
+> stop lane steering. Closing this needs either a signed `kind -> lane` mapping in the
+> allocation config or the lane identifier bound inside the signed receipt, both of
+> which are **owner decisions on the signed contract**, so this is recorded rather
+> than patched locally. Operationally, the exposure is bounded by who can submit: the
+> lane a receipt is offered to is chosen by the validator's own submission handling,
+> not by the miner, so this is a validator-configuration hazard rather than a
+> miner-reachable one today.
 
 ## 7. PASS / FAIL / NOT_PROVEN matrix
 

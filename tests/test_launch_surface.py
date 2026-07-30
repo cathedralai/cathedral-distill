@@ -93,13 +93,19 @@ def test_documents_that_a_signed_compute_work_units_value_captures_the_lane():
 
 def test_compute_work_units_grammar_is_the_only_bound_today():
     """The decimal grammar caps the digit count, which is input sanity, not a
-    work bound: 31 digits is refused, 30 digits is admitted in full."""
+    work bound: 31 integer digits are refused, and the reachable supremum is
+    999999999999999999999999999999.999999999999 (30 integer digits plus the 12
+    decimal places the grammar allows)."""
     too_long = _verify(FX.cpu_receipt(subject="5Whale", work_units="1" + "0" * 30))
     assert too_long.verdict == itf.FAIL
     assert "canonical decimal string" in too_long.detail
 
     at_the_grammar_limit = _verify(FX.cpu_receipt(subject="5Whale", work_units="1" + "0" * 29))
     assert at_the_grammar_limit.verdict == itf.PASS
+
+    supremum = _verify(FX.cpu_receipt(subject="5Whale", work_units="9" * 30 + "." + "9" * 12))
+    assert supremum.verdict == itf.PASS
+    assert supremum.work_units == Decimal("9" * 30 + "." + "9" * 12)
 
 
 def test_the_other_two_lanes_do_derive_their_units():
