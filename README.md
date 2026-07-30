@@ -215,6 +215,8 @@ tested:
 - **[Validating](docs/VALIDATING.md)** — how to run a validator: drawing sealed
   batches, fail-closed verification, managing the private holdout, spot-checks, the
   confidential-compute ladder, and corpus aggregation.
+- **[Live status API](docs/STATUS_API.md)** — `GET /v1/status` / `GET /v1/keys`:
+  every field, a real example, and how a miner reads a win, a loss, or a re-commit.
 
 ## Launch & positioning
 
