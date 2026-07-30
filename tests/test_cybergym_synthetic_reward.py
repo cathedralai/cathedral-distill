@@ -156,6 +156,64 @@ def test_the_same_solves_earn_only_under_the_explicit_override(tmp_path):
     assert [c.miner_hotkey for c in lane.contributions] == [MINER]
 
 
+def test_a_legal_synthvuln_id_in_a_real_manifest_is_flagged_on_the_wire(tmp_path):
+    """The wire must not promise units the epoch will not pay.
+
+    The global task-id grammar admits `synthvuln:<nonce>:<n>` in a REAL holdout
+    manifest, so this is reachable with no synthetic source at all: the submission is
+    accepted, the wire used to answer `work_units: 8`, and the receipt then said 0.
+    The response now reports what the epoch will pay and says why.
+    """
+    import base64
+
+    from cathedral_distill.cybergym_holdout import load_holdout
+    from cathedral_distill.cybergym_protocol import CyberGymCorpusStore, SubmissionEnvelope
+    from cathedral_distill.cybergym_scores import CyberGymSolveStore
+    from cathedral_distill.cybergym_service import CyberGymService
+    from cathedral_distill.cybergym_verifier import poc_digest
+
+    task_id = "synthvuln:aabbccdd:1"
+    manifest = [{"task_id": task_id, "level": 0, "binary_digest": _dg("b1"),
+                 "disclosed_at": "2026-07-27T00:00:00Z"}]
+    service = CyberGymService(
+        load_holdout(manifest), _chain(),
+        backend=lambda tid, poc, mode: 1 if mode == "vul" else 0,
+        corpus_store=CyberGymCorpusStore(str(tmp_path / "corpus.sqlite")),
+        score_store=CyberGymScoreStore(str(tmp_path / "scores.sqlite")),
+        solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
+        validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
+        batch_size=1, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
+        gates_required=False,
+    )
+    dispatched = service.dispatch_for(MINER, COMMITMENT)
+    poc = b"an-exploit-for-a-real-manifest-task"
+    long = ("I read the parser and the length field then compare it against the buffer "
+            "size to decide whether an attacker controlled value overflows the fixed "
+            "allocation on the vulnerable build only, which the sanitizer then reports")
+    steps = [
+        {"step": 1, "thought": f"open valid.c:1897 and read the length; {long}", "action": "read_file"},
+        {"step": 2, "thought": f"cross-check parse.c:44 for the bound; {long}", "action": "read_file"},
+        {"step": 3, "thought": f"valid.c:1900 trusts it, so it overflows; {long}", "action": "reason"},
+        {"step": 4, "thought": f"write the PoC with an oversized header; {long}", "action": "write_poc"},
+        {"step": 5, "thought": f"confirm vul crashes and fix does not; {long}", "action": "verify"},
+    ]
+    outcome = service.submit(SubmissionEnvelope(
+        batch_id=dispatched.batch_id, task_id=task_id, miner_hotkey=MINER,
+        poc_base64=base64.b64encode(poc).decode(),
+        trace={"task_id": task_id, "poc_sha256": poc_digest(poc),
+               "model_id": "cathedral/agent-v1", "steps": steps,
+               "licence": "cathedral-corpus-v1", "model_seal": _dg("seal")},
+    ))
+    assert outcome.solved
+    assert outcome.work_units == Decimal(0)
+    assert "non_rewardable_source:synthetic" in outcome.reason
+    assert service.rewardable_task(task_id) is False
+
+    # the epoch agrees with the wire: nothing is persisted for this solve
+    service.score_epoch(issued_at=ISSUED)
+    assert service._scores.epoch_scores(SOURCE_EPOCH) == {MINER: Decimal("0")}
+
+
 def test_a_real_corpus_task_still_earns_in_the_same_epoch(tmp_path):
     """The default must not be "CyberGym pays nothing": a real ARVO task in a mixed
     batch still earns while the synthetic ones beside it do not."""

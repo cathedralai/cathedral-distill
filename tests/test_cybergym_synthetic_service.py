@@ -201,13 +201,25 @@ def test_artifact_delivered_over_the_http_wire(tmp_path):
 def test_artifact_is_solvable_blind_end_to_end(tmp_path):
     # The gap this closes: a level-0 (blind) task, unsolvable over the wire before
     # because no program was delivered, is now solvable from the artifact alone.
-    svc = _service(tmp_path)
+    # Scored with the explicit override, because the wire response now reports the
+    # units the epoch will actually pay, and a synthetic task pays zero by default
+    # (tests/test_cybergym_synthetic_reward.py pins that).
+    svc = _service(tmp_path, credit_synthetic_tasks=True)
     d = svc.dispatch_for("5Miner", MODEL)
     l0 = next(t for t in d.tasks if t.level == 0)
     program = svc.artifact_for(l0.task_id)                   # fetched, no hint
     poc = _craft_overflow(program)
     outcome = svc.submit(_envelope(d, l0.task_id, poc))
     assert outcome.solved and outcome.work_units == Decimal("8")  # level-0 weight
+
+    # and without the override the wire agrees with the emission decision
+    (tmp_path / "unpaid").mkdir(exist_ok=True)
+    unpaid = _service(tmp_path / "unpaid", credit_synthetic_tasks=False)
+    d2 = unpaid.dispatch_for("5Miner", MODEL)
+    l0b = next(t for t in d2.tasks if t.level == 0)
+    out2 = unpaid.submit(_envelope(d2, l0b.task_id, _craft_overflow(unpaid.artifact_for(l0b.task_id))))
+    assert out2.solved and out2.work_units == Decimal("0")
+    assert "non_rewardable_source:synthetic" in out2.reason
 
 
 def test_synthetic_cheater_with_a_looked_up_poc_does_not_solve(tmp_path):

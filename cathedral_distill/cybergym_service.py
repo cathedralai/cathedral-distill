@@ -18,7 +18,7 @@ backend is injected, so the whole service runs end-to-end with no CyberGym binar
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
@@ -50,6 +50,7 @@ from cathedral_distill.cybergym_validator import (
     MinerResult,
     run_epoch,
 )
+from cathedral_distill.cybergym_synthetic import is_synthetic_task
 from cathedral_distill.lane_feed import Lane, LaneContribution
 from cathedral_distill.trace_submission import TraceQualityPolicy
 
@@ -348,8 +349,24 @@ class CyberGymService:
         return message
 
     # -- submit (miner -> validator) --------------------------------------- #
+    def rewardable_task(self, task_id: str) -> bool:
+        """Whether a solve of this task can earn units under the active policy.
+
+        Synthetic-source tasks are graded and not rewarded unless
+        `credit_synthetic_tasks` is set. The wire response has to say so: a miner
+        that is told `work_units: 8` for work the epoch will pay 0 for has been
+        misled, and the task id grammar admits a `synthvuln:` id in a real holdout
+        manifest, so this is reachable without any synthetic source at all.
+        """
+        return self._credit_synthetic_tasks or not is_synthetic_task(task_id)
+
     def submit(self, envelope: SubmissionEnvelope) -> SubmissionOutcome:
-        """Verify one submission against the batch we dispatched, and corpus it."""
+        """Verify one submission against the batch we dispatched, and corpus it.
+
+        The returned `work_units` is what the epoch will actually pay for this task:
+        a solve of a non-rewardable task reports zero here as well as at emission, so
+        the wire and the reward agree.
+        """
         miner_hotkey = self._by_batch.get(envelope.batch_id)
         if miner_hotkey is None:
             raise ProtocolError("submission references an unknown or expired batch")
@@ -361,6 +378,14 @@ class CyberGymService:
             trace_policy=self._trace_policy, weights=self._weights,
             attestation_policy=self._attestation_policy, now=self._attestation_now,
         )
+        if outcome.work_units > 0 and not self.rewardable_task(envelope.task_id):
+            # Make the wire agree with the emission decision. run_epoch excludes this
+            # task from the scored submissions, so promising units here would be a
+            # promise the epoch does not keep.
+            outcome = replace(
+                outcome, work_units=Decimal(0),
+                reason=f"{outcome.reason}|non_rewardable_source:synthetic",
+            )
         self._corpus.record(outcome)
         if outcome.creditable:
             # Only an attested solve enters the reward pool: score_epoch re-derives

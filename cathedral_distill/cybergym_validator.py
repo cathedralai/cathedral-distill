@@ -66,6 +66,25 @@ class ChainContext:
 
 @dataclass(frozen=True)
 class MinerResult:
+    """One miner's epoch outcome.
+
+    The rule, stated once because the two numbers here can legitimately disagree:
+
+      * the **receipt** states what the batch scored under the active MECHANISM
+        parameters (level weights, and whether synthetic-source tasks are rewarded).
+        Those parameters are part of the scoring function every validator re-derives,
+        so excluding a non-rewarded task changes the receipt's own arithmetic and
+        keeps it honest. That is why A9 zeroes units inside the receipt.
+      * the **contribution** states what is PAYABLE to this miner. Gate failures are
+        per-miner eligibility evidence about registration and contamination, not
+        scoring parameters, so they do not rewrite the batch's score; they zero the
+        contribution and keep the score visible for audit.
+
+    So a gated-out miner has a receipt that still says what it solved and a
+    contribution that says zero. `creditable` is the single flag a caller should
+    branch on.
+    """
+
     miner_hotkey: str
     batch: Batch
     receipt: Mapping[str, object]
