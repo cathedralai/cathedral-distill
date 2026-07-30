@@ -200,7 +200,7 @@ def test_shipped_cpu_quote_verifier_refuses_without_receipt_identity():
 
 def test_shipped_cpu_quote_verifier_looks_the_token_up_by_receipt_id():
     """Pre-fix the lookup key was policy_registry_digest and the result was then
-    required to hash to that same digest — unsatisfiable for any real receipt."""
+    required to hash to that same digest, unsatisfiable for any real receipt."""
     asked: list[str] = []
 
     def token_provider(key):

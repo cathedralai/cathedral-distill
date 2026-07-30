@@ -220,7 +220,7 @@ def cpu_quote_verifier(
     `policy_registry_digest`: that digest identifies the signed policy REGISTRY and
     is a constant shared by every receipt in a release, so it can neither address a
     single quote nor equal `sha256(token)`. The previous implementation required
-    `sha256(token) == policy_registry_digest`, which no real receipt can satisfy —
+    `sha256(token) == policy_registry_digest`, which no real receipt can satisfy:
     the verifier returned False for every input, so wiring it produced a total
     compute-lane outage and the only "working" configuration was to leave real
     quote verification off entirely.

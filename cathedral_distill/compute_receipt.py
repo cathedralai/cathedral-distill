@@ -275,7 +275,7 @@ def verify_receipt(
             raise ComputeReceiptError("measurement is not admitted by policy")
         # `status` and `advisory_ids` exist only in the Intel TDX TCB shape. The
         # AMD SEV-SNP shape (tee_type/SVNs/reported_tcb) carries neither, so a
-        # direct index raises KeyError — which is NOT a ComputeReceiptError and
+        # direct index raises KeyError, which is NOT a ComputeReceiptError and
         # therefore escapes every caller's `except`, aborting the whole
         # composition instead of failing this one receipt. A policy the receipt's
         # TCB shape cannot express must fail CLOSED, not crash.
