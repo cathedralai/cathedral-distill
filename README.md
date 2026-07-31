@@ -11,7 +11,8 @@ become an open training corpus that makes the next model better.
 > **Scope and posture.** This is authorized security research. Targets are
 > historical vulnerabilities that already have a public fix; verification
 > *requires* the patched build to exist. The subnet does not target live systems,
-> See [Responsible use](#responsible-use).
+> and models trained on its corpus are distributed under access controls, never as
+> ungated open weights. See [Responsible use](#responsible-use).
 
 **Status:** the mechanism is implemented and tested hardware-free (**766 tests**), and the CyberGym lane runs end to end. The **real binary backend** (the
 ARVO + OSS-Fuzz differential) and both **Intel-TDX attestation adapters** are now
@@ -239,8 +240,11 @@ pip install -e '.[dev]'
 pytest
 ```
 
-Expected: `678 passed, 1 skipped`. All hardware-free — the verifier backend is
-injected, so the full mechanism is exercised without the CyberGym binary corpus.
+Expected: **766 tests**, all hardware-free — the verifier backend is injected, so
+the full mechanism is exercised without the CyberGym binary corpus. A couple skip
+depending on the machine: the real Intel-TDX differential needs `CYBERGYM_RUN_HW=1`
+and the vul/fix dataset, and one synthetic test needs a C compiler on `PATH`.
+Everything else passes.
 
 ---
 

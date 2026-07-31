@@ -11,11 +11,18 @@ So the number is pinned here. Adding a test now fails this, and the failure name
 the value to write. That is the intended cost: the claim is load-bearing marketing
 copy, so keeping it true is part of adding a test.
 
-**Collected, not passing.** `tests/test_cybergym_hw.py` skips without
-`CYBERGYM_RUN_HW=1` and the real vul/fix dataset, so the number that *pass* depends
-on the environment — which is exactly the kind of number that cannot be maintained
-in a document. The collected count is the same everywhere, so that is what is
-claimed and what is checked.
+**Collected, not passing — and a "N passed" claim is REFUSED, not validated.**
+Two things skip for reasons that vary by machine: `tests/test_cybergym_hw.py` needs
+`CYBERGYM_RUN_HW=1` and the real vul/fix dataset, and one synthetic test needs a C
+compiler on PATH. So the number that *pass* differs between two honest checkouts,
+which is exactly the kind of number that cannot be maintained in a document. The
+collected count is identical everywhere, so that is what is claimed and checked.
+
+`CLAIM` still matches the "N passed" phrasing, but only in order to reject it. That
+phrasing is how issue #31 hid: README's "Run the tests" block said `678 passed` while
+the suite had moved on, and a guard that only looked for "N tests" could not see it.
+Detecting it and refusing it fixes that permanently, where pinning it would just move
+the drift to whichever machine differs from the one that last updated the number.
 
 Collection runs in a subprocess so the answer does not depend on how this test was
 invoked: running one file must not report a smaller suite and fail.
@@ -33,7 +40,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Every file that states a count, and the pattern that finds it. Add a file here
 # when it starts making the claim; the test then holds it to the same number.
-CLAIM = re.compile(r"(\d[\d,]*)\s*(?:passing\s+)?tests\b", re.IGNORECASE)
+# Two claim shapes are recognised: "N tests" (checked against collected) and
+# "N passed" (checked against a real run's actual passed count) — issue #31: a
+# stale "678 passed" survived in README's "Run the tests" block because the
+# original pattern only matched the "tests" phrasing, so this file's own
+# collected-vs-passing distinction (see test_the_count_is_collected_rather_than_passing)
+# left an opening for exactly the kind of claim it says cannot be maintained.
+CLAIM = re.compile(r"(\d[\d,]*)\s*(?:passing\s+)?(tests|passed)\b", re.IGNORECASE)
 DOCUMENTED = (
     "README.md",
     "docs/LAUNCH_COPY.md",
@@ -63,29 +76,46 @@ def _collected() -> int:
     return int(match.group(1))
 
 
-def _claims(relative: str) -> list[tuple[int, int, str]]:
-    """`(line_number, count, line)` for every stated count in one file."""
+def _claims(relative: str) -> list[tuple[int, int, str, str]]:
+    """`(line_number, count, kind, line)` for every stated count in one file.
+
+    `kind` is `"tests"` or `"passed"` — they are checked against different
+    ground truths (collected vs. an actual run's passed count).
+    """
     path = ROOT / relative
-    found: list[tuple[int, int, str]] = []
+    found: list[tuple[int, int, str, str]] = []
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         for match in CLAIM.finditer(line):
             # Skip ordinals and code identifiers: only a bare integer is a claim.
             digits = match.group(1).replace(",", "")
             if digits.isdigit():
-                found.append((number, int(digits), line.strip()))
+                found.append((number, int(digits), match.group(2).lower(), line.strip()))
     return found
 
 
 def test_the_suite_still_collects_what_the_docs_claim():
     collected = _collected()
     wrong: list[str] = []
+    fragile: list[str] = []
     seen = 0
     for relative in DOCUMENTED:
-        for line_number, claimed, text in _claims(relative):
+        for line_number, claimed, kind, text in _claims(relative):
             seen += 1
-            if claimed != collected:
-                wrong.append(f"  {relative}:{line_number} says {claimed} — {text[:90]}")
+            if kind == "passed":
+                # Refused, not validated: see the module docstring. Two machine-
+                # dependent skips mean no single "passed" number is true everywhere.
+                fragile.append(f"  {relative}:{line_number} says {claimed} passed — {text[:80]}")
+            elif claimed != collected:
+                wrong.append(f"  {relative}:{line_number} says {claimed} tests — {text[:80]}")
     assert seen, "no file states a test count any more; drop this test or fix DOCUMENTED"
+    assert not fragile, (
+        "these state a PASSED count, which is not the same on two honest checkouts:\n"
+        + "\n".join(fragile)
+        + "\n\ntests/test_cybergym_hw.py skips without CYBERGYM_RUN_HW=1 and the real\n"
+        "dataset, and a synthetic test skips without a C compiler on PATH, so the\n"
+        f"passing total moves with the machine. State the collected count instead:\n"
+        f"  {collected} tests"
+    )
     assert not wrong, (
         f"the suite collects {collected} tests, but these disagree:\n"
         + "\n".join(wrong)
