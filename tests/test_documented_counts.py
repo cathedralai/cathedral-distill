@@ -11,11 +11,18 @@ So the number is pinned here. Adding a test now fails this, and the failure name
 the value to write. That is the intended cost: the claim is load-bearing marketing
 copy, so keeping it true is part of adding a test.
 
-**Collected, not passing.** `tests/test_cybergym_hw.py` skips without
-`CYBERGYM_RUN_HW=1` and the real vul/fix dataset, so the number that *pass* depends
-on the environment — which is exactly the kind of number that cannot be maintained
-in a document. The collected count is the same everywhere, so that is what is
-claimed and what is checked.
+**Collected, not passing — and a "N passed" claim is REFUSED, not validated.**
+Two things skip for reasons that vary by machine: `tests/test_cybergym_hw.py` needs
+`CYBERGYM_RUN_HW=1` and the real vul/fix dataset, and one synthetic test needs a C
+compiler on PATH. So the number that *pass* differs between two honest checkouts,
+which is exactly the kind of number that cannot be maintained in a document. The
+collected count is identical everywhere, so that is what is claimed and checked.
+
+`CLAIM` still matches the "N passed" phrasing, but only in order to reject it. That
+phrasing is how issue #31 hid: README's "Run the tests" block said `678 passed` while
+the suite had moved on, and a guard that only looked for "N tests" could not see it.
+Detecting it and refusing it fixes that permanently, where pinning it would just move
+the drift to whichever machine differs from the one that last updated the number.
 
 Collection runs in a subprocess so the answer does not depend on how this test was
 invoked: running one file must not report a smaller suite and fail.
@@ -86,77 +93,33 @@ def _claims(relative: str) -> list[tuple[int, int, str, str]]:
     return found
 
 
-_THIS_FILE = "tests/test_documented_counts.py"
-
-
-def _passed() -> int:
-    """How many tests an actual run reports as passed, asked of pytest itself.
-
-    Not derived from `collected - known_skip_count`: the skip is a runtime
-    `pytest.skip()` inside `test_cybergym_hw.py`, invisible to `--collect-only`,
-    and hardcoding "1" would silently go stale the moment a second skip is
-    added anywhere in the suite — exactly the drift this module exists to
-    catch. A real run is the only source that cannot lie about this.
-
-    MUST exclude `_THIS_FILE` from the subprocess: this function is called from
-    a test IN that file, so a subprocess run over the unrestricted "tests"
-    directory recurses into itself — this function calling itself, inside a
-    child process, unboundedly. Not hypothetical: the first version of this
-    fix did exactly that and forked well over a hundred live pytest processes
-    before it was caught. `--ignore` makes the recursion structurally
-    impossible rather than merely avoided, so the excluded file's own (fixed,
-    never-skipped — asserted below) test count is added back separately.
-    """
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-o", "addopts=", "-p", "no:cacheprovider",
-         "-p", "no:warnings", f"--ignore={_THIS_FILE}", "tests"],
-        capture_output=True, text=True, cwd=ROOT, timeout=600,
-    )
-    match = re.search(r"(\d+) passed", result.stdout)
-    if match is None:
-        pytest.fail(
-            "could not read a passed-test count from a real pytest run:\n"
-            f"exit={result.returncode}\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
-        )
-    this_file_count = _collected_in(_THIS_FILE)
-    return int(match.group(1)) + this_file_count
-
-
-def _collected_in(relative: str) -> int:
-    """How many tests a single file collects — used only to add this module's
-    own (excluded-from-the-recursive-run) tests back into `_passed()`'s total.
-    Safe to treat as always-passing: `test_this_files_own_tests_never_skip`
-    below asserts nothing here ever carries a skip marker or calls `pytest.skip`.
-    """
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "--collect-only", "-o", "addopts=",
-         "-p", "no:cacheprovider", relative],
-        capture_output=True, text=True, cwd=ROOT, timeout=60,
-    )
-    match = re.search(r"(\d+) tests? collected", result.stdout)
-    if match is None:
-        pytest.fail(f"could not collect {relative}:\n{result.stdout[-1000:]}")
-    return int(match.group(1))
-
-
 def test_the_suite_still_collects_what_the_docs_claim():
     collected = _collected()
-    passed = _passed()
-    ground_truth = {"tests": collected, "passed": passed}
     wrong: list[str] = []
+    fragile: list[str] = []
     seen = 0
     for relative in DOCUMENTED:
         for line_number, claimed, kind, text in _claims(relative):
             seen += 1
-            if claimed != ground_truth[kind]:
-                wrong.append(
-                    f"  {relative}:{line_number} says {claimed} {kind} — {text[:90]}"
-                )
+            if kind == "passed":
+                # Refused, not validated: see the module docstring. Two machine-
+                # dependent skips mean no single "passed" number is true everywhere.
+                fragile.append(f"  {relative}:{line_number} says {claimed} passed — {text[:80]}")
+            elif claimed != collected:
+                wrong.append(f"  {relative}:{line_number} says {claimed} tests — {text[:80]}")
     assert seen, "no file states a test count any more; drop this test or fix DOCUMENTED"
+    assert not fragile, (
+        "these state a PASSED count, which is not the same on two honest checkouts:\n"
+        + "\n".join(fragile)
+        + "\n\ntests/test_cybergym_hw.py skips without CYBERGYM_RUN_HW=1 and the real\n"
+        "dataset, and a synthetic test skips without a C compiler on PATH, so the\n"
+        f"passing total moves with the machine. State the collected count instead:\n"
+        f"  {collected} tests"
+    )
     assert not wrong, (
-        f"the suite collects {collected} tests and {passed} pass, but these disagree:\n"
+        f"the suite collects {collected} tests, but these disagree:\n"
         + "\n".join(wrong)
-        + f"\n\nUpdate 'N tests' claims to {collected} and 'N passed' claims to {passed}."
+        + f"\n\nUpdate them to {collected}."
     )
 
 
@@ -169,42 +132,6 @@ def test_every_listed_file_exists_and_states_a_count():
             f"{relative} no longer states a test count; remove it from DOCUMENTED "
             "rather than leaving a check that silently passes"
         )
-
-
-def test_this_files_own_tests_never_skip():
-    """`_passed()` adds this file's own test count back in as a flat, assumed-
-    passing number (see `_collected_in`) rather than running it — so nothing
-    in this file may ever carry a skip marker or call the skip function, or
-    that add-back becomes wrong instead of merely excluded.
-
-    Checked structurally (AST), not by searching the file's own text for the
-    words that name a skip: this module's source necessarily CONTAINS those
-    words — this very check has to write them down to name what it is looking
-    for — so a plain substring search always finds itself and the check can
-    never fail. A decorator list and a call's callee are syntax positions, not
-    prose; unparsing only those specific AST nodes cannot be confused by a
-    docstring, an error message, or this paragraph.
-    """
-    import ast
-
-    tree = ast.parse((ROOT / _THIS_FILE).read_text(encoding="utf-8"), filename=_THIS_FILE)
-    offenders: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for dec in node.decorator_list:
-                if "skipif" in ast.unparse(dec).lower():
-                    offenders.append(f"{node.name} carries {ast.unparse(dec)}")
-        if isinstance(node, ast.Call):
-            callee = node.func
-            if (isinstance(callee, ast.Attribute) and callee.attr == "skip"
-                    and isinstance(callee.value, ast.Name) and callee.value.id == "pytest"):
-                offenders.append(f"line {node.lineno} calls pytest.{callee.attr}(...)")
-    assert not offenders, (
-        f"{_THIS_FILE} now has a skip ({'; '.join(offenders)}) — _passed()'s flat "
-        "add-back of this file's collected count is no longer valid; it must run "
-        "this file for real (still excluded from the outer subprocess to avoid "
-        "the recursion) and add its actual passed count instead"
-    )
 
 
 def test_the_count_is_collected_rather_than_passing():
