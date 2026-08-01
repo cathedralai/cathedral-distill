@@ -30,9 +30,10 @@ verified before it is served.
 from __future__ import annotations
 
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from cathedral_distill.cybergym_service import CyberGymService
 from cathedral_distill.served_keys import ServedKeyRegistry, ServedRegistryError
@@ -46,12 +47,26 @@ KEYS_PATH = "/v1/keys"
 MAX_BODY_BYTES = 2 * 1024 * 1024  # generous for a base64 PoC + trace
 STATUS_TTL_SECS = 5.0
 
+# Per-connection socket timeout. BaseHTTPRequestHandler leaves `timeout` unset,
+# which means rfile reads block forever: one half-open connection, or a client
+# that sends `Content-Length: 2000000` and then stops, pins a worker thread
+# indefinitely. With daemon_threads=True nothing ever reaps it. Slowloris is the
+# textbook case; a flaky miner on a bad link is the likely one.
+REQUEST_TIMEOUT_SECS = 30.0
+
+# Bound the kernel accept backlog. socketserver's default is 5, but
+# ThreadingHTTPServer callers routinely raise it; naming it makes the ceiling a
+# decision rather than an accident.
+REQUEST_QUEUE_SIZE = 32
+
 
 def make_handler(
     service: CyberGymService,
     *,
     status_cache: StatusCache | None = None,
     key_registry: ServedKeyRegistry | None = None,
+    authenticator: Callable[[Mapping[str, str], bytes], str | None] | None = None,
+    require_authentication: bool = False,
 ) -> type[BaseHTTPRequestHandler]:
     """Build a request-handler class bound to one service instance.
 
@@ -65,6 +80,8 @@ def make_handler(
     """
 
     class _Handler(BaseHTTPRequestHandler):
+        # Bounds slowloris and half-open connections; see REQUEST_TIMEOUT_SECS.
+        timeout = REQUEST_TIMEOUT_SECS
         server_version = "cathedral-cybergym/1"
 
         # Silence the default stderr access log; callers own their logging.
@@ -154,6 +171,16 @@ def make_handler(
             self.end_headers()
 
         def _read_body(self) -> bytes | None:
+            """Read exactly Content-Length bytes, or fail — never block forever.
+
+            `self.rfile.read(length)` trusts the header: a client that promises
+            2 MB and sends 10 bytes leaves the read blocked, and with
+            daemon_threads=True that worker is never reaped. The connection
+            timeout (REQUEST_TIMEOUT_SECS) now turns that into an exception
+            rather than a hang, and the short-read check turns a truncated body
+            into a 400 instead of silently handing a partial JSON document to
+            the service.
+            """
             try:
                 length = int(self.headers.get("Content-Length", 0))
             except (TypeError, ValueError):
@@ -162,7 +189,35 @@ def make_handler(
             if length < 0 or length > MAX_BODY_BYTES:
                 self._send(413, {"error": "request body too large"})
                 return None
-            return self.rfile.read(length)
+            try:
+                body = self.rfile.read(length)
+            except (TimeoutError, socket.timeout, OSError):
+                # Nothing useful to say to a peer that stopped talking, and the
+                # socket may already be gone; drop it rather than risk blocking
+                # again on a write.
+                return None
+            if len(body) != length:
+                self._send(400, {"error": "request body shorter than Content-Length"})
+                return None
+            return body
+
+        def _caller(self, body: bytes) -> tuple[str | None, bool]:
+            """(identity, ok). `ok` is False when auth is required and absent.
+
+            The identity NEVER comes from the request body — that is the whole
+            point of the parameter. It comes from the transport, via the
+            operator-supplied `authenticator`.
+            """
+            identity = None
+            if authenticator is not None:
+                try:
+                    identity = authenticator(self.headers, body)
+                except Exception:  # an authenticator must never 500 the route
+                    identity = None
+            if require_authentication and identity is None:
+                self._send(401, {"error": "authentication required"})
+                return None, False
+            return identity, True
 
         def do_POST(self) -> None:  # noqa: N802 (stdlib naming)
             if self.path == DISPATCH_PATH:
@@ -174,7 +229,10 @@ def make_handler(
                 except ValueError:
                     self._send(400, {"error": "request is not valid JSON"})
                     return
-                result = service.handle_dispatch(request)
+                caller, ok = self._caller(body)
+                if not ok:
+                    return
+                result = service.handle_dispatch(request, authenticated_caller=caller)
                 self._send(400 if "error" in result else 200, result)
             elif self.path == ARTIFACT_PATH:
                 body = self._read_body()
@@ -185,11 +243,17 @@ def make_handler(
                 except ValueError:
                     self._send(400, {"error": "request is not valid JSON"})
                     return
+                _caller_id, ok = self._caller(body)
+                if not ok:
+                    return
                 result = service.handle_artifact(request)
                 self._send(400 if "error" in result else 200, result)
             elif self.path == SUBMIT_PATH:
                 body = self._read_body()
                 if body is None:
+                    return
+                _caller_id, ok = self._caller(body)
+                if not ok:
                     return
                 result = service.handle_submit(body)
                 self._send(200 if result.get("accepted") else 400, result)
@@ -243,9 +307,18 @@ class _LockingService:
         """The lock the status build must also hold; it reads the same stores."""
         return self._lock
 
-    def handle_dispatch(self, request: Any) -> dict[str, Any]:
+    def handle_dispatch(self, request: Any, *,
+                        authenticated_caller: str | None = None) -> dict[str, Any]:
+        """Forwards the transport-proven identity.
+
+        This wrapper previously did not ACCEPT `authenticated_caller`, so on the
+        threaded server — the production one — a transport that wanted to pass
+        identity could not, no matter what it did. The seam existed on the
+        service and was unreachable through the concurrent path.
+        """
         with self._lock:
-            return self._service.handle_dispatch(request)
+            return self._service.handle_dispatch(
+                request, authenticated_caller=authenticated_caller)
 
     def handle_artifact(self, request: Any) -> dict[str, Any]:
         with self._lock:
@@ -259,6 +332,8 @@ class _LockingService:
 def make_threaded_server(service: CyberGymService, host: str = "0.0.0.0", port: int = 0, *,
                          healthz: Mapping[str, Any] | None = None,
                          key_registry: ServedKeyRegistry | None = None,
+                         authenticator: Callable[[Mapping[str, str], bytes], str | None] | None = None,
+                         require_authentication: bool = False,
                          ) -> ThreadingHTTPServer:
     """A production `ThreadingHTTPServer` for a real deployment.
 
@@ -283,6 +358,8 @@ def make_threaded_server(service: CyberGymService, host: str = "0.0.0.0", port: 
         # No lock: the registry is a file read behind its own lock, and it touches
         # none of the SQLite the submit path writes.
         key_registry=key_registry,
+        authenticator=authenticator,
+        require_authentication=require_authentication,
     )
     payload = dict(healthz or {"status": "ok"})
 
@@ -294,6 +371,7 @@ def make_threaded_server(service: CyberGymService, host: str = "0.0.0.0", port: 
                 # Everything else, including /v1/status, is the base handler's.
                 super().do_GET()
 
+    ThreadingHTTPServer.request_queue_size = REQUEST_QUEUE_SIZE
     server = ThreadingHTTPServer((host, port), _Threaded)
     server.daemon_threads = True
     return server

@@ -230,8 +230,40 @@ Operational notes:
 - **CORS is open on this route only.** The mutating POST routes stay same-origin,
   because a browser that could drive dispatch/submit cross-site would let any page
   a miner visits act as that miner.
+- **Same-origin is a BROWSER control, not authentication.** It stops a web page
+  driving these routes; it stops nothing that can open a socket. By default the
+  three mutating POST routes have **no server-side caller authentication**, so
+  anyone who can reach the port can dispatch and submit as any `miner_hotkey`.
+  Bind them to loopback (or behind an authenticating proxy) unless you have
+  supplied an `authenticator` and set `require_authentication=True` — see
+  "Authenticating the mutating routes" below.
 - The site's opt-in **Live** section consumes exactly this payload; see
   [`../site/README.md`](../site/README.md).
+
+## Authenticating the mutating routes
+
+`/cybergym/dispatch`, `/cybergym/artifact` and `/cybergym/submit` change state.
+`CyberGymService` takes an `authenticated_caller` — the identity the TRANSPORT
+proved, never a value from the request body — and refuses a dispatch whose caller
+is not the miner it names.
+
+`make_handler` and `make_threaded_server` take two arguments that make that seam
+usable:
+
+| Argument | Effect |
+|---|---|
+| `authenticator(headers, body) -> str \| None` | returns the proven caller identity, or `None` |
+| `require_authentication=True` | a request with no identity gets **401**, and never reaches the service |
+
+Both default to off, so an existing deployment is unchanged. An authenticator that
+raises is treated as "no identity" rather than a 500, so a broken verifier fails
+closed.
+
+**The identity mechanism is deliberately not chosen here.** A Bittensor axon's
+verified `dendrite.hotkey`, a bearer per miner, or a signature over the canonical
+request bytes are all workable, and which is right depends on the deployment shape
+(cathedral-distill#33 part B). Supplying one is what lets these routes bind
+anywhere other than loopback.
 
 ## Serving the key registry — `GET /v1/keys`
 
