@@ -212,16 +212,29 @@ Every one of these is enforced, not merely discouraged:
 - **A PoC that crashes both builds** — not the specific vulnerability.
 - **A solve with no valid TDX attestation** — solved-but-unattested credits zero.
 - **Submitting for a task not in your batch** — off-batch wins are rejected.
-- **A model other than the one you committed** — the checkpoint digest is checked.
+- **A model other than the one you committed** — your commitment seals which
+  batch you draw, and it is pinned for the epoch. Be honest that this is a
+  *binding*, not a *proof*: `model_commitment` is not currently compared against
+  any digest of the bytes you actually executed, so it stops you re-drawing the
+  batch, not you running a different model behind it. Proving the executed model
+  needs the attestation to bind it (tracked in cathedral-distill#34).
 - **Pre-computing from public tasks** — the scored batch is disclosed *after* your
   commit; public ARVO/OSS-Fuzz tasks are for training only, and public canaries earn
   nothing (solving them just proves you're alive).
 - **A padded or unlicensed trace** — it fails the quality floor, no bonus.
 - **A model that scores well but is too slow to serve** — the latency gate.
-- **Re-committing to a different model mid-epoch** — abandons your own prior
-  solves for the *old* commitment (they become unscorable). This only ever
-  costs your own unscored work, never anyone else's: dispatch is caller-bound,
-  so nobody but you can trigger it against your hotkey.
+- **Re-committing to a different model mid-epoch** — **refused.** Your
+  `model_commitment` is pinned for the epoch on your first dispatch, and a later
+  dispatch with a different one is rejected for the rest of that epoch, even
+  authenticated as yourself. Re-dispatching with the *same* commitment is fine
+  and returns the same batch, so an ordinary retry after losing the message
+  still works. Change models between epochs, not within one.
+
+  This used to be allowed and merely cost you your own unscored solves. It was
+  not only self-harm: the commitment feeds the batch nonce, so re-committing
+  re-drew the sealed batch. A miner could commit, look at the batch, discard it
+  and commit again until the draw happened to land on tasks it could already
+  solve — which defeats the sealed holdout the whole lane rests on.
 
 ---
 
