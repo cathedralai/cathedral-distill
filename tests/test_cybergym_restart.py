@@ -486,14 +486,34 @@ def test_redispatch_with_the_same_commitment_keeps_accepted_solves(tmp_path):
     assert service.score_epoch(issued_at=ISSUED)[0].contribution["work_units"] == "8"
 
 
-def test_redispatch_with_a_new_commitment_drops_the_old_solves_durably(tmp_path):
+def test_a_self_recommit_is_refused_and_the_solves_survive(tmp_path):
+    """#34: a miner may NOT re-commit mid-epoch, even authenticated as itself.
+
+    This previously succeeded and abandoned the miner's own solves -- documented
+    as self-harm. It was not only self-harm: `model_commitment` feeds
+    derive_batch_nonce, so re-committing RE-DRAWS the sealed batch. A miner could
+    commit, inspect the batch, discard it and commit again until the draw landed
+    on tasks it already held PoCs for.
+    """
     service = _service(tmp_path, durable=True)
     _solve(service)
-    service.dispatch_for("5Miner", OTHER_MODEL, authenticated_caller="5Miner")  # a different batch entirely
-    assert service.score_epoch(issued_at=ISSUED) == []
-    # and a restart must not resurrect the abandoned solves
+    with pytest.raises(ProtocolError, match="pinned for source_epoch"):
+        service.dispatch_for("5Miner", OTHER_MODEL, authenticated_caller="5Miner")
+
+    # The refusal is before any state change: the solve is intact and still scores.
+    assert [r.miner_hotkey for r in service.score_epoch(issued_at=ISSUED)] == ["5Miner"]
     restarted = _service(tmp_path, durable=True)
-    assert restarted._miners == {}
+    assert "5Miner" in restarted._miners
+
+
+def test_the_same_commitment_may_be_redispatched(tmp_path):
+    """The pin must not break legitimate retry: a miner that loses its dispatch
+    message and asks again with the SAME commitment gets the same batch."""
+    service = _service(tmp_path, durable=True)
+    first = service.dispatch_for("5Miner", MODEL, authenticated_caller="5Miner")
+    again = service.dispatch_for("5Miner", MODEL, authenticated_caller="5Miner")
+    assert again.batch_id == first.batch_id
+    assert [t.task_id for t in again.tasks] == [t.task_id for t in first.tasks]
 
 
 def test_an_unauthenticated_recommit_cannot_zero_a_victims_accepted_solves(tmp_path):
@@ -504,7 +524,7 @@ def test_an_unauthenticated_recommit_cannot_zero_a_victims_accepted_solves(tmp_p
     _solve(service, miner="5Victim")
 
     # an unauthenticated re-commit that would drop the victim's solves -> refused
-    with pytest.raises(ProtocolError, match="authenticated as the miner"):
+    with pytest.raises(ProtocolError, match="pinned for source_epoch"):
         service.dispatch_for("5Victim", OTHER_MODEL)
     # a wrong authenticated caller -> refused before any state change
     with pytest.raises(ProtocolError, match="may not dispatch for"):
@@ -523,70 +543,45 @@ def test_an_unauthenticated_recommit_cannot_zero_a_victims_accepted_solves(tmp_p
 # A miner's own re-commit costs that miner, never the lane
 # --------------------------------------------------------------------------- #
 
-def test_a_hostile_recommit_cannot_stop_the_lane_composing(tmp_path):
-    """The refusal must not be a weapon a miner can point at everyone else.
+def test_a_recommit_cannot_be_used_to_grind_the_sealed_batch(tmp_path):
+    """The acceptance test from #34: grinding must not beat the honest draw.
 
-    Two miner-controlled RPCs (solve, then dispatch under a new commitment) left the
-    miner's corpus row on disk with its solve rows deleted, so
-    `lost_durable_solvers()` reported it forever and `compose_lane` refused the WHOLE
-    lane, permanently, with no override and no recovery: a fail-closed control that
-    became its own outage, worse than the silent burn it replaced. A miner abandoning
-    its own commitment is now a settled outcome recorded as unscorable, so it costs
-    that miner its unscored solves and nothing else.
+    The reported break was a miner holding PoCs for a small subset going from
+    earning NOTHING on its honest batch to full marks after 1771 accepted
+    re-dispatches. Here the loop is refused from the second attempt on, so the
+    miner is stuck with the batch it was sealed to.
     """
     service = _service(tmp_path, durable=True)
-    _solve(service, miner="5Hostile")
-    _solve(service, miner="5Honest")
+    honest = service.dispatch_for("5Grinder", MODEL, authenticated_caller="5Grinder")
 
-    # the hostile miner re-commits its OWN model mid-epoch (authenticated as itself —
-    # that is what makes this a self-re-commit, not a reward-denial attack on another)
-    service.dispatch_for("5Hostile", OTHER_MODEL, authenticated_caller="5Hostile")
+    accepted_regrinds = 0
+    for i in range(25):
+        try:
+            service.dispatch_for(
+                "5Grinder", f"sha256:{i:064x}", authenticated_caller="5Grinder")
+            accepted_regrinds += 1
+        except ProtocolError:
+            pass
+    assert accepted_regrinds == 0, "the sealed batch was re-drawable"
 
-    assert service.lost_durable_solvers() == set()
-    assert "5Hostile" in service._unscorable
-    results = service.score_epoch(issued_at=ISSUED)
-    assert [r.miner_hotkey for r in results] == ["5Honest"]
-
-    lane = service.compose_lane(allocation=Decimal("0.90"))
-    assert [c.miner_hotkey for c in lane.contributions] == ["5Honest"]
-    assert service._scores.epoch_state(SOURCE_EPOCH)[0] == EPOCH_CLOSED
+    # and the batch it is held to is the one it was originally sealed to
+    still = service.dispatch_for("5Grinder", MODEL, authenticated_caller="5Grinder")
+    assert still.batch_id == honest.batch_id
 
 
-def test_the_abandonment_survives_a_restart(tmp_path):
-    """The marker has to be durable, or the wedge returns on the next restart."""
+def test_the_commitment_pin_survives_a_restart(tmp_path):
+    """Acceptance item 2: a restart must not reset the pin, or the grind is
+    simply 'restart the validator' -- and a miner cannot force that anyway, but
+    an ordinary crash must not hand out a fresh draw."""
     service = _service(tmp_path, durable=True)
-    _solve(service, miner="5Hostile")
-    _solve(service, miner="5Honest")
-    service.dispatch_for("5Hostile", OTHER_MODEL, authenticated_caller="5Hostile")
+    _solve(service, miner="5Miner")
+    original = service._miners["5Miner"].model_commitment
     del service
 
     restarted = _service(tmp_path, durable=True)
-    assert restarted._unscorable.get("5Hostile")
-    assert restarted.lost_durable_solvers() == set()
-    restarted.score_epoch(issued_at=ISSUED)
-    lane = restarted.compose_lane(allocation=Decimal("0.90"))
-    assert [c.miner_hotkey for c in lane.contributions] == ["5Honest"]
-
-
-def test_a_recommitted_miner_that_solves_again_is_scoreable(tmp_path):
-    """Abandonment is not a ban: a fresh accepted solve clears the marker."""
-    service = _service(tmp_path, durable=True)
-    _solve(service, miner="5Miner")
-    service.dispatch_for("5Miner", OTHER_MODEL, authenticated_caller="5Miner")
-    assert "5Miner" in service._unscorable
-
-    # solve again under the NEW commitment
-    dispatched = service._miners["5Miner"].dispatch
-    poc = b"exploit-bytes-for-arvo-1"
-    outcome = service.submit(SubmissionEnvelope(
-        batch_id=dispatched.batch_id, task_id="arvo:1", miner_hotkey="5Miner",
-        poc_base64=base64.b64encode(poc).decode(),
-        trace=_trace("arvo:1", poc_digest(poc)),
-    ))
-    assert outcome.creditable
-    assert "5Miner" not in service._unscorable
-    results = service.score_epoch(issued_at=ISSUED)
-    assert [r.miner_hotkey for r in results] == ["5Miner"]
+    assert restarted._miners["5Miner"].model_commitment == original
+    with pytest.raises(ProtocolError, match="pinned for source_epoch"):
+        restarted.dispatch_for("5Miner", OTHER_MODEL, authenticated_caller="5Miner")
 
 
 def test_an_operator_can_clear_a_genuine_loss_without_losing_data(tmp_path):

@@ -338,12 +338,35 @@ class CyberGymService:
         # be dropped, require the caller to be the miner — otherwise this is a
         # reward-denial attack, not a self-re-commit. Checked BEFORE drawing, so an
         # unauthorized call has no side effects at all.
-        if (previous is not None and previous.model_commitment != model_commitment
-                and previous.pocs and authenticated_caller != miner_hotkey):
+        if previous is not None and previous.model_commitment != model_commitment:
+            # The commitment is PINNED for the epoch on first dispatch, and the
+            # refusal is unconditional -- not conditioned on accepted solves, and
+            # not waived for a caller authenticated as the miner.
+            #
+            # It used to be `and previous.pocs and authenticated_caller !=
+            # miner_hotkey`, which never applied to a miner acting as itself. That
+            # made batch SELECTION free: `model_commitment` is miner-supplied and
+            # feeds derive_batch_nonce, so a miner could commit, look at the batch
+            # it would draw, discard it, and commit again until the draw landed on
+            # tasks it already held PoCs for. Measured: a miner holding PoCs for 8
+            # of 60 tasks went from earning NOTHING honestly to full marks after
+            # 1771 accepted re-dispatches -- same capability, 0 -> 100% (#34).
+            #
+            # Attestation does not constrain this: submission_report_data binds
+            # batch_id/task_id/poc/trace/hotkey, not the commitment, so the grind
+            # survives attestation_required=True with a real measurement and root.
+            # Nor does transport auth (#33): the attack authenticates as itself.
+            #
+            # The unpredictability argument -- derive_batch_nonce binds a finalized
+            # block hash that postdates the commitment -- is true of any SINGLE
+            # commitment and says nothing about a CHOICE among many. Each candidate
+            # registration legitimately predates the block; the selection happens
+            # after the hash is public.
             raise ProtocolError(
-                f"re-committing for {miner_hotkey!r} would abandon {len(previous.pocs)} "
-                "accepted solve(s); a commitment change that drops solves must be "
-                "authenticated as the miner, not an arbitrary dispatch request")
+                f"model_commitment for {miner_hotkey!r} is pinned for source_epoch "
+                f"{self.chain.source_epoch} to {previous.model_commitment}; a "
+                f"different commitment ({model_commitment}) would re-draw the sealed "
+                "batch, so it is refused for the rest of the epoch")
         message = dispatch(
             self.holdout.pool, self.chain,
             miner_hotkey=miner_hotkey, model_commitment=model_commitment,
