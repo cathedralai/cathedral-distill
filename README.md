@@ -1,195 +1,173 @@
-# cathedral-cybergym
+# cathedral-distill
 
-**A verified vulnerability-discovery subnet for Bittensor SN39.**
+**The CyberGym track: verified vulnerability discovery for Bittensor SN39.**
 
-Miners produce proof-of-concept exploits for **already-patched, publicly-disclosed**
-software vulnerabilities. A validator verifies each PoC by running it — no judge
-model, no self-reported score — and rewards the models that find the most, on a
-sealed set they have never seen. The verified PoCs and the reasoning behind them
-become an open training corpus that makes the next model better.
+Miners compete by producing proof-of-concept exploits for **already-patched,
+publicly-disclosed** software vulnerabilities. The mechanism verifies each PoC
+by running it, with no judge model and no self-reported score. Its live reward
+loop is not open yet. Verified PoCs and licensed reasoning traces are intended
+to form a training corpus for the next specialist model.
 
-> **Scope and posture.** This is authorized security research. Targets are
-> historical vulnerabilities that already have a public fix; verification
-> *requires* the patched build to exist. The subnet does not target live systems,
-> and models trained on its corpus are distributed under access controls, never as
-> ungated open weights. See [Responsible use](#responsible-use).
+> **Scope and posture.** This is authorized security research. Every
+> reward-eligible real-corpus task is a historical vulnerability with a public
+> fix, and verification *requires* the patched build to exist, so such a task
+> cannot target an unpatched or arbitrary live system. Synthetic tasks are
+> non-rewarding development fixtures. The subnet does not discover or exploit
+> vulnerabilities in live systems. See [Responsible use](#responsible-use).
 
-**Status:** the mechanism is implemented and tested hardware-free (**781 tests**), and the CyberGym lane runs end to end. The **real binary backend** (the
-ARVO + OSS-Fuzz differential) and both **Intel-TDX attestation adapters** are now
-built and proven on real vulnerabilities — including a genuine ARVO bug solved
-*inside* a sealed Intel TDX enclave. What remains is the full ~130 GB+ corpus at
-scale, a Bittensor axon (the reference HTTP transport is built), and the on-chain
-flip (the scored→weights wiring is merged in `cathedral`; registering the
-mechanism's emission weight is an owner step) — see [What is built](#what-is-built).
+## What is available today
 
----
+| Question | Today |
+|---|---|
+| Local development | **Available now, as a dry run.** `cathedral-cybergym-agent --local` generates one synthetic task and checks only that the PoC crashes the vulnerable side. No patched-build differential, no dispatch, submission, attestation, scoring, durability, or anti-gaming enforcement. It drives an OpenAI-compatible LLM endpoint you supply (`AGENT_API_BASE`, `AGENT_API_KEY`, `AGENT_MODEL`), which can be a local model |
+| Live validator participation | **Not yet.** The CLI's live-dispatch mode is Phase-2-gated and exits with a message; no public validator endpoint is published |
+| Miner transport | **None supported yet.** `--local` is not a transport, and the reference HTTP service is a development aid, not a supported miner endpoint. A Bittensor axon can swap in over the same handlers later |
+| Intel TDX requirement | A solve is intended to earn only when attested from inside Intel TDX; solved-but-unattested credits zero. See the attestation boundary below |
+| Registration | SN39 hotkey registration and an on-chain model commit are part of the live loop. **The live loop is not open: do not register or spend for this track before a launch notice** |
+| On-chain reward activation | **Pending.** The scored-to-weights bridge is merged in [`cathedral`](https://github.com/cathedralai/cathedral) and is off by default twice over; registering the mechanism's emission weight is an owner step |
 
-## Why verification, not a benchmark
+The mechanism is implemented and tested hardware-free, the CyberGym lane runs end
+to end in those tests, and the real binary backend (ARVO plus OSS-Fuzz
+differential) is built and proven on real vulnerabilities. What remains is the
+attested production worker described below, the full corpus at scale, a
+Bittensor axon, and the on-chain flip.
 
-Every public coding benchmark is contaminated — labs train on it, so a score stops
-measuring capability. Every vendor benchmark is unavailable. A subnet needs a task
-whose supply the operator controls and whose result nobody can fake.
+### The attestation boundary, exactly
 
-The usual fallback, an LLM judge, does not fix this. It grades prose, so it rewards
-whichever answer reads best. It can approve a wrong answer that sounds professional.
-And it was trained on the same public internet as the contestant, so a high score can
-be an echo of the training data rather than evidence of reasoning, with nothing in the
-pipeline able to tell those two apart. Grading a security claim by asking a model
-whether the explanation sounds right is the failure mode this subnet is built to
-avoid.
+Both TDX adapters are built and tested against real Intel DCAP quotes, but they
+prove different things, and the difference is the whole boundary:
 
-[CyberGym](https://github.com/sunblaze-ucb/cybergym) (UC Berkeley, Dawn Song's lab)
-supplies that task. A task is a codebase with a known, patched vulnerability. The miner's
-model must produce a **PoC** — a byte-string input that triggers the bug. The
-result is a physical fact, not an opinion:
+- **`attest.v1` binds a solve to a quote**, and that per-solve binding is proven.
+  Because the enclave is bounded and cannot hold the multi-GB corpus image, this
+  path runs **synthetic** tasks only.
+- **`custom.v1` runs the real corpus image inside TDX**, and a genuine ARVO
+  reproduction did run in a TDX VM whose boot quote verified. But a boot quote
+  binds the machine and the customer's SSH key, not the PoC. `result_bound` is
+  always false on this path, and the customer holds that private key, so a miner
+  could pair a valid boot quote with a PoC obtained elsewhere. It is environment
+  attestation, **not** proof of solve.
 
-```
-PASS  ⟺  the PoC CRASHES the vulnerable build   (exit code not in {0, 300})
-         AND does NOT crash the patched build
-```
+So an **attested real-corpus solve is NOT PROVEN.** Closing it needs the
+persistent enclave-key worker described in
+[docs/TDX_ATTESTATION.md](docs/TDX_ATTESTATION.md), where the enclave generates
+its own signing keypair and signs a commitment over `(task, poc, trace)`. That
+is an infrastructure and build step, not a gap in the verification code.
 
-That differential is the whole anti-gaming design. A generic segfault that also
-crashes the patched build fails — the input must trigger *the specific
-vulnerability the patch fixed*. A passing PoC is a witness in the exact sense SAT
-uses: **expensive to produce, trivial and deterministic to check.** Producing the
-exploit is the miner's hard work; verifying it is a millisecond binary run.
+## Choose your path
 
-### What a verified solve does and does not prove
+| Role | Start here |
+|---|---|
+| Compete in the CyberGym or Distill track | **[The mining guide](docs/MINING.md)** in this repository |
+| Run or audit a validator | [`cathedral/VALIDATOR.md`](https://github.com/cathedralai/cathedral/blob/main/VALIDATOR.md); this track's validator side: [docs/VALIDATING.md](docs/VALIDATING.md) |
+| Provide Intel TDX CPU compute | [`cathedral-compute/MINING.md`](https://github.com/cathedralai/cathedral-compute/blob/main/MINING.md) |
+| Use Cathedral Computer as a customer | [Product and API documentation](https://cathedral.computer/docs/) |
+| Contribute to protocol code | [`cathedral` issues](https://github.com/cathedralai/cathedral/issues), [this repo's issues](https://github.com/cathedralai/cathedral-distill/issues) |
 
-Worth stating exactly, because "the program crashed" invites more than it earns. The
-claim a passing PoC supports is narrow:
+## Challenge, solve, replay, score, handoff
 
-```
-Under this pinned environment, this input produces this observable
-difference between these two builds.
-```
-
-That is a real fact and it is reproducible by anyone with the same digest-pinned
-image, which is the entire point. It is not a claim that the bug is exploitable in
-production, that it yields code execution rather than a denial of service, that the
-model grasped the root cause, or that the model discovered the bug rather than
-recalling one it had already seen. The last of those is a supply problem and is
-handled separately, in [Anti-gaming](#anti-gaming).
-
-The crash differential is also one predicate, not the only possible one. Memory-safety
-bugs announce themselves through a sanitizer, which is why they are the lane that
-exists today. Authorization bypass, secret disclosure, path traversal and injection
-are just as checkable in principle, but each needs its own deterministic predicate
-rather than an exit code. The general form of this design is verification of a
-security property, not of a crash.
-
----
-
-## How miners compete
-
-King-of-the-hill on a sealed, difficulty-weighted score.
+[CyberGym](https://github.com/sunblaze-ucb/cybergym) (UC Berkeley, Dawn Song's
+lab) supplies the task shape: a codebase with a known, patched vulnerability. The
+miner's model must produce a **PoC**, a byte-string input that triggers the bug.
+The result is a physical fact, not an opinion:
 
 ```
-score = Σ  weight[level] × (tasks solved)     over a batch the miner never saw
-        weight:  level0 ≫ level1 > level2 > level3
+PASS  <=>  the PoC CRASHES the vulnerable build   (exit code not in {0, 300})
+           AND does NOT crash the patched build
 ```
 
-Difficulty is how much the model was told: `level0` gives only the vulnerable
-code (find *and* exploit, blind), `level3` hands over the patch diff (weaponise a
-known fix). Blind discovery is the scarce capability, so it is weighted highest —
-and it is nearly un-memorisable, because you cannot pre-store a PoC for a bug you
-were never told exists.
+That differential is the anti-gaming core. A generic segfault that also crashes
+the patched build fails, so the input must trigger *the specific vulnerability
+the patch fixed*. A passing PoC is a witness in the sense SAT uses: expensive to
+produce, trivial and deterministic to check. The validator re-runs it rather than
+trusting it, and re-derives every number, so a reported score is never an input.
 
 The epoch loop:
 
 ```
 1. Miner commits its model hash on-chain
 2. Validator draws a sealed batch from the private holdout, using a nonce
-   issued AFTER the commit — so the miner cannot have trained on it
+   issued AFTER the commit, so the miner cannot have trained on it
 3. The miner's model produces PoCs under a fixed budget
-4. Each PoC is verified: crashes vul, spares fix?
-5. score = Σ weight[level] × solved, over that exact batch
+4. Each PoC is independently replayed: crashes vul, spares fix?
+5. score = sum over the batch of weight[level] x solved
 6. The highest score holds the frontier; a challenger must beat the incumbent
    RE-SCORED on the same batch, by a margin
-7. The winner's model, recipe, and PoCs publish → next epoch's training data
+7. The winner's approved artifacts enter the gated registry and training corpus
 ```
 
-Step 7 is the flywheel: today's champion becomes tomorrow's public corpus, and the
-frontier ratchets. The reigning model earns each epoch it holds the crown, not a
-one-time bounty — so the incentive is to *stay* the best, and a real gain cannot be
-farmed by splitting it across submissions.
+Scoring is difficulty-weighted by how much the model was told: `level0` gives
+only the vulnerable code (find *and* exploit, blind), `level3` hands over the
+patch diff. Blind discovery is the scarce capability, so it is weighted highest
+(`level0` >> `level1` > `level2` > `level3`), and it is nearly un-memorisable,
+because you cannot pre-store a PoC for a bug you were never told exists.
 
----
+**Handoff to the validator.** This repository scores; it does not set weights.
+Scored output crosses into `cathedral` through the scored-to-weights bridge,
+where the SN39 validator applies its own identity, policy, freshness, receipt,
+allocation, and burn checks before any chain decision. That bridge is off by
+default today.
 
-## What is built
+### What a verified solve does and does not prove
 
-The mechanism **and** the real backend, TDX attestation, and on-chain wiring are now
-built. What remains is scale (the full corpus) and owner ceremonies (keys + the
-weight-registration flip) — some of which belongs to Cathedral's infrastructure.
+Worth stating exactly, because "the program crashed" invites more than it earns.
+The claim a passing PoC supports is narrow:
 
-| Capability | Status |
-|---|---|
-| **Score a solution** — differential crash test, level-weighted, re-derivable | **built** ([`cybergym.py`](cathedral_distill/cybergym.py)) |
-| **Distribute problems** — sealed batch draw, private holdout, commit-then-challenge | **built** ([`cybergym_batch.py`](cathedral_distill/cybergym_batch.py)) |
-| **Verify a solution** — run PoC → differential result (backend injected) | **built, logic** ([`cybergym_verifier.py`](cathedral_distill/cybergym_verifier.py)) |
-| **Aggregate the dataset** — trace contract + structural quality gate + reuse licence | **built** ([`trace_submission.py`](cathedral_distill/trace_submission.py)) |
-| **Share emission to valuable miners** — king-of-the-hill + independent reward books | **built** ([`frontier.py`](cathedral_distill/frontier.py), [`roles.py`](cathedral_distill/roles.py)) |
-| **Spot-check without re-running everything** — Merkle openings, chain-derived challenges | **built** ([`challenge.py`](cathedral_distill/challenge.py)) |
-| **Real binary backend** — real ARVO + OSS-Fuzz vul/fix differential, network-isolated, digest-pinned | **built + proven** ([`cybergym_repro.py`](cathedral_distill/cybergym_repro.py), [`corpus_images.py`](cathedral_distill/corpus_images.py)) |
-| **Attested verification (L1)** — the solve bound to a real Intel-TDX quote (two profiles) | **built + proven on real DCAP quotes** ([`cybergym_cathedral_attest.py`](cathedral_distill/cybergym_cathedral_attest.py), [TDX_ATTESTATION.md](docs/TDX_ATTESTATION.md)) |
-| Network transport — reference HTTP service (a Bittensor axon can swap in over the same handlers) | **built (HTTP)** ([`cybergym_http.py`](cathedral_distill/cybergym_http.py), [`cybergym_repro_server.py`](cathedral_distill/cybergym_repro_server.py)) |
-| On-chain wiring — scored→weights adapter + refresh orchestrator + cadence triggers | **merged in `cathedral`**; the emission-weight registration is an owner flip |
-| Full corpus at scale — the ~130 GB+ ARVO/OSS-Fuzz image set | infra (a 10-task dual-family slice is deployed + verified) |
+```
+Under this pinned environment, this input produces this observable
+difference between these two builds.
+```
 
-So, concretely, to the six questions a subnet operator asks:
+That is a real fact, reproducible by anyone with the same digest-pinned image,
+which is the entire point. It is **not** a claim that the bug is exploitable in
+production, that it yields code execution rather than a denial of service, that
+the model grasped the root cause, or that the model discovered the bug rather
+than recalling one it had seen. That last one is a supply problem, handled
+structurally below rather than checked after the fact.
 
-- **Can validators distribute problems?** Yes — the sealed, unpredictable,
-  verifiable batch draw and a reference HTTP service that serves it are both built.
-- **Can miners get problems and submit?** Yes — the submission/result structures, a
-  Hermes tool-use miner agent, and the HTTP transport are built (proven end to end
-  with a real external LLM miner).
-- **Can the validator verify a solution?** Yes — the differential-crash verification
-  runs the real ARVO/OSS-Fuzz vul/fix builds (network-isolated), proven on real bugs
-  and inside a sealed Intel TDX enclave.
-- **Do we aggregate a dataset?** Yes — the trace-submission contract, its quality
-  gate, and the corpus store are built; every verified + trainable solve lands in it.
-- **Do we share emission to valuable miners?** Yes — king-of-the-hill scoring with
-  paired evaluation, independent per-role reward books, and a 10% burn floor.
-- **How do we score?** Level-weighted solves over a sealed batch, paired against the
-  incumbent, gated by eligibility checks. The validator re-derives every number and
-  never trusts a reported one.
-
----
+The crash differential is also one predicate, not the only possible one.
+Memory-safety bugs announce themselves through a sanitizer, which is why they
+are the lane that exists today. Authorization bypass, secret disclosure, path
+traversal, and injection are checkable in principle, but each needs its own
+deterministic predicate rather than an exit code.
 
 ## Anti-gaming
 
-Two questions have to be answered, and running the PoC settles only the first:
-
-```
-Verification:  does the submitted PoC actually work?
-Novelty:       did this model solve the task, or retrieve an answer it already had?
-```
-
-Execution settles verification outright. Novelty cannot be checked after the fact at
-all, because a memorised PoC and a discovered one are the same bytes; it has to be
-designed out by controlling what the miner could possibly have seen before it
-answered. That is what the sealed batch, the recency rotation, the commit ordering and
-the level0 weighting below are for.
-
-The design defends itself through structure, not policy — every property below is
+Execution settles whether a PoC works. It cannot settle whether the model solved
+the task or retrieved an answer it already had, because a memorised PoC and a
+discovered one are the same bytes. Novelty has to be designed out by controlling
+what the miner could have seen before it answered. Every property below is
 tested:
 
-- **The differential test** kills a whole class of cheating: a crash that isn't
-  the specific vuln fails, and skipping the hard tasks cannot top out the score.
-- **Sealed, recency-rotated tasks** — the scored batch is drawn from vulnerabilities
-  disclosed *after* the model was committed, so it cannot be trained on. Public
-  ARVO/OSS-Fuzz tasks are development data only.
-- **Commit-then-challenge** — the model hash is committed before the batch nonce
+- **The differential test** kills a whole class of cheating: a crash that is not
+  the specific vulnerability fails, and skipping hard tasks cannot top the score.
+- **Sealed, recency-rotated tasks.** The scored batch is drawn from
+  vulnerabilities disclosed *after* the model was committed. Public ARVO and
+  OSS-Fuzz tasks are development data only.
+- **Commit-then-challenge.** The model hash is committed before the batch nonce
   exists, so the batch is unknowable in advance.
-- **The validator re-derives the score** — work units are a pure function of the
-  committed task, exactly the SAT-lane contract; a worker's reported number is
-  never trusted.
-- **Paired evaluation** — a challenger is compared only to the incumbent re-scored
-  on the *same* batch, so the crown never turns on which vulnerabilities each drew.
-- **The trace bonus has a quality floor** — a padded or unlicensed reasoning trace
-  earns nothing; the gate is model-free, so it cannot be gamed with compute.
+- **The validator re-derives the score.** Work units are a pure function of the
+  committed task.
+- **Paired evaluation.** A challenger is compared only to the incumbent re-scored
+  on the *same* batch, so the crown never turns on which vulnerabilities each
+  drew.
+- **The trace bonus has a quality floor.** A padded or unlicensed reasoning trace
+  earns nothing, and the gate is model-free, so it cannot be gamed with compute.
 
----
+## What is built
+
+| Capability | Status |
+|---|---|
+| **Score a solution**, differential crash test, level-weighted, re-derivable | **built** ([`cybergym.py`](cathedral_distill/cybergym.py)) |
+| **Distribute problems**, sealed batch draw, private holdout, commit-then-challenge | **built** ([`cybergym_batch.py`](cathedral_distill/cybergym_batch.py)) |
+| **Verify a solution**, run PoC to differential result (backend injected) | **built, logic** ([`cybergym_verifier.py`](cathedral_distill/cybergym_verifier.py)) |
+| **Aggregate the dataset**, trace contract, structural quality gate, reuse licence | **built** ([`trace_submission.py`](cathedral_distill/trace_submission.py)) |
+| **Share emission to valuable miners**, king-of-the-hill, independent reward books | **built** ([`frontier.py`](cathedral_distill/frontier.py), [`roles.py`](cathedral_distill/roles.py)) |
+| **Spot-check without re-running everything**, Merkle openings, chain-derived challenges | **built** ([`challenge.py`](cathedral_distill/challenge.py)) |
+| **Real binary backend**, real ARVO and OSS-Fuzz vul/fix differential, network-isolated, digest-pinned | **built and proven** ([`cybergym_repro.py`](cathedral_distill/cybergym_repro.py), [`corpus_images.py`](cathedral_distill/corpus_images.py)) |
+| **Attested verification (L1)**, binding a solve to an Intel TDX quote | **adapters built and tested on real DCAP quotes.** Per-solve binding proven on the synthetic profile only; the attested real-corpus solve is **not proven** pending the enclave-key worker ([`cybergym_cathedral_attest.py`](cathedral_distill/cybergym_cathedral_attest.py), [TDX_ATTESTATION.md](docs/TDX_ATTESTATION.md)) |
+| Network transport, reference HTTP service (a Bittensor axon can swap in over the same handlers) | **built (HTTP)**, development aid only ([`cybergym_http.py`](cathedral_distill/cybergym_http.py), [`cybergym_repro_server.py`](cathedral_distill/cybergym_repro_server.py)) |
+| On-chain wiring, scored-to-weights adapter, refresh orchestrator, cadence triggers | **merged in `cathedral`**, default off; emission-weight registration is an owner flip |
+| Full corpus at scale, the ~130 GB+ ARVO/OSS-Fuzz image set | infra; a 10-task dual-family slice is deployed and verified |
 
 ## Modules
 
@@ -197,42 +175,43 @@ tested:
 |---|---|
 | [`cybergym.py`](cathedral_distill/cybergym.py) | differential crash verification, level-weighted scoring, `cybergym_work_units_v1` |
 | [`cybergym_batch.py`](cathedral_distill/cybergym_batch.py) | sealed batch draw, private/public holdout split, commit-then-challenge |
-| [`cybergym_verifier.py`](cathedral_distill/cybergym_verifier.py) | PoC → differential result; injected backend, timeout-safe |
+| [`cybergym_verifier.py`](cathedral_distill/cybergym_verifier.py) | PoC to differential result; injected backend, timeout-safe |
 | [`trace_submission.py`](cathedral_distill/trace_submission.py) | the training-corpus contract and its structural quality gate |
 | [`frontier.py`](cathedral_distill/frontier.py) | king-of-the-hill, paired evaluation, eligibility gates, emission split |
 | [`roles.py`](cathedral_distill/roles.py) | miner-role separation and independent reward accounting |
 | [`bundle_registry.py`](cathedral_distill/bundle_registry.py) | model/bundle identity, first-wins registration, version chains |
-| [`registry_line.py`](cathedral_distill/registry_line.py) | the submission record — digests and a receipt URI, never the recipe |
+| [`registry_line.py`](cathedral_distill/registry_line.py) | the submission record: digests and a receipt URI, never the recipe |
 | [`challenge.py`](cathedral_distill/challenge.py) | validator spot-checks: Merkle openings, chain-derived challenges |
 | [`teacher_registry.py`](cathedral_distill/teacher_registry.py) | reviewed-teacher allowlist with pinned licence digests |
-| [`eval_receipt.py`](cathedral_distill/eval_receipt.py) · [`sealed_set.py`](cathedral_distill/sealed_set.py) · [`polaris_attest.py`](cathedral_distill/polaris_attest.py) | the receipt / sealing / TDX-attestation substrate the attested lane builds on |
-
----
+| [`eval_receipt.py`](cathedral_distill/eval_receipt.py), [`sealed_set.py`](cathedral_distill/sealed_set.py), [`polaris_attest.py`](cathedral_distill/polaris_attest.py) | the receipt, sealing, and TDX-attestation substrate the attested lane builds on |
 
 ## Guides
 
-- **[Mining](docs/MINING.md)** — how to compete: the scoring, the epoch loop, what
+- **[Mining](docs/MINING.md)**: how to compete. The scoring, the epoch loop, what
   you submit, the trace bonus, a reference setup, and what earns a zero.
-- **[Validating](docs/VALIDATING.md)** — how to run a validator: drawing sealed
-  batches, fail-closed verification, managing the private holdout, spot-checks, the
-  confidential-compute ladder, and corpus aggregation.
-- **[Live status API](docs/STATUS_API.md)** — `GET /v1/status` / `GET /v1/keys`:
-  every field, a real example, and how a miner reads a win, a loss, or a re-commit.
+- **[Validating](docs/VALIDATING.md)**: how to run a validator. Drawing sealed
+  batches, fail-closed verification, managing the private holdout, spot-checks,
+  the confidential-compute ladder, and corpus aggregation.
+- **[Live status API](docs/STATUS_API.md)**: `GET /v1/status` and `GET /v1/keys`.
+  Every field, a real example, and how a miner reads a win, a loss, or a
+  re-commit.
+- **[TDX attestation](docs/TDX_ATTESTATION.md)**: the two profiles, what each
+  binds, and the production path.
 
-## Launch & positioning
+## Launch and positioning
 
-- **[Positioning](docs/POSITIONING.md)** — the one-pager: what SN39 is, why
-  verified discovery, the miner contract, built vs. to-build.
-- **[Competitive landscape](docs/COMPETITIVE_LANDSCAPE.md)** — vs. Snyk / Semgrep /
-  GitHub Advanced Security / Bitsec: alert vs. proof, with sources.
-- **[Launch copy](docs/LAUNCH_COPY.md)** — X thread, Discord announcement, FAQ.
-- **Site** — `site/index.html` (the subnet), `site/research.html` (the technical
+- **[Positioning](docs/POSITIONING.md)**: what SN39 is, why verified discovery,
+  the miner contract, built versus to-build.
+- **[Competitive landscape](docs/COMPETITIVE_LANDSCAPE.md)**: versus Snyk,
+  Semgrep, GitHub Advanced Security, Bitsec. Alert versus proof, with sources.
+- **[Launch copy](docs/LAUNCH_COPY.md)**: X thread, Discord announcement, FAQ.
+- **Site**: `site/index.html` (the subnet), `site/research.html` (the technical
   case), `site/arena.html` (the proposed Cathedral Arena). Open locally or serve
   the `site/` directory.
 
 ## Run the tests
 
-Requires Python 3.11+.
+Requires Python 3.11 or newer. The installed package is `cathedral-cybergym`.
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
@@ -240,41 +219,40 @@ pip install -e '.[dev]'
 pytest
 ```
 
-Expected: **781 tests**, all hardware-free — the verifier backend is injected, so
-the full mechanism is exercised without the CyberGym binary corpus. A couple skip
-depending on the machine: the real Intel-TDX differential needs `CYBERGYM_RUN_HW=1`
-and the vul/fix dataset, and one synthetic test needs a C compiler on `PATH`.
-Everything else passes.
-
----
+The suite collects 781 tests, all hardware-free: the verifier backend is
+injected, so the full mechanism is exercised without the CyberGym binary corpus.
+How many of them *run* depends on the machine, which is why no passing total is
+claimed here. `tests/test_cybergym_hw.py` skips without `CYBERGYM_RUN_HW=1` and
+the real vul/fix dataset, and one synthetic test skips without a C compiler on
+`PATH`. A green suite proves software behavior, not live attestation,
+deployment, or any on-chain reward.
 
 ## Verifier image contract
 
 The verifier runs as a digest-pinned OCI workload
-([`Dockerfile.cybergym-verify`](Dockerfile.cybergym-verify)): a fixed input mount,
-the canonical result to stdout (nothing else — it is the attestation binding
-surface), logs to stderr, pulled by digest so the bytes cannot change after
-admission. In production it runs inside a confidential-compute enclave, both
-because it executes adversarial crashing binaries and because the crash result is
-bound to the attestation quote.
-
----
+([`Dockerfile.cybergym-verify`](Dockerfile.cybergym-verify)): a fixed input
+mount, the canonical result to stdout and nothing else (it is the attestation
+binding surface), logs to stderr, pulled by digest so the bytes cannot change
+after admission. In production it is intended to run inside a
+confidential-compute enclave, both because it executes adversarial crashing
+binaries and because the crash result is bound to the attestation quote.
 
 ## Responsible use
 
-- **Targets are patched and disclosed.** A task only exists because a fix already
-  exists; verification depends on the patched build. The subnet does not discover
-  or exploit unpatched vulnerabilities in live systems.
+- **Targets are patched and disclosed.** A task only exists because a fix
+  already exists, and verification depends on the patched build. The subnet does
+  not discover or exploit unpatched vulnerabilities in live systems.
 - **Aligned teachers only.** The teacher a model distills from is reviewed and
-  licence-gated ([`teacher_registry.py`](cathedral_distill/teacher_registry.py)).
-  Safety-ablated ("abliterated") models are not used — they are a worse teacher and
-  a liability.
+  licence-gated
+  ([`teacher_registry.py`](cathedral_distill/teacher_registry.py)).
+  Safety-ablated ("abliterated") models are not used: a worse teacher and a
+  liability.
 - **Distribution is gated.** A model trained on this corpus is distributed to
   verified security researchers under access controls, not published as ungated
   open weights.
-- **Everything is evidence.** Every result is a reproducible receipt; the point of
-  the subnet is verifiable defensive work, not opaque capability.
+- **Everything is evidence.** Every result is a reproducible receipt. The point
+  of the subnet is verifiable defensive work, not opaque capability.
 
 ## Licence
 
-MIT.
+MIT. See [LICENSE](LICENSE).
