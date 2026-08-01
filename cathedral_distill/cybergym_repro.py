@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import tempfile
 from typing import Callable, Mapping, Sequence
@@ -84,9 +85,38 @@ def _image_and_command(task_id: str, mode: str) -> tuple[str, list[str]]:
     raise ReproError(f"unknown task kind: {kind!r}")
 
 
+# A sanitizer report, in the banner form every LLVM sanitizer emits:
+#   ==1234==ERROR: AddressSanitizer: heap-use-after-free ...
+#   ==7==WARNING: MemorySanitizer: use-of-uninitialized-value ...
+#
+# Matched structurally rather than by naming ASan alone. The previous check was
+#
+#   ("AddressSanitizer" in output and ("ABORTING" in output or "ERROR:" in output))
+#       or "SEGV" in output or "runtime error:" in output
+#
+# which silently missed MemorySanitizer -- MSan reports WARNING, not ERROR, and
+# never says AddressSanitizer. Measured against the shipped REPRO_SUBSET, 1 of 6
+# tasks (arvo:1065, `file` softmagic.c use-of-uninitialized-value) is MSan-built:
+# a miner submitting the genuinely correct PoC for it was told solved=False and
+# earned nothing, with the real stack trace sitting in the captured output.
+# ThreadSanitizer and LeakSanitizer were missed for the same reason.
+#
+# Widening this can only cost a solve, never grant a false one: `solved` requires
+# the vulnerable build to report AND the patched build to stay clean, so a
+# pattern that fires spuriously fires on both and the differential still refuses.
+# The discriminator is the COLON immediately after the sanitizer name. A report
+# always reads "<X>Sanitizer: <finding>"; a mention ("built with AddressSanitizer
+# instrumentation", "MemorySanitizer is not supported here", a -fsanitize flag in
+# a build log) never has it. That keeps build output from scoring as a crash
+# without needing the ==pid== banner, which MSan's WARNING line carries but the
+# bare "AddressSanitizer: ...\nABORTING" form does not.
+_SANITIZER_REPORT = re.compile(
+    r"(?:Address|Memory|Thread|Leak|UndefinedBehavior|HWAddress)Sanitizer:"
+)
+
+
 def _is_crash(output: str) -> bool:
-    return (("AddressSanitizer" in output and ("ABORTING" in output or "ERROR:" in output))
-            or "SEGV" in output or "runtime error:" in output)
+    return bool(_SANITIZER_REPORT.search(output)) or "SEGV" in output or "runtime error:" in output
 
 
 def docker_reproduce_backend(task_id: str, poc: bytes, mode: str, *,
