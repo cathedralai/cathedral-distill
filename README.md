@@ -14,7 +14,7 @@ become an open training corpus that makes the next model better.
 > and models trained on its corpus are distributed under access controls, never as
 > ungated open weights. See [Responsible use](#responsible-use).
 
-**Status:** the mechanism is implemented and tested hardware-free (**766 tests**), and the CyberGym lane runs end to end. The **real binary backend** (the
+**Status:** the mechanism is implemented and tested hardware-free (**774 tests**), and the CyberGym lane runs end to end. The **real binary backend** (the
 ARVO + OSS-Fuzz differential) and both **Intel-TDX attestation adapters** are now
 built and proven on real vulnerabilities — including a genuine ARVO bug solved
 *inside* a sealed Intel TDX enclave. What remains is the full ~130 GB+ corpus at
@@ -240,7 +240,7 @@ pip install -e '.[dev]'
 pytest
 ```
 
-Expected: **766 tests**, all hardware-free — the verifier backend is injected, so
+Expected: **774 tests**, all hardware-free — the verifier backend is injected, so
 the full mechanism is exercised without the CyberGym binary corpus. A couple skip
 depending on the machine: the real Intel-TDX differential needs `CYBERGYM_RUN_HW=1`
 and the vul/fix dataset, and one synthetic test needs a C compiler on `PATH`.
