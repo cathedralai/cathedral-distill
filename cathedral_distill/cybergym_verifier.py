@@ -152,7 +152,9 @@ def backend_from_env() -> VerifierBackend | None:
     The hardware path (the ~130 GB dataset + prebuilt vul/fix binaries) is kept
     out of the hardware-free suite: it runs only when `CYBERGYM_RUN_HW` is set.
     Then this reads `CYBERGYM_REPRODUCE_CMD` (the `{mode}`/`{task_id}` template)
-    and optional `CYBERGYM_REPRODUCE_TIMEOUT_S`, and returns `subprocess_backend`.
+    and optional `CYBERGYM_REPRODUCE_TIMEOUT_S`, and returns a verifier backend.
+    The exact value `CYBERGYM_SANDBOX=0` is the only sandbox opt-out; every
+    missing, empty, malformed, or unknown value selects the hardened backend.
     Returns `None` when `CYBERGYM_RUN_HW` is unset, so callers keep their injected
     (test/stub) backend and nothing hardware-bound runs by accident.
     """
@@ -167,12 +169,13 @@ def backend_from_env() -> VerifierBackend | None:
             "command template) is not"
         )
     timeout = float(os.environ.get("CYBERGYM_REPRODUCE_TIMEOUT_S", "120"))
-    # Default to the hardened sandbox for the real adversarial path; an operator
-    # can opt out with CYBERGYM_SANDBOX=0 (e.g. when an outer container already
-    # provides isolation).
-    if os.environ.get("CYBERGYM_SANDBOX", "1") not in ("0", "false", "no", ""):
-        return sandboxed_subprocess_backend(cmd, timeout_s=timeout)
-    return subprocess_backend(cmd, timeout_s=timeout)
+    # Default to the hardened sandbox for the real adversarial path.  Only the
+    # documented, exact value CYBERGYM_SANDBOX=0 opts out (for example, when an
+    # outer container already provides isolation).  Missing, empty, malformed,
+    # or otherwise unknown values must fail closed into the sandbox.
+    if os.environ.get("CYBERGYM_SANDBOX") == "0":
+        return subprocess_backend(cmd, timeout_s=timeout)
+    return sandboxed_subprocess_backend(cmd, timeout_s=timeout)
 
 
 def crash_summary(result: DifferentialResult) -> str:

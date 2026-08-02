@@ -160,7 +160,9 @@ exit_code`, `mode ∈ {"vul","fix"}`, `0` = clean. To run against **real binarie
 `subprocess_backend(reproduce_cmd)` or the hardened `sandboxed_subprocess_backend`
 (env-scrub + CPU/memory/core rlimits + `setsid`), or set the env seam
 (`CYBERGYM_RUN_HW=1`, `CYBERGYM_REPRODUCE_CMD` a `{mode}`/`{task_id}` template,
-`CYBERGYM_SANDBOX=1`). *Gotcha:* `run_agent` calls the backend with `mode="vuln"` for
+`CYBERGYM_SANDBOX=1`). Only the exact value `CYBERGYM_SANDBOX=0` opts out when an
+outer sandbox already provides isolation. Missing, empty, or unknown values select
+the hardened backend. *Gotcha:* `run_agent` calls the backend with `mode="vuln"` for
 its own crash check; the real subprocess backends accept only `"vul"`/`"fix"` — map it
 if you bridge to real builds.
 
