@@ -82,7 +82,7 @@ binary run. It is a witness in the exact sense SAT uses.
 
 ## What is built vs. what is to build
 
-**Built and tested** (790 tests, hardware-free — the crash backend is
+**Built and tested** (793 tests, hardware-free — the crash backend is
 injected):
 
 - Differential-crash scoring, level weights, re-derivable work units
@@ -101,7 +101,8 @@ injected):
   (`cybergym_receipt.py`, `cybergym_scores.py`, `frontier.py`, `roles.py`)
 - **The real vul/fix binary backend** — the genuine ARVO + OSS-Fuzz differential,
   network-isolated (`--network none`) and digest-pinned, proven on real bugs
-  (`cybergym_repro.py`, `corpus_images.py`); a 10-task dual-family slice is deployed
+  (`cybergym_repro.py`, `corpus_images.py`); the shipped reference slice is 6 static
+  ARVO tasks for development, not a reward holdout
 - **Intel-TDX attested verification** — both adapters (`attest.v1` result-quote +
   `custom.v1` boot-quote), proven on real Intel DCAP quotes, including a real ARVO
   bug solved inside a sealed TDX enclave (`cybergym_cathedral_attest.py`)

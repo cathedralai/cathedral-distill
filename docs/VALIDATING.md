@@ -255,9 +255,10 @@ usable:
 | `authenticator(headers, body) -> str \| None` | returns the proven caller identity, or `None` |
 | `require_authentication=True` | a request with no identity gets **401**, and never reaches the service |
 
-Both default to off, so an existing deployment is unchanged. An authenticator that
-raises is treated as "no identity" rather than a 500, so a broken verifier fails
-closed.
+Both default to off on the loopback-only development path. The server helpers now
+refuse a non-loopback bind unless `require_authentication=True`; an authenticator
+that raises is treated as "no identity" rather than a 500, so a broken verifier
+fails closed.
 
 **The identity mechanism is deliberately not chosen here.** A Bittensor axon's
 verified `dendrite.hotkey`, a bearer per miner, or a signature over the canonical

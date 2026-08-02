@@ -8,7 +8,9 @@ is version-controlled and configured from the environment rather than edited in 
 
 Config (all via env):
   PORT                    listen port                       (default 8666)
-  CYBERGYM_HOST           bind address                      (default 0.0.0.0)
+  CYBERGYM_HOST           bind address                      (default 127.0.0.1; this
+                                                             reference entrypoint has
+                                                             no public auth mechanism)
   CYBERGYM_SIGNING_SEED   ed25519 seed, 64 hex chars        (default: ephemeral — receipts
                                                              won't verify across restarts)
   CYBERGYM_VALIDATOR_HOTKEY  validator hotkey ss58          (default cathedral-repro-validator)
@@ -103,7 +105,7 @@ def build_service(ids, *, private_key: Ed25519PrivateKey, corpus_db: str | None 
 
 def main() -> None:
     port = int(os.environ.get("PORT", "8666"))
-    host = os.environ.get("CYBERGYM_HOST", "0.0.0.0")
+    host = os.environ.get("CYBERGYM_HOST", "127.0.0.1")
     key, ephemeral = _signing_key()
     ids = resolve_tasks()
     svc = build_service(
