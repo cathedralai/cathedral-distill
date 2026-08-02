@@ -30,6 +30,43 @@ def test_backend_from_env_returns_a_backend_when_enabled(monkeypatch):
     assert callable(backend)  # constructed, not yet run — no binaries touched here
 
 
+@pytest.mark.parametrize(
+    "sandbox_value",
+    [None, "", " ", " 0", "0 ", "false", "no", "unknown"],
+)
+def test_backend_from_env_sandbox_setting_fails_closed(monkeypatch, sandbox_value):
+    monkeypatch.setenv("CYBERGYM_RUN_HW", "1")
+    monkeypatch.setenv("CYBERGYM_REPRODUCE_CMD", "true {mode} {task_id}")
+    if sandbox_value is None:
+        monkeypatch.delenv("CYBERGYM_SANDBOX", raising=False)
+    else:
+        monkeypatch.setenv("CYBERGYM_SANDBOX", sandbox_value)
+
+    hardened = object()
+    raw = object()
+    monkeypatch.setattr(
+        cv, "sandboxed_subprocess_backend", lambda *args, **kwargs: hardened
+    )
+    monkeypatch.setattr(cv, "subprocess_backend", lambda *args, **kwargs: raw)
+
+    assert cv.backend_from_env() is hardened
+
+
+def test_backend_from_env_allows_only_explicit_zero_opt_out(monkeypatch):
+    monkeypatch.setenv("CYBERGYM_RUN_HW", "1")
+    monkeypatch.setenv("CYBERGYM_REPRODUCE_CMD", "true {mode} {task_id}")
+    monkeypatch.setenv("CYBERGYM_SANDBOX", "0")
+
+    hardened = object()
+    raw = object()
+    monkeypatch.setattr(
+        cv, "sandboxed_subprocess_backend", lambda *args, **kwargs: hardened
+    )
+    monkeypatch.setattr(cv, "subprocess_backend", lambda *args, **kwargs: raw)
+
+    assert cv.backend_from_env() is raw
+
+
 def test_enabled_without_a_command_fails_closed(monkeypatch):
     monkeypatch.setenv("CYBERGYM_RUN_HW", "1")
     monkeypatch.delenv("CYBERGYM_REPRODUCE_CMD", raising=False)
