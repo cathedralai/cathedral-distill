@@ -107,16 +107,37 @@ injected):
   `custom.v1` boot-quote), proven on real Intel DCAP quotes, including a real ARVO
   bug solved inside a sealed TDX enclave (`cybergym_cathedral_attest.py`)
 
-**To build** (infrastructure or owner ceremony, not local logic):
+**To build** (infrastructure or reward integration, not local scoring logic):
 
 - The full ~130 GB+ CyberGym corpus **at scale** (the backend itself is built above)
 - The production holdout **refill** feed of fresh disclosures (the loader exists;
   the source of new vulns is infrastructure)
-- The Bittensor axon/synapse transport (the HTTP service is a stand-in). The
-  scored→weights wiring is **merged** in `cathedralai/cathedral` (PR #409 adapter +
-  #414 orchestrator + #415 cadence triggers); what remains is the owner registering
-  the mechanism's emission weight (the flip that pays)
+- The Bittensor axon/synapse transport (the HTTP service is a stand-in).
+- The reward architecture. Two choices remain open:
+  1. **One composed vector on mechanism 0.** Replace the current 90% Intel TDX
+     plus 10% fixed-burn contract with a versioned signed allocation policy that
+     assigns the full emission across Intel TDX, CyberGym, and fixed burn,
+     including where forfeited CyberGym share goes. Then wire the disabled bridge
+     into `weights.build_signed_vector` and keep the mechanism-0 writer. The
+     Cathedral-signed allocation document is authoritative, and publisher plus
+     validator releases must follow one coordinated compatibility rollout because
+     the current validator rejects allocation drift.
+  2. **A separate on-chain mechanism 1.** Build and deploy its signed allocation
+     policy, vector, and writer first, including treatment of forfeited share. The
+     current subnet owner would then create mechanism 1 and set its emission split.
+     The owner action does not supply validator weights.
+- Under either choice, missing, stale, incomplete, unauthenticated, unmapped, or
+  ineligible lane evidence sends that lane's configured share to burn. A surviving
+  lane does not inherit forfeited mass.
 - The attested-verification lane (crash result bound to a TDX quote)
+
+Neither reward architecture is launch-proven until one recorded production run
+shows all of the following: a fresh complete real-corpus score with a
+result-bound Intel TDX receipt, a signed vector with positive CyberGym miner
+allocation and reviewed burn allocation, acceptance and submission by the
+canonical validator to the selected mechanism, an active validator at a
+finalized block, nonzero miner incentive and emission, and an external miner
+install with no operator bypass.
 
 ## Who this is for
 

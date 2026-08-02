@@ -36,6 +36,32 @@ DOCS = sorted(
     [*(ROOT / "docs").glob("*.md"), ROOT / "README.md", ROOT / "site" / "README.md"]
 )
 
+REWARD_ACTIVATION_DOCS = (
+    ROOT / "README.md",
+    ROOT / "docs" / "POSITIONING.md",
+    ROOT / "docs" / "MINING.md",
+)
+
+OWNER_ONLY_REWARD_SHORTCUTS = (
+    "owner flip",
+    "on-chain flip",
+    "registering the mechanism's emission weight is an owner step",
+    "the mechanism registered on chain (owner steps in progress)",
+    "the flip that pays",
+)
+
+REWARD_PROOF_TERMS = (
+    "mechanism 0",
+    "mechanism 1",
+    "signed vector",
+    "signed allocation policy",
+    "forfeited",
+    "active",
+    "incentive",
+    "emission",
+    "external miner",
+)
+
 
 def _defined_in_code() -> set[str]:
     """Every schema-shaped literal the package actually contains."""
@@ -47,6 +73,19 @@ def _defined_in_code() -> set[str]:
 
 def _named_in(path: Path) -> set[str]:
     return set(SCHEMA_LIKE.findall(path.read_text(encoding="utf-8")))
+
+
+def _reward_activation_doc_errors() -> list[str]:
+    errors: list[str] = []
+    for path in REWARD_ACTIVATION_DOCS:
+        text = path.read_text(encoding="utf-8").lower()
+        for claim in OWNER_ONLY_REWARD_SHORTCUTS:
+            if claim in text:
+                errors.append(f"{path.relative_to(ROOT)} repeats shortcut: {claim}")
+        missing = [phrase for phrase in REWARD_PROOF_TERMS if phrase not in text]
+        if missing:
+            errors.append(f"{path.relative_to(ROOT)} is missing proof terms: {missing}")
+    return errors
 
 
 def test_the_package_defines_the_schemas_it_is_expected_to():
@@ -118,6 +157,12 @@ def test_the_lane_id_is_documented_and_not_confused_with_the_mechanism_id():
         "cybergym_v0 is the publisher's MechanismSpec id, not a lane id; used as a "
         f"lane it burns the epoch. The lane id is {CYBERGYM_LANE!r}:\n"
         + "\n".join(offenders)
+    )
+
+    reward_errors = _reward_activation_doc_errors()
+    assert not reward_errors, (
+        "reward activation must state both mechanism architectures and effective "
+        "chain proof, not only a subnet-owner action:\n" + "\n".join(reward_errors)
     )
 
 

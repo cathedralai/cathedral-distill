@@ -24,13 +24,50 @@ to form a training corpus for the next specialist model.
 | Miner transport | **None supported yet.** `--local` is not a transport, and the reference HTTP service is a development aid, not a supported miner endpoint. A Bittensor axon can swap in over the same handlers later |
 | Intel TDX requirement | A solve is intended to earn only when attested from inside Intel TDX; solved-but-unattested credits zero. See the attestation boundary below |
 | Registration | SN39 hotkey registration and an on-chain model commit are part of the live loop. **The live loop is not open: do not register or spend for this track before a launch notice** |
-| On-chain reward activation | **Pending.** The scored-to-weights bridge is merged in [`cathedral`](https://github.com/cathedralai/cathedral) and is off by default twice over; registering the mechanism's emission weight is an owner step |
+| On-chain reward activation | **Pending.** The CyberGym bridge exists in [`cathedral`](https://github.com/cathedralai/cathedral), but it is disabled and the live signed-vector builder does not call it. The team must choose one of the two reward architectures below. An owner action alone does not activate rewards |
 
 The mechanism is implemented and tested hardware-free, the CyberGym lane runs end
 to end in those tests, and the real binary backend (ARVO plus OSS-Fuzz
 differential) is built and proven on real vulnerabilities. What remains is the
 attested production worker described below, the full corpus at scale, a
-Bittensor axon, and the on-chain flip.
+Bittensor axon, a selected reward architecture, and proof of effective miner
+emission.
+
+### Reward activation has two architectures
+
+Choose one architecture before any chain-owner ceremony:
+
+1. **One composed vector on mechanism 0.** First replace the current 90% Intel
+   TDX plus 10% fixed-burn contract with a versioned signed allocation policy
+   that assigns the full emission across Intel TDX, CyberGym, and fixed burn,
+   including where forfeited CyberGym share goes. Then wire the CyberGym bridge
+   into `weights.build_signed_vector` before signing and keep the existing
+   mechanism-0 chain writer. The Cathedral-signed allocation document must be
+   authoritative. Publisher and validator releases must follow one coordinated
+   compatibility rollout because the current validator rejects allocation drift.
+2. **A separate on-chain mechanism 1.** Build and deploy a signed mechanism-1
+   allocation policy, vector, and chain writer, including the treatment of
+   forfeited share. Only then should the current subnet owner create the second
+   mechanism and set its emission split. Creating the mechanism does not provide
+   its validator weights.
+
+For either architecture, a lane with missing, stale, incomplete, unauthenticated,
+unmapped, or ineligible evidence sends its configured share to burn. No surviving
+lane inherits forfeited mass.
+
+Either choice remains blocked from launch until one recorded run proves every
+step below:
+
+1. Production transport delivers a fresh, complete CyberGym score backed by a
+   result-bound Intel TDX receipt for a real-corpus solve.
+2. The signed weights feed contains the intended miner with a positive CyberGym
+   allocation and the reviewed burn allocation.
+3. The canonical validator accepts the signed vector, submits it to the selected
+   mechanism, and remains active on chain.
+4. A finalized chain view shows the accepted validator row, plus nonzero
+   incentive and nonzero emission for the intended miner.
+5. An external miner installs the signed release and completes the same path
+   without operator bypasses.
 
 ### The attestation boundary, exactly
 
@@ -166,7 +203,7 @@ tested:
 | **Real binary backend**, real ARVO and OSS-Fuzz vul/fix differential, network-isolated, digest-pinned | **built and proven** ([`cybergym_repro.py`](cathedral_distill/cybergym_repro.py), [`corpus_images.py`](cathedral_distill/corpus_images.py)) |
 | **Attested verification (L1)**, binding a solve to an Intel TDX quote | **adapters built and tested on real DCAP quotes.** Per-solve binding proven on the synthetic profile only; the attested real-corpus solve is **not proven** pending the enclave-key worker ([`cybergym_cathedral_attest.py`](cathedral_distill/cybergym_cathedral_attest.py), [TDX_ATTESTATION.md](docs/TDX_ATTESTATION.md)) |
 | Network transport, reference HTTP service (a Bittensor axon can swap in over the same handlers) | **built (HTTP)**, development aid only ([`cybergym_http.py`](cathedral_distill/cybergym_http.py), [`cybergym_repro_server.py`](cathedral_distill/cybergym_repro_server.py)) |
-| On-chain wiring, scored-to-weights adapter, refresh orchestrator, cadence triggers | **merged in `cathedral`**, default off; emission-weight registration is an owner flip |
+| Reward wiring | **partly merged in `cathedral`, not live.** The CyberGym bridge is disabled and is not called by the live signed-vector builder. Choose composed mechanism 0 or implement a separate mechanism 1, then pass the reward proof gates above |
 | Full corpus at scale, the ~130 GB+ ARVO/OSS-Fuzz image set | infra; the shipped reference slice is 6 static ARVO tasks for development, not a reward holdout |
 
 ## Modules

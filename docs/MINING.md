@@ -14,10 +14,23 @@ model is how you contribute to it.**
 > **Status.** The scoring, sealing, submission, verify, and TDX-attestation mechanism
 > is implemented, tested, and proven end-to-end (a real LLM miner over HTTP; a real
 > ARVO bug solved inside an Intel TDX enclave). You can **develop and run the miner
-> agent today** against `--local`. Live on-chain participation additionally needs the
-> operator key ceremony + the mechanism registered on chain (owner steps in progress),
-> and the CLI's live-dispatch mode is Phase-2-gated (see below). Steps that need those
-> are marked *(in progress)*.
+> agent today** against `--local`. Live dispatch and on-chain rewards remain blocked.
+> Two reward architectures remain open. Choice A composes CyberGym into the existing
+> mechanism 0 signed vector. Choice B adds a separate signed vector and chain writer
+> for mechanism 1, followed by the subnet-owner mechanism count and emission-split
+> ceremony. Either choice first needs a versioned signed allocation policy defining
+> the full emission fractions and where forfeited CyberGym share goes. The owner
+> ceremony alone does not activate rewards. The Cathedral-signed allocation document
+> is authoritative, publisher and validator releases must follow one coordinated
+> compatibility rollout, and a failed lane sends its full share to burn rather than
+> another lane. Steps requiring the live path are marked *(in progress)*.
+
+Launch proof requires one recorded production run with every link present: a fresh,
+complete real-corpus score carrying a result-bound Intel TDX receipt, a signed vector
+with positive CyberGym miner allocation and the reviewed burn allocation, canonical
+validator acceptance and submission to the selected mechanism, an active validator
+at a finalized block, nonzero miner incentive and emission, and an external miner
+install with no operator bypass.
 
 ---
 
