@@ -210,6 +210,79 @@ The honest, minimal story `/v1/status` tells a miner, end to end:
 
 ---
 
+## Building a dashboard
+
+A dashboard is a consumer of the routes above, not a route of its own. Everything
+here is served by `GET /v1/status` and `GET /v1/keys`; nothing below needs a new
+public surface, and two things must never become one.
+
+### Two things a public dashboard must never publish
+
+**Sealed holdout task ids.** The whole anti-gaming design rests on the scored
+batch being unknowable before the model hash is committed. A per-task solve-rate
+panel for the private holdout hands miners exactly what the seal exists to
+withhold — and it does so continuously, to everyone, forever. Aggregate across
+tasks; never enumerate them. Public ARVO/OSS-Fuzz development tasks are safe to
+name because they are already public; holdout tasks are not.
+
+**PoC bytes, and `poc_sha256` for a task the reader has not solved.** A verified
+PoC is a working exploit for a real vulnerability. Distribution of this corpus is
+access-gated on purpose; a public dashboard is the opposite of gated. Publish
+counts and outcomes, never payloads.
+
+Both are properties of what you *render*, not of what the API returns — `/v1/status`
+already declines to publish per-submission detail (see [Understanding a win or a
+loss](#understanding-a-win-or-a-loss)), and a dashboard should not reintroduce it
+by joining against its own submit-time records.
+
+### From `GET /v1/status`
+
+| Panel | Fields | Why it earns its space |
+|---|---|---|
+| **Verification funnel** | `participation.durable_solves`, `leaderboard.scored_miners`, `corpus.this_epoch_rows` | The drop-off *is* the product. Every subnet can show work completed; this one can show what it refused. Render it as a funnel, not a total. |
+| **Corpus growth** | `corpus.total_rows`, `corpus.this_epoch_rows` | The flywheel, and the one line that should only ever go up. `total_rows` never resets, so it is the honest all-time number. |
+| **Participation** | `committed`, `pending`, `scored`, `unscorable` | `unscorable` is the interesting one: it is always self-inflicted (a mid-epoch re-commit to a different model) and never caused by anyone else, so a spike means miners are confused, not attacked. |
+| **Emission concentration** | `leaderboard.top[].earned_units`, `total_earned_units` | King-of-the-hill centralises *by design*. Publish top-1 share and a concentration index so that is a visible property rather than something an observer discovers and mistakes for capture. |
+| **Epoch liveness** | `epoch.state`, `epoch.detail`, `source_epoch`, `valid_from_block`, `valid_until_block` | A stalled epoch fails silently — it looks exactly like a quiet one. Show the block window and how far into it the epoch is. |
+| **Snapshot freshness** | `cache.age_secs`, `cache.ttl_secs` | Polling faster than `ttl_secs` returns the same snapshot. Render the age so a cached number is never mistaken for a stuck one. |
+| **Section health** | each section's `available` / `detail` | Sections fail independently (see [Failing soft](#failing-soft)). A panel whose section reports `available: false` must say so, not render a stale or zero value. |
+
+### From `GET /v1/keys`
+
+| Panel | Why |
+|---|---|
+| **Verifiability** — `signing_key_id` and `signing_public_key_digest` from `/v1/status`, resolved against this registry | Lets a reader confirm which key signed the receipts behind every number on the page. A dashboard that cannot be checked is marketing. |
+| **Registry state** | A **503** here is meaningful, not an outage: the registry is unconfigured or failed its own freshness or signature check, and is refused rather than served. Show "unverifiable" rather than hiding the panel — that distinction is the point of failing closed. |
+
+Also worth surfacing `manifest_digest`: anyone holding the draw manifest can
+confirm this validator is running the one they think it is, without the manifest
+being published.
+
+### Not yet served
+
+These need new aggregate fields before a dashboard can show them honestly. Listed
+because the gap is easy to paper over with a plausible-looking chart built from
+something else.
+
+| Metric | Why it matters | Status |
+|---|---|---|
+| **Task-pool exhaustion** — distinct tasks solved ÷ available | The first symptom is scores flatlining with no visible cause, which reads as a broken mechanism. Deployments running a small slice hit this early. | needs a count of available tasks, published as a total only — never as a list |
+| **Level mix** — solved counts per `level0`…`level3` | `level0` is the scarce capability and carries the highest weight, so it is the real quality signal; a rising total made entirely of `level3` is a fall in quality that a single number hides. | needs per-level aggregation |
+| **Attestation coverage** — share of creditable solves that were attested | Separates "verified" from "verified inside a TEE". `attested` exists per submission but is not aggregated anywhere public. | needs aggregation |
+| **Verify latency** p50/p99 | A differential that slows down silently starves the epoch rather than failing it. | not instrumented |
+| **Frontier turnover** — epochs held, challenger attempts, win margin | Whether king-of-the-hill is contested or parked. | not aggregated |
+
+### Do not show
+
+**Total submissions** as a headline: it rewards volume, and volume is the one
+thing a miner can manufacture. **Any self-reported number** — the validator
+re-derives every figure it scores, and a dashboard that renders a reported one
+quietly gives up the property the subnet is built on. **The burn share** as a
+time series: it is a fixed floor, so a flat line only invites the question of
+whether it is broken.
+
+---
+
 ## Serving this from your own validator
 
 ```python
