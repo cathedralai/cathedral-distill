@@ -110,7 +110,7 @@ A real response, captured live off a running validator mid-epoch:
 
 | Field | Meaning |
 |---|---|
-| `state` | `"open"` (still accepting submissions) or `"closed"` (scored and composed). |
+| `state` | `"open"` (still accepting submissions) or `"closed"` (a scoring pass accounted for every durable solve). `closed` is required before composition; it does not prove the lane was composed or published. |
 | `detail` | Human-readable reason, e.g. `"no scoring pass has been recorded for this epoch"`. |
 
 **`participation`** — where things stand while the epoch is open; this is the
@@ -121,8 +121,8 @@ field that answers *"is my submission stuck, or just not scored yet"*
 | `committed` | Miners with at least one solve on record this epoch. |
 | `pending` | Solved and durably recorded, **awaiting** a scoring pass. |
 | `scored` | Counted in the last scoring pass — these are the numbers behind `leaderboard`. |
-| `unscorable` | A miner who re-committed to a **different** model mid-epoch, abandoning their prior solves (a deliberate, self-inflicted state — see [MINING.md](MINING.md) — never triggered by anyone else's action; dispatch is caller-bound). |
-| `durable_solves` | Total solve rows on record for this epoch, independent of scoring. |
+| `unscorable` | Miners whose durable solves will not be scored. This includes a miner re-committing to a different model mid-epoch and an operator explicitly acknowledging validator-side lost state. Inspect the recorded reason before assigning cause. |
+| `durable_solves` | Total solve rows retained across all epochs. This is an all-time counter, independent of the current epoch and scoring pass. |
 
 **`leaderboard`** — earned units once a scoring pass has run; **empty is a
 normal answer**, not an error, while `state.state == "open"`
@@ -195,18 +195,91 @@ The honest, minimal story `/v1/status` tells a miner, end to end:
    cleared the quality floor.
 3. A scoring pass moves scored miners from `pending` to `scored`, and
    populates `leaderboard.top` with your rank and earned units.
-4. **`unscorable`** means you re-committed to a different model mid-epoch — the
-   validator abandoned your prior solves for the OLD commitment (never the
-   epoch, never another miner's). This is dispatch being caller-bound: only you
-   can do this to your own solves, and it only costs your unscored work, never
-   the lane. See [MINING.md § What will get you a zero](MINING.md#what-will-get-you-a-zero).
-5. **A zero on the leaderboard despite `durable_solves > 0`** means every solve
-   this epoch failed a gate the validator won't relax — wrong task, off-batch,
-   an unregistered commitment, or a trace that didn't clear the structural
-   quality floor. `/v1/status` doesn't publish per-submission gate reasons (that
-   detail is in your own verdict from `POST /cybergym/submit`, not a public
-   surface); the aggregate view only tells you *whether* you scored, not *why
-   not* — check the verdict you got back at submit time for that.
+4. **`unscorable`** has two causes. A miner can re-commit to a different model
+   mid-epoch and abandon its prior solves. An operator can also acknowledge
+   validator-side lost state so the rest of the lane is no longer wedged. The
+   count alone does not identify the cause; inspect the recorded reason.
+5. **A zero on the leaderboard while this epoch has accepted solves** means the
+   solves did not produce positive verified units. `/v1/status` does not expose
+   an epoch-scoped solve-row count or per-submission gate reasons. Check the
+   verdict returned by `POST /cybergym/submit`; do not infer the current epoch
+   from the all-time `durable_solves` counter.
+
+---
+
+## Building a dashboard
+
+A dashboard is a consumer of the routes above, not a route of its own. Everything
+here is served by `GET /v1/status` and `GET /v1/keys`; nothing below needs a new
+public surface, and two things must never become one.
+
+### Two things a public dashboard must never publish
+
+**Sealed holdout task ids.** The whole anti-gaming design rests on the scored
+batch being unknowable before the model hash is committed. A per-task solve-rate
+panel for the private holdout hands miners exactly what the seal exists to
+withhold — and it does so continuously, to everyone, forever. Aggregate across
+tasks; never enumerate them. Public ARVO/OSS-Fuzz development tasks are safe to
+name because they are already public; holdout tasks are not.
+
+**PoC bytes, and `poc_sha256` for a task the reader has not solved.** A verified
+PoC is a working exploit for a real vulnerability. Distribution of this corpus is
+access-gated on purpose; a public dashboard is the opposite of gated. Publish
+counts and outcomes, never payloads.
+
+Both are properties of what you *render*, not of what the API returns — `/v1/status`
+already declines to publish per-submission detail (see [Understanding a win or a
+loss](#understanding-a-win-or-a-loss)), and a dashboard should not reintroduce it
+by joining against its own submit-time records.
+
+### From `GET /v1/status`
+
+| Panel | Fields | Why it earns its space |
+|---|---|---|
+| **Verification outcomes** | `participation.committed`, `pending`, `scored`, `unscorable` | These are current-epoch miner counts. Show them as separate outcomes, not a sequential funnel: they describe overlapping states, not one shared denominator moving through stages. |
+| **Corpus growth** | `corpus.total_rows`, `corpus.this_epoch_rows` | The flywheel, and the one line that should only ever go up. `total_rows` never resets, so it is the honest all-time number. |
+| **Participation** | `committed`, `pending`, `scored`, `unscorable` | A rise in `unscorable` needs investigation. It can mean miner recommitment or an operator acknowledgment of validator-side lost state. The aggregate count does not distinguish them. |
+| **Emission concentration** | `leaderboard.top[].earned_units`, `total_earned_units` | King-of-the-hill centralises *by design*. Publish top-1 share and a concentration index so that is a visible property rather than something an observer discovers and mistakes for capture. |
+| **Epoch liveness** | `epoch.state`, `epoch.detail`, `source_epoch`, `valid_from_block`, `valid_until_block` | A stalled epoch fails silently — it looks exactly like a quiet one. Show the block window and how far into it the epoch is. |
+| **Snapshot freshness** | `cache.age_secs`, `cache.ttl_secs` | Polling faster than `ttl_secs` returns the same snapshot. Render the age so a cached number is never mistaken for a stuck one. |
+| **Section health** | each section's `available` / `detail` | Sections fail independently (see [Failing soft](#failing-soft)). A panel whose section reports `available: false` must say so, not render a stale or zero value. |
+
+### From `GET /v1/keys`
+
+| Panel | Why |
+|---|---|
+| **Verifiability** — `signing_key_id` and `signing_public_key_digest` from `/v1/status`, resolved against this registry | Lets a reader confirm which key signed the receipts behind every number on the page. A dashboard that cannot be checked is marketing. |
+| **Registry state** | A **503** here is meaningful, not an outage: the registry is unconfigured or failed its own freshness or signature check, and is refused rather than served. Show "unverifiable" rather than hiding the panel — that distinction is the point of failing closed. |
+
+Also worth surfacing `manifest_digest`: anyone holding the draw manifest can
+confirm this validator is running the one they think it is, without the manifest
+being published.
+
+### Not yet served
+
+These need new aggregate fields before a dashboard can show them honestly. Listed
+because the gap is easy to paper over with a plausible-looking chart built from
+something else.
+
+| Metric | Why it matters | Status |
+|---|---|---|
+| **Task-pool exhaustion** — distinct tasks solved ÷ available | The first symptom is scores flatlining with no visible cause, which reads as a broken mechanism. Deployments running a small slice hit this early. | needs a count of available tasks, published as a total only — never as a list |
+| **Level mix** — solved counts per `level0`…`level3` | `level0` is the scarce capability and carries the highest weight, so it is the real quality signal; a rising total made entirely of `level3` is a fall in quality that a single number hides. | needs per-level aggregation |
+| **Attestation coverage** — share of creditable solves that were attested | Separates "verified" from "verified inside a TEE". `attested` exists per submission but is not aggregated anywhere public. | needs aggregation |
+| **Verify latency** p50/p99 | A differential that slows down silently starves the epoch rather than failing it. | not instrumented |
+| **Frontier turnover** — epochs held, challenger attempts, win margin | Whether king-of-the-hill is contested or parked. | not aggregated |
+
+### Do not show
+
+**Total submissions** as a headline: it rewards volume, and volume is the one
+thing a miner can manufacture. **Any self-reported number** — the validator
+re-derives every figure it scores, and a dashboard that renders a reported one
+quietly gives up the property the subnet is built on.
+
+Do show the **effective burn share** when the composition feed exposes it. Ten
+percent is the configured floor. Missing or invalid lanes fold their allocation
+into burn, so 55 percent or 100 percent burn is an operational failure signal,
+not a fixed policy line.
 
 ---
 
