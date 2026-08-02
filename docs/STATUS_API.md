@@ -110,7 +110,7 @@ A real response, captured live off a running validator mid-epoch:
 
 | Field | Meaning |
 |---|---|
-| `state` | `"open"` (still accepting submissions) or `"closed"` (scored and composed). |
+| `state` | `"open"` (still accepting submissions) or `"closed"` (a scoring pass accounted for every durable solve). `closed` is required before composition; it does not prove the lane was composed or published. |
 | `detail` | Human-readable reason, e.g. `"no scoring pass has been recorded for this epoch"`. |
 
 **`participation`** — where things stand while the epoch is open; this is the
@@ -121,8 +121,8 @@ field that answers *"is my submission stuck, or just not scored yet"*
 | `committed` | Miners with at least one solve on record this epoch. |
 | `pending` | Solved and durably recorded, **awaiting** a scoring pass. |
 | `scored` | Counted in the last scoring pass — these are the numbers behind `leaderboard`. |
-| `unscorable` | A miner who re-committed to a **different** model mid-epoch, abandoning their prior solves (a deliberate, self-inflicted state — see [MINING.md](MINING.md) — never triggered by anyone else's action; dispatch is caller-bound). |
-| `durable_solves` | Total solve rows on record for this epoch, independent of scoring. |
+| `unscorable` | Miners whose durable solves will not be scored. This includes a miner re-committing to a different model mid-epoch and an operator explicitly acknowledging validator-side lost state. Inspect the recorded reason before assigning cause. |
+| `durable_solves` | Total solve rows retained across all epochs. This is an all-time counter, independent of the current epoch and scoring pass. |
 
 **`leaderboard`** — earned units once a scoring pass has run; **empty is a
 normal answer**, not an error, while `state.state == "open"`
@@ -195,18 +195,15 @@ The honest, minimal story `/v1/status` tells a miner, end to end:
    cleared the quality floor.
 3. A scoring pass moves scored miners from `pending` to `scored`, and
    populates `leaderboard.top` with your rank and earned units.
-4. **`unscorable`** means you re-committed to a different model mid-epoch — the
-   validator abandoned your prior solves for the OLD commitment (never the
-   epoch, never another miner's). This is dispatch being caller-bound: only you
-   can do this to your own solves, and it only costs your unscored work, never
-   the lane. See [MINING.md § What will get you a zero](MINING.md#what-will-get-you-a-zero).
-5. **A zero on the leaderboard despite `durable_solves > 0`** means every solve
-   this epoch failed a gate the validator won't relax — wrong task, off-batch,
-   an unregistered commitment, or a trace that didn't clear the structural
-   quality floor. `/v1/status` doesn't publish per-submission gate reasons (that
-   detail is in your own verdict from `POST /cybergym/submit`, not a public
-   surface); the aggregate view only tells you *whether* you scored, not *why
-   not* — check the verdict you got back at submit time for that.
+4. **`unscorable`** has two causes. A miner can re-commit to a different model
+   mid-epoch and abandon its prior solves. An operator can also acknowledge
+   validator-side lost state so the rest of the lane is no longer wedged. The
+   count alone does not identify the cause; inspect the recorded reason.
+5. **A zero on the leaderboard while this epoch has accepted solves** means the
+   solves did not produce positive verified units. `/v1/status` does not expose
+   an epoch-scoped solve-row count or per-submission gate reasons. Check the
+   verdict returned by `POST /cybergym/submit`; do not infer the current epoch
+   from the all-time `durable_solves` counter.
 
 ---
 
@@ -239,9 +236,9 @@ by joining against its own submit-time records.
 
 | Panel | Fields | Why it earns its space |
 |---|---|---|
-| **Verification funnel** | `participation.durable_solves`, `leaderboard.scored_miners`, `corpus.this_epoch_rows` | The drop-off *is* the product. Every subnet can show work completed; this one can show what it refused. Render it as a funnel, not a total. |
+| **Verification outcomes** | `participation.committed`, `pending`, `scored`, `unscorable` | These are current-epoch miner counts. Show them as separate outcomes, not a sequential funnel: they describe overlapping states, not one shared denominator moving through stages. |
 | **Corpus growth** | `corpus.total_rows`, `corpus.this_epoch_rows` | The flywheel, and the one line that should only ever go up. `total_rows` never resets, so it is the honest all-time number. |
-| **Participation** | `committed`, `pending`, `scored`, `unscorable` | `unscorable` is the interesting one: it is always self-inflicted (a mid-epoch re-commit to a different model) and never caused by anyone else, so a spike means miners are confused, not attacked. |
+| **Participation** | `committed`, `pending`, `scored`, `unscorable` | A rise in `unscorable` needs investigation. It can mean miner recommitment or an operator acknowledgment of validator-side lost state. The aggregate count does not distinguish them. |
 | **Emission concentration** | `leaderboard.top[].earned_units`, `total_earned_units` | King-of-the-hill centralises *by design*. Publish top-1 share and a concentration index so that is a visible property rather than something an observer discovers and mistakes for capture. |
 | **Epoch liveness** | `epoch.state`, `epoch.detail`, `source_epoch`, `valid_from_block`, `valid_until_block` | A stalled epoch fails silently — it looks exactly like a quiet one. Show the block window and how far into it the epoch is. |
 | **Snapshot freshness** | `cache.age_secs`, `cache.ttl_secs` | Polling faster than `ttl_secs` returns the same snapshot. Render the age so a cached number is never mistaken for a stuck one. |
@@ -277,9 +274,12 @@ something else.
 **Total submissions** as a headline: it rewards volume, and volume is the one
 thing a miner can manufacture. **Any self-reported number** — the validator
 re-derives every figure it scores, and a dashboard that renders a reported one
-quietly gives up the property the subnet is built on. **The burn share** as a
-time series: it is a fixed floor, so a flat line only invites the question of
-whether it is broken.
+quietly gives up the property the subnet is built on.
+
+Do show the **effective burn share** when the composition feed exposes it. Ten
+percent is the configured floor. Missing or invalid lanes fold their allocation
+into burn, so 55 percent or 100 percent burn is an operational failure signal,
+not a fixed policy line.
 
 ---
 
