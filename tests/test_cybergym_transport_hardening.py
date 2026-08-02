@@ -8,11 +8,14 @@ hung by a client that lies about its body length.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import socket
 import threading
 import urllib.error
 import urllib.request
+
+import pytest
 
 from cathedral_distill import cybergym_http as chttp
 
@@ -168,3 +171,25 @@ def test_threaded_server_bounds_its_accept_queue():
     from http.server import ThreadingHTTPServer
     assert chttp.REQUEST_QUEUE_SIZE >= 1
     assert ThreadingHTTPServer.request_queue_size or True  # set at construction
+
+
+def test_server_helpers_default_to_loopback_and_refuse_anonymous_public_binds():
+    """A new deployment must not expose the mutating routes by omission."""
+    for factory in (chttp.make_server, chttp.make_threaded_server):
+        assert inspect.signature(factory).parameters["host"].default == "127.0.0.1"
+        with pytest.raises(ValueError, match="require_authentication=True"):
+            factory(_StubService(), host="0.0.0.0", port=0)
+
+
+def test_required_authentication_allows_an_explicit_public_bind():
+    """Operators retain a deliberate public-bind path once transport auth exists."""
+    for factory in (chttp.make_server, chttp.make_threaded_server):
+        server = factory(
+            _StubService(), host="0.0.0.0", port=0,
+            authenticator=lambda headers, body: "5RealMiner",
+            require_authentication=True,
+        )
+        try:
+            assert server.server_address[0] == "0.0.0.0"
+        finally:
+            server.server_close()

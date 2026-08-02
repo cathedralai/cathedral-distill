@@ -22,13 +22,15 @@ resolve a receipt's `signing_key_id` — without it, no live receipt has a resol
 signer. Both are anonymous reads of signed or already-public data.
 
 The CORS header is on those two routes ALONE — the POST routes stay same-origin,
-since they are authenticated and mutating and a browser must never be able to drive
-them cross-site. See `cathedral_distill.status` for what the status payload does and
-does not disclose, and `cathedral_distill.served_keys` for why the registry is
-verified before it is served.
+but same-origin is not authentication. The server defaults to loopback and refuses
+a non-loopback bind unless authentication is required for every mutating route. See
+`cathedral_distill.status` for what the status payload does and does not disclose,
+and `cathedral_distill.served_keys` for why the registry is verified before it is
+served.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import socket
 import threading
@@ -58,6 +60,26 @@ REQUEST_TIMEOUT_SECS = 30.0
 # ThreadingHTTPServer callers routinely raise it; naming it makes the ceiling a
 # decision rather than an accident.
 REQUEST_QUEUE_SIZE = 32
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True only for an explicit loopback address or the localhost name."""
+    value = str(host).strip().lower().strip("[]")
+    if value in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
+def _require_safe_bind(host: str, *, require_authentication: bool) -> None:
+    """Refuse a remotely reachable mutating surface unless auth is mandatory."""
+    if not _is_loopback_host(host) and not require_authentication:
+        raise ValueError(
+            "non-loopback CyberGym bind requires require_authentication=True; "
+            "the three POST routes mutate validator state"
+        )
 
 
 def make_handler(
@@ -264,7 +286,9 @@ def make_handler(
 
 
 def make_server(service: CyberGymService, host: str = "127.0.0.1", port: int = 0, *,
-                key_registry: ServedKeyRegistry | None = None) -> HTTPServer:
+                key_registry: ServedKeyRegistry | None = None,
+                authenticator: Callable[[Mapping[str, str], bytes], str | None] | None = None,
+                require_authentication: bool = False) -> HTTPServer:
     """Build (but do not start) a single-threaded HTTP server for the service.
 
     Single-threaded on purpose: it serialises requests so the SQLite corpus/score
@@ -275,7 +299,11 @@ def make_server(service: CyberGymService, host: str = "127.0.0.1", port: int = 0
 
     `GET /v1/status` needs no lock here: the server handles one request at a time,
     so a status build cannot overlap a submit.
+
+    Loopback is the safe default. A non-loopback bind is refused unless caller
+    authentication is required for every mutating route.
     """
+    _require_safe_bind(host, require_authentication=require_authentication)
     return HTTPServer(
         (host, port),
         make_handler(
@@ -284,6 +312,8 @@ def make_server(service: CyberGymService, host: str = "127.0.0.1", port: int = 0
                 service, ttl_secs=STATUS_TTL_SECS, key_registry=key_registry
             ),
             key_registry=key_registry,
+            authenticator=authenticator,
+            require_authentication=require_authentication,
         ),
     )
 
@@ -329,7 +359,7 @@ class _LockingService:
             return self._service.handle_submit(body)
 
 
-def make_threaded_server(service: CyberGymService, host: str = "0.0.0.0", port: int = 0, *,
+def make_threaded_server(service: CyberGymService, host: str = "127.0.0.1", port: int = 0, *,
                          healthz: Mapping[str, Any] | None = None,
                          key_registry: ServedKeyRegistry | None = None,
                          authenticator: Callable[[Mapping[str, str], bytes], str | None] | None = None,
@@ -347,7 +377,11 @@ def make_threaded_server(service: CyberGymService, host: str = "0.0.0.0", port: 
     serialises access, so its build takes the same lock the POST handlers use. The
     TTL cache keeps that to at most one contended build per window no matter how
     many dashboards are polling. `/healthz` stays the probe to use for liveness.
+
+    Loopback is the safe default. A non-loopback bind is refused unless caller
+    authentication is required for every mutating route.
     """
+    _require_safe_bind(host, require_authentication=require_authentication)
     locking = _LockingService(service)
     base = make_handler(
         locking,

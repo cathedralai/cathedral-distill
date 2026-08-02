@@ -154,3 +154,14 @@ def test_the_count_is_collected_rather_than_passing():
         "default, a `passing` count is now stable and this module's choice of "
         "`collected` can be reconsidered"
     )
+
+
+def test_reference_corpus_claim_matches_the_shipped_subset():
+    """Do not turn an infra snapshot into a larger reward-ready corpus claim."""
+    from cathedral_distill.cybergym_repro import REPRO_SUBSET
+
+    claim = f"{len(REPRO_SUBSET)} static ARVO tasks"
+    for relative in ("README.md", "docs/POSITIONING.md"):
+        text = " ".join((ROOT / relative).read_text(encoding="utf-8").split())
+        assert claim in text, f"{relative} must describe the shipped reference slice"
+        assert "10-task dual-family" not in text

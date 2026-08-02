@@ -216,12 +216,17 @@ The honest, minimal story `/v1/status` tells a miner, end to end:
 from cathedral_distill.cybergym_http import make_threaded_server
 
 httpd = make_threaded_server(
-    service, host="0.0.0.0", port=8666,
+    service, host="127.0.0.1", port=8666,
     healthz={"status": "ok", "lane": "cathedral_cybergym"},
     key_registry=None,   # or a ServedKeyRegistry once you've run the key ceremony
 )
 httpd.serve_forever()
 ```
+
+Loopback is the default because the same server also exposes three mutating POST
+routes. A non-loopback bind is refused unless the caller supplies a transport
+`authenticator` and sets `require_authentication=True`. The identity mechanism is
+deployment-specific; see [VALIDATING.md](VALIDATING.md#authenticating-the-mutating-routes).
 
 `/v1/status` and `/v1/keys` come for free with `make_threaded_server` /
 `make_server` — nothing to wire up beyond the service itself. See

@@ -167,7 +167,7 @@ tested:
 | **Attested verification (L1)**, binding a solve to an Intel TDX quote | **adapters built and tested on real DCAP quotes.** Per-solve binding proven on the synthetic profile only; the attested real-corpus solve is **not proven** pending the enclave-key worker ([`cybergym_cathedral_attest.py`](cathedral_distill/cybergym_cathedral_attest.py), [TDX_ATTESTATION.md](docs/TDX_ATTESTATION.md)) |
 | Network transport, reference HTTP service (a Bittensor axon can swap in over the same handlers) | **built (HTTP)**, development aid only ([`cybergym_http.py`](cathedral_distill/cybergym_http.py), [`cybergym_repro_server.py`](cathedral_distill/cybergym_repro_server.py)) |
 | On-chain wiring, scored-to-weights adapter, refresh orchestrator, cadence triggers | **merged in `cathedral`**, default off; emission-weight registration is an owner flip |
-| Full corpus at scale, the ~130 GB+ ARVO/OSS-Fuzz image set | infra; a 10-task dual-family slice is deployed and verified |
+| Full corpus at scale, the ~130 GB+ ARVO/OSS-Fuzz image set | infra; the shipped reference slice is 6 static ARVO tasks for development, not a reward holdout |
 
 ## Modules
 
@@ -219,7 +219,7 @@ pip install -e '.[dev]'
 pytest
 ```
 
-The suite collects 790 tests, all hardware-free: the verifier backend is
+The suite collects 793 tests, all hardware-free: the verifier backend is
 injected, so the full mechanism is exercised without the CyberGym binary corpus.
 How many of them *run* depends on the machine, which is why no passing total is
 claimed here. `tests/test_cybergym_hw.py` skips without `CYBERGYM_RUN_HW=1` and
