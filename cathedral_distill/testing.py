@@ -16,11 +16,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral_distill import compute_receipt as _compute
+from cathedral_distill import cybergym as _cybergym
+from cathedral_distill import cybergym_batch as _cybergym_batch
+from cathedral_distill import cybergym_receipt as _cybergym_receipt
+from cathedral_distill import cybergym_verifier as _cybergym_verifier
 from cathedral_distill import distill_receipt as _distill
 from cathedral_distill import signed_config as _config
 from cathedral_distill.receipt_keys import ReceiptKeyRegistry
@@ -66,7 +71,12 @@ class IntegrationFixtures:
         self._cfg_until = config_valid_until
         # one registry resolves every receipt/config signing id to the same key
         self.registry = ReceiptKeyRegistry.from_keys(
-            {"compute-1": pub, "distill-1": pub, "config-1": pub}
+            {
+                "compute-1": pub,
+                "distill-1": pub,
+                "config-1": pub,
+                "cybergym-1": pub,
+            }
         )
 
     # -- Compute (cathedral_assurance_receipt_v2) ---------------------------- #
@@ -146,6 +156,86 @@ class IntegrationFixtures:
                            "evidence_digest": digest("evidence")},
         }
         return _distill.build_receipt(body, self.key, signing_key_id="distill-1")
+
+    # -- CyberGym (cathedral_cybergym_receipt_v1) -------------------------- #
+    def cybergym_receipt(
+        self,
+        subject: str = "5CyberMiner",
+        *,
+        source_epoch: int | None = None,
+        valid_from_block: int = 100,
+        valid_until_block: int = 460,
+    ) -> dict:
+        """Build a real signed CyberGym contract fixture over deterministic tasks.
+
+        Two of the three tasks reproduce only on the vulnerable side, deriving 12
+        work units through the production scorer. This is hardware-free test data,
+        not a claim about a real corpus or TDX execution.
+        """
+        epoch = self.source_epoch if source_epoch is None else int(source_epoch)
+        disclosed = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
+        cutoff = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+        tasks = [
+            _cybergym_batch.PooledTask(
+                task_id=f"arvo:{number}",
+                level=_cybergym.Level(level),
+                binary_digest=digest(f"bin-{number}"),
+                disclosed_at=disclosed,
+            )
+            for number, level in enumerate((0, 1, 2), start=1)
+        ]
+        nonce = _cybergym_batch.derive_batch_nonce(
+            block=valid_from_block,
+            block_hash="0x" + "cd" * 32,
+            network=self.network,
+            netuid=self.netuid,
+            source_epoch=epoch,
+            miner_hotkey=subject,
+            model_commitment=digest("ckpt"),
+        )
+        batch = _cybergym_batch.draw_batch(
+            _cybergym_batch.TaskPool(tasks),
+            size=3,
+            nonce=nonce,
+            as_of=disclosed,
+            cutoff=cutoff,
+        )
+        submissions = [
+            _cybergym.PoCSubmission(
+                task_id=task.task_id,
+                poc_sha256=_cybergym_receipt.holdout_digest([task.task_id]),
+                result=_cybergym_verifier.verify_poc(
+                    task,
+                    b"poc-" + task.task_id.encode(),
+                    lambda task_id, _poc, mode: (
+                        1
+                        if task_id in {"arvo:1", "arvo:2"} and mode == "vul"
+                        else 0
+                    ),
+                ),
+            )
+            for task in batch.tasks
+        ]
+        score = _cybergym.score_batch(
+            batch.batch_id, list(batch.tasks), submissions
+        )
+        return _cybergym_receipt.build_receipt(
+            score,
+            network=self.network,
+            netuid=self.netuid,
+            source_epoch=epoch,
+            validator_hotkey="5Validator",
+            miner_hotkey=subject,
+            nonce=nonce,
+            holdout_digest_value=_cybergym_receipt.holdout_digest(
+                list(batch.task_ids)
+            ),
+            valid_from_block=valid_from_block,
+            valid_until_block=valid_until_block,
+            issued_at="2026-07-27T12:00:00.000000Z",
+            private_key=self.key,
+            signing_key_id="cybergym-1",
+        )
 
     # -- Signed config ------------------------------------------------------- #
     def _config_envelope(self, schema: str, version: int) -> dict:

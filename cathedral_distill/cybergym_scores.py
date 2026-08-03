@@ -121,6 +121,24 @@ class CyberGymScoreStore:
         stamp = at or datetime.now(timezone.utc).isoformat()
         try:
             with self._connection:
+                existing = self._connection.execute(
+                    "SELECT state, marked_at FROM cybergym_epoch_status WHERE epoch=?",
+                    (int(epoch),),
+                ).fetchone()
+                # A completed epoch is a frozen producer artifact. Re-running the
+                # same scoring pass may refresh its explanatory detail, but it must
+                # not mint a new freshness timestamp for the same epoch: Cathedral's
+                # intake correctly treats two different same-epoch reports as
+                # equivocation. Preserve the first close time across closed->closed
+                # retries, and refuse to reopen a closed epoch. Incomplete->closed
+                # remains the valid recovery transition before first publication.
+                if existing is not None and str(existing["state"]) == EPOCH_CLOSED:
+                    if state != EPOCH_CLOSED:
+                        raise CyberGymScoreError(
+                            f"refusing to change closed cybergym epoch {int(epoch)} "
+                            f"back to {state!r}: an exportable epoch is immutable"
+                        )
+                    stamp = str(existing["marked_at"])
                 self._connection.execute(
                     "INSERT INTO cybergym_epoch_status"
                     "(epoch, state, detail, scored_miners, marked_at) VALUES (?,?,?,?,?)"
@@ -140,6 +158,33 @@ class CyberGymScoreStore:
         if row is None:
             return EPOCH_OPEN, "no scoring pass has been recorded for this epoch"
         return str(row["state"]), str(row["detail"])
+
+    def epoch_status(self, epoch: int) -> dict[str, object]:
+        """The durable close record used to timestamp an exported score report.
+
+        ``generated_at`` must come from producer state, not from the moment an
+        operator happens to retry publication. Returning the persisted marker lets
+        the report exporter reuse the first close time byte-for-byte. An unmarked
+        epoch is represented as open rather than synthesized as complete.
+        """
+        row = self._connection.execute(
+            "SELECT state, detail, scored_miners, marked_at "
+            "FROM cybergym_epoch_status WHERE epoch=?",
+            (int(epoch),),
+        ).fetchone()
+        if row is None:
+            return {
+                "state": EPOCH_OPEN,
+                "detail": "no scoring pass has been recorded for this epoch",
+                "scored_miners": 0,
+                "marked_at": None,
+            }
+        return {
+            "state": str(row["state"]),
+            "detail": str(row["detail"]),
+            "scored_miners": int(row["scored_miners"]),
+            "marked_at": str(row["marked_at"]),
+        }
 
     def require_closed_epoch(self, epoch: int) -> None:
         """Raise unless this epoch closed cleanly. The gate every composer needs."""
@@ -173,9 +218,19 @@ class CyberGymScoreStore:
                     "WHERE miner_hotkey=? AND epoch=?",
                     (miner, epoch),
                 ).fetchone()
+                state = self._connection.execute(
+                    "SELECT state FROM cybergym_epoch_status WHERE epoch=?",
+                    (epoch,),
+                ).fetchone()
                 if existing is not None:
                     if existing["receipt_id"] == receipt_id:
                         return  # idempotent: same receipt already recorded
+                    if state is not None and str(state["state"]) == EPOCH_CLOSED:
+                        raise CyberGymScoreError(
+                            f"refusing a replacement cybergym score for closed epoch "
+                            f"{epoch}: a complete epoch is immutable once it can be "
+                            "exported"
+                        )
                     if Decimal(existing["earned_units"]) != earned:
                         raise CyberGymScoreError(
                             f"conflicting cybergym score for {miner} epoch {epoch}: "
@@ -183,6 +238,11 @@ class CyberGymScoreStore:
                         )
                     # Same units, different receipt id (e.g. re-issued): keep first.
                     return
+                if state is not None and str(state["state"]) == EPOCH_CLOSED:
+                    raise CyberGymScoreError(
+                        f"refusing a new cybergym score for closed epoch {epoch}: "
+                        "a complete epoch is immutable once it can be exported"
+                    )
                 self._connection.execute(
                     "INSERT INTO cybergym_scores"
                     "(miner_hotkey, epoch, score, earned_units, receipt_id) "
