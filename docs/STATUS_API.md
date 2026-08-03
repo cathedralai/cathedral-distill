@@ -310,3 +310,16 @@ To point a dashboard at your validator, either serve `site/index.html` with
 `<meta name="cathedral-status-endpoint" content="https://your-host/v1/status">`
 set, or append `?status=https://your-host/v1/status` to the page URL — the page
 makes no request at all until one of those is set.
+
+### cathedral.computer Match board
+
+The public Ship board at `https://cathedral.computer/leaderboard/` consumes:
+
+| Panel | Source |
+|---|---|
+| **Stars / live nodes** | Latest signed evidence epoch on `api.cathedral.computer` (`/v1/evidence/epochs/<epoch>.json` + receipts). One star per `outcome=verified` candidate; size from receipt `work.work_units`. |
+| **Corpus fill** | This validator's `GET /v1/status` → `corpus.total_rows` / `this_epoch_rows`, proxied at `/v1/distill/status` when the site Worker has `DISTILL_STATUS_ORIGIN` set to a public CyberGym validator host. |
+
+Until `DISTILL_STATUS_ORIGIN` is configured, the corpus panel stays empty on
+purpose — it does not invent training-row growth from evidence epochs. Evidence
+epochs are compute attestation cadence, not the CyberGym training corpus.
