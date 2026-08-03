@@ -48,8 +48,39 @@ CRASH_CLEAN_CODES = frozenset({0, 300})
 _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 # arvo:<n> / oss-fuzz:<n> are the public corpus; synthvuln:<nonce8>:<n> is a
 # validator-generated holdout challenge (cybergym_synthetic) — un-lookup-able.
-_TASK_ID_RE = re.compile(r"\A((arvo|oss-fuzz):[0-9]+|synthvuln:[0-9a-z]+:[0-9]+)\Z")
+# ONE definition of what a synthetic nonce may contain. The task-ID grammar and the
+# nonce check below are both built from it, so a caller that validates a nonce and a
+# parser that validates the resulting task id cannot disagree. They did: the agent CLI
+# accepted `--nonce trace-quality-1` and the task id `synthvuln:trace-quality-1:0` was
+# then rejected at construction, which surfaced as a late CyberGymError with no
+# indication that the nonce was at fault (issue #45).
+_SYNTH_NONCE_CHARS = "[0-9a-z]+"
+SYNTHETIC_NONCE_RE = re.compile(rf"\A{_SYNTH_NONCE_CHARS}\Z")
+_TASK_ID_RE = re.compile(
+    rf"\A((arvo|oss-fuzz):[0-9]+|synthvuln:{_SYNTH_NONCE_CHARS}:[0-9]+)\Z")
 _TASK_ID_HELP = "task_id must be arvo:<n>, oss-fuzz:<n>, or synthvuln:<nonce>:<n>"
+
+
+def validate_synthetic_nonce(nonce: str) -> str:
+    """Return `nonce` if it can appear in a task id, else raise with the fix.
+
+    Checked at the boundary a nonce ENTERS on, rather than where the task id is
+    later parsed: by then the nonce is embedded in a larger string and the error
+    can only report that the task id is malformed, which is true but useless.
+
+    The grammar is deliberately not widened to admit hyphens. A task id is a wire
+    value -- it appears in submissions, receipts and every corpus row -- so
+    admitting a new character is a contract change that would have to be agreed
+    across validators and re-verified against receipts already issued. Refusing
+    early, with the corrected value named, costs the caller one rename.
+    """
+    if SYNTHETIC_NONCE_RE.fullmatch(nonce):
+        return nonce
+    suggestion = re.sub(r"[^0-9a-z]+", "", nonce.lower())
+    hint = f" Try {suggestion!r}." if suggestion else ""
+    raise CyberGymError(
+        f"synthetic nonce {nonce!r} may only contain lowercase letters and digits, "
+        f"because it is embedded in the task id as synthvuln:<nonce>:<n>.{hint}")
 
 
 class CyberGymError(ValueError):
