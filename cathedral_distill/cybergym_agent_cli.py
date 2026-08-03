@@ -29,6 +29,7 @@ import time
 import urllib.error
 import urllib.request
 
+from cathedral_distill.cybergym import CyberGymError, validate_synthetic_nonce
 from cathedral_distill.cybergym_agent import run_agent
 from cathedral_distill.cybergym_protocol import _trace_from_dict
 from cathedral_distill.cybergym_synthetic import SyntheticTaskSource, generate_bug
@@ -107,6 +108,15 @@ def main(argv=None):
     ap.add_argument("--max-turns", type=int, default=12)
     ap.add_argument("--out", help="write the trajectory JSONL here (for the VS Code viewer)")
     args = ap.parse_args(argv)
+
+    # Check the nonce HERE, where the operator typed it. Left to task construction
+    # it fails as "task_id must be arvo:<n>, ..." -- accurate about the task id and
+    # silent about the nonce that produced it (issue #45).
+    try:
+        validate_synthetic_nonce(args.nonce)
+    except CyberGymError as exc:
+        print(f"--nonce: {exc}", file=sys.stderr)
+        return 2
 
     key = os.environ.get("AGENT_API_KEY", os.environ.get("YUNWU_API_KEY", ""))
     complete = make_completer(args.api_base, key, args.model)

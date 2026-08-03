@@ -187,3 +187,45 @@ def test_leaf_binds_raw_exit_codes():
                          result=cg.DifferentialResult("arvo:1", vul_exit_code=6, fix_exit_code=0))
     assert a.result.solved and b.result.solved      # same derived bit
     assert a.leaf() != b.leaf()                      # different raw result -> different leaf
+
+
+class TestSyntheticNonceGrammar:
+    """The CLI and the task-id grammar must agree about what a nonce may contain.
+
+    Regression (#45): `--nonce trace-quality-1` was accepted by the agent CLI and
+    the resulting `synthvuln:trace-quality-1:0` was then rejected at construction.
+    The error named the task id, not the nonce, so a readable label looked like an
+    internal fault. Both now derive from one character class, so they cannot drift.
+    """
+
+    def test_a_valid_nonce_round_trips_into_a_task_id(self):
+        from cathedral_distill.cybergym import _TASK_ID_RE, validate_synthetic_nonce
+
+        for nonce in ("cli0local", "abc123", "x"):
+            assert validate_synthetic_nonce(nonce) == nonce
+            assert _TASK_ID_RE.fullmatch(f"synthvuln:{nonce}:0")
+
+    def test_a_hyphenated_nonce_is_refused_where_it_was_typed(self):
+        from cathedral_distill.cybergym import CyberGymError, validate_synthetic_nonce
+
+        with pytest.raises(CyberGymError) as excinfo:
+            validate_synthetic_nonce("trace-quality-1")
+        message = str(excinfo.value)
+        # The message must name the offending value AND the corrected one: the whole
+        # complaint in #45 was a late error that did not say what to do about it.
+        assert "trace-quality-1" in message
+        assert "tracequality1" in message
+
+    def test_the_cli_refuses_before_doing_any_work(self):
+        from cathedral_distill.cybergym_agent_cli import main
+
+        # Exit 2, not a traceback, and no network/model call: the nonce is checked
+        # at the boundary it entered on.
+        assert main(["--nonce", "trace-quality-1"]) == 2
+
+    def test_the_nonce_rule_and_the_task_id_grammar_cannot_drift(self):
+        """Both are built from `_SYNTH_NONCE_CHARS`; assert that stays true."""
+        from cathedral_distill import cybergym
+
+        assert cybergym._SYNTH_NONCE_CHARS in cybergym._TASK_ID_RE.pattern
+        assert cybergym._SYNTH_NONCE_CHARS in cybergym.SYNTHETIC_NONCE_RE.pattern
