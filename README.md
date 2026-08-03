@@ -2,6 +2,11 @@
 
 **The CyberGym track: verified vulnerability discovery for Bittensor SN39.**
 
+<div align="center">
+  <video controls width="800" src="https://github.com/user-attachments/assets/930814df-e648-40f2-8d1a-6adcaae3f3f4"></video>
+  <p><a href="https://www.youtube.com/watch?v=KQRz6r9HJAs">Watch on YouTube</a></p>
+</div>
+
 Miners compete by producing proof-of-concept exploits for **already-patched,
 publicly-disclosed** software vulnerabilities. The mechanism verifies each PoC
 by running it, with no judge model and no self-reported score. Its live reward
