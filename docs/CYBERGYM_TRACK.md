@@ -104,10 +104,42 @@ transport, and nothing else changes.
    changes the derived `items_root`, so every validator must agree on it exactly as
    they agree on `level_weights`.
 
-7. **Compose the feed.** `cybergym_receipt.lane_contribution` yields
-   `(miner_hotkey, receipt_id, work_units)`, which `lane_feed.compose_vector`
-   composes into the one signed SN39 vector alongside the compute lane, with the
-   contractual 10% burn.
+7. **Freeze the complete epoch and hand it to the canonical validator.** Once
+   `cybergym_epoch_status.state` is `closed`, `cybergym_score_report` builds the
+   exact `level_weighted_verified_solves` report accepted by
+   `cathedral-validator` at `POST /v1/cybergym/scores`. Its `generated_at` is the
+   first durable close time, and `evidence_sha256` commits to the exact positive
+   `(miner_hotkey, receipt_id, work_units)` set. A repeated export is therefore
+   byte-identical; adding or replacing a score after close is refused.
+
+   Export and publish are deliberately separate operations:
+
+   ```bash
+   cathedral-cybergym export-scores \
+     --score-db ./e2e/cybergym-scores.sqlite \
+     --epoch 42 --network finney --netuid 39 \
+     --producer-hotkey 5Producer --out ./e2e/epoch-42.json
+
+   cathedral-cybergym publish-scores \
+     --report ./e2e/epoch-42.json \
+     --url http://127.0.0.1:8000/v1/cybergym/scores \
+     --token-file ./e2e/intake-token \
+     --hmac-secret-file ./e2e/intake-hmac \
+     --proof-out ./e2e/epoch-42.proof.json
+   ```
+
+   Both secret files must be owned by the calling user and inaccessible to
+   group/other. HTTP is refused except on loopback. Publishing authenticates the
+   exact frozen bytes, verifies the intake's returned report digest, and freezes
+   the accepted `{body, signature}` proof that `cathedral-validator` consumes.
+
+8. **Verify and preview in the pre-launch E2E test.** The canonical
+   `cathedral-validator` independently verifies the report HMAC, audience,
+   producer pin, freshness, complete scored set, evidence manifest, every signed
+   receipt, replay state, and monotonic epoch state. Its integration command is
+   non-writing; a stateful receipt-consumption test still does not call
+   `set_weights`. Allocation changes, deployment, wallets, and live-chain tests
+   are outside this E2E scope.
 
 ## The miner↔validator protocol
 
@@ -194,10 +226,11 @@ everything else.
 
 ## Consumed by
 
-`cathedralai/cathedral` PR #409 (the CyberGym mechanism adapter) reads
-`SELECT miner_hotkey, score FROM cybergym_scores WHERE epoch=?` and maps each
-hotkey to its uid via the metagraph snapshot, with no router change. The store
-above is its writer.
+The canonical authority is `cathedralai/cathedral-validator`. Its authenticated
+score intake stores one complete report per audience and its thin integration
+path independently binds that report to the admitted receipt set before any
+CyberGym contribution may survive. The older `cathedral` PR #409 database
+adapter remains a disabled mechanism prototype; it is not the launch authority.
 
 ## Implemented vs. tracked (issue #4)
 
@@ -217,6 +250,9 @@ persist), `cybergym_http` is a dependency-free stdlib HTTP binding of the two
 routes, and `cybergym_service.compose_scores_lane` turns the persisted
 `cybergym_scores` into a `lane_feed` contribution. The whole loop is exercised over
 a live HTTP server against the injected crash backend in `tests/test_cybergym_service.py`.
+The closed score store can now also be frozen and authenticated across the canonical
+validator boundary by `cybergym_score_report` and the `export-scores` /
+`publish-scores` operator commands.
 
 The **task-source layer** is also complete: the nonce-seeded `SyntheticTaskSource`
 is wired into the live service (`tests/test_cybergym_synthetic_service.py`), and
@@ -249,5 +285,6 @@ nonce, same batch) before it can submit again.
 real vul/fix binary backend + the ~130 GB CyberGym dataset (plugs in behind the
 injected `cybergym_verifier.subprocess_backend`; only binaries/dataset remain); the
 production holdout **refill** feed of fresh disclosures (the ingestion loader is
-built; the source of new vulns is infrastructure); and merging `cathedralai/cathedral`
-PR #409 plus a live weight-set caller so persisted scores set weights on chain.
+built; the source of new vulns is infrastructure); the owner-signed CyberGym
+allocation contract; and the reviewed canonical-validator chain-writer integration
+that turns an accepted, independently verified report into live weights.

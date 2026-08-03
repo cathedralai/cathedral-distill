@@ -8,6 +8,7 @@ whole scheme rests on.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import stat
@@ -16,13 +17,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cathedral_distill import operator_cli as cli  # noqa: E402
 from cathedral_distill import receipt_keys as rk  # noqa: E402
 from cathedral_distill import signed_config as sc  # noqa: E402
+from cathedral_distill.cybergym_scores import EPOCH_CLOSED, CyberGymScoreStore  # noqa: E402
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
 
@@ -123,3 +123,96 @@ def test_wrong_schema_and_short_seed_fail_closed(tmp_path):
     ok = tmp_path / "cfg.json"
     ok.write_text(json.dumps({"schema": sc.BURN_CONFIG_SCHEMA}))
     assert cli.main(["sign-config", "--in", str(ok), "--seed", str(short)]) == 2  # bad seed len
+
+
+def test_export_scores_freezes_and_reuses_one_closed_epoch(tmp_path):
+    db = tmp_path / "scores.sqlite"
+    store = CyberGymScoreStore(str(db))
+    store.mark_epoch(
+        42, state=EPOCH_CLOSED, scored_miners=0,
+        at="2026-08-03T10:11:12.123456+00:00",
+    )
+    store.close()
+    out = tmp_path / "epoch-42.json"
+    command = [
+        "export-scores", "--score-db", str(db), "--epoch", "42",
+        "--network", "finney", "--netuid", "39",
+        "--producer-hotkey", "5Producer", "--out", str(out),
+    ]
+
+    assert cli.main(command) == 0
+    first = out.read_bytes()
+    assert cli.main(command) == 0
+    assert out.read_bytes() == first
+    assert stat.S_IMODE(out.stat().st_mode) & 0o077 == 0
+
+    out.write_bytes(b"different")
+    assert cli.main(command) == 2
+
+
+def test_publish_scores_requires_owner_only_secret_files(tmp_path, monkeypatch):
+    report_path = tmp_path / "report.json"
+    report_path.write_bytes(
+        b'{"complete":true,"evidence_sha256":"' + b"0" * 64
+        + b'","generated_at":"2026-08-03T10:11:12.123Z","netuid":39,'
+        b'"network":"finney","producer_hotkey":"5Producer","score_units":'
+        b'"level_weighted_verified_solves","scores":{},"source_epoch":42}'
+    )
+    token = tmp_path / "token"
+    secret = tmp_path / "secret"
+    token.write_text("token\n")
+    secret.write_text("secret\n")
+    token.chmod(0o600)
+    secret.chmod(0o644)
+    called = []
+    monkeypatch.setattr(cli, "publish_score_report", lambda *_a, **_kw: called.append(True))
+    command = [
+        "publish-scores", "--report", str(report_path),
+        "--url", "https://publisher.example/v1/cybergym/scores",
+        "--token-file", str(token), "--hmac-secret-file", str(secret),
+        "--proof-out", str(tmp_path / "proof.json"),
+    ]
+
+    assert cli.main(command) == 2
+    assert called == []
+
+
+def test_publish_scores_freezes_the_exact_accepted_epoch_proof(tmp_path, monkeypatch):
+    report_path = tmp_path / "report.json"
+    body = (
+        b'{"complete":true,"evidence_sha256":"' + b"0" * 64
+        + b'","generated_at":"2026-08-03T10:11:12.123Z","netuid":39,'
+        b'"network":"finney","producer_hotkey":"5Producer","score_units":'
+        b'"level_weighted_verified_solves","scores":{},"source_epoch":42}'
+    )
+    report_path.write_bytes(body)
+    token = tmp_path / "token"
+    secret = tmp_path / "secret"
+    token.write_text("token\n")
+    secret.write_text("secret\n")
+    token.chmod(0o600)
+    secret.chmod(0o600)
+    monkeypatch.setattr(
+        cli,
+        "publish_score_report",
+        lambda *_a, **_kw: {
+            "accepted": True,
+            "report_sha256": hashlib.sha256(body).hexdigest(),
+            "body_sha256": hashlib.sha256(body).hexdigest(),
+        },
+    )
+    proof_path = tmp_path / "proof.json"
+
+    assert cli.main([
+        "publish-scores", "--report", str(report_path),
+        "--url", "https://publisher.example/v1/cybergym/scores",
+        "--token-file", str(token), "--hmac-secret-file", str(secret),
+        "--proof-out", str(proof_path),
+    ]) == 0
+
+    proof = json.loads(proof_path.read_bytes())
+    assert proof == {
+        "body": body.decode("utf-8"),
+        "signature": cli.body_hmac(body, "secret"),
+    }
+    assert stat.S_IMODE(proof_path.stat().st_mode) & 0o077 == 0
