@@ -121,6 +121,14 @@ class Batch:
     batch_id: str
     nonce: str
     tasks: tuple[Task, ...]
+    # Real-corpus batches carry the digest of a detached, canonical evidence
+    # record containing the private-manifest digest plus every selected vulnerable
+    # and fixed image identity.  Synthetic and legacy test batches leave it None.
+    evidence_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.evidence_digest is not None and _DIGEST_RE.match(self.evidence_digest) is None:
+            raise BatchError("evidence_digest must be a sha256: digest")
 
     @property
     def task_ids(self) -> tuple[str, ...]:

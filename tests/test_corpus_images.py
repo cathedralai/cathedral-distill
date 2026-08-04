@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -71,7 +72,13 @@ def test_write_manifest_is_schema_tagged_and_stable(tmp_path):
     fake = FakeDocker()
     manifest = pull_and_pin(["arvo:368"], _run=fake)
     out = tmp_path / "corpus_images.json"
-    write_manifest(manifest, str(out))
+    write_manifest(
+        manifest,
+        str(out),
+        source_epoch=42,
+        disclosed_at=datetime(2026, 8, 4, 12, 0, tzinfo=UTC),
+    )
     doc = json.loads(out.read_text())
     assert doc["schema"] == MANIFEST_SCHEMA
-    assert doc["images"]["arvo:368"]["vul"]["digest"].startswith("n132/arvo:368-vul@sha256:")
+    assert doc["source_epoch"] == 42
+    assert doc["tasks"][0]["vulnerable_image"].startswith("n132/arvo:368-vul@sha256:")

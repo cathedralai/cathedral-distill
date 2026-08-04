@@ -34,6 +34,8 @@ from cathedral_distill.cybergym_repro import (  # noqa: E402
     available_tasks,
     docker_reproduce_backend,
 )
+from cathedral_distill.cybergym_repro_manifest import load_private_repro_manifest  # noqa: E402
+from cathedral_distill.cybergym_repro_manifest import ReproManifestError  # noqa: E402
 from cathedral_distill.cybergym_scores import CyberGymScoreStore  # noqa: E402
 from cathedral_distill.cybergym_service import CyberGymService  # noqa: E402
 from cathedral_distill.cybergym_validator import ChainContext  # noqa: E402
@@ -45,6 +47,29 @@ MODEL = "sha256:" + hashlib.sha256(b"ckpt").hexdigest()
 CRASHING = b"the-known-crashing-input"
 ASAN = b"==42==ERROR: AddressSanitizer: heap-use-after-free\n...\nABORTING\n"
 CLEAN = b"Executed /tmp/poc without incident\n"
+
+
+def _manifest(*task_ids: str, source_epoch: int = 21):
+    """Small private manifest with immutable, distinct images for each task."""
+    tasks = []
+    for task_id in task_ids:
+        slug = task_id.replace(":", "-")
+        tasks.append(
+            {
+                "task_id": task_id,
+                "level": 2,
+                "disclosed_at": "2026-07-27T11:00:00Z",
+                "vulnerable_image": f"registry.test/{slug}-vul@sha256:{'ab' * 32}",
+                "fixed_image": f"registry.test/{slug}-fix@sha256:{'cd' * 32}",
+                "context": {
+                    "description": "memory-safety task",
+                    "sanitizer_trace": "AddressSanitizer: expected finding",
+                },
+            }
+        )
+    return load_private_repro_manifest(
+        {"schema": "cathedral_cybergym_private_repro_manifest_v1", "source_epoch": source_epoch, "tasks": tasks}
+    )
 
 
 class FakeDocker:
@@ -65,7 +90,7 @@ class FakeDocker:
         with open(path, "rb") as f:
             poc = f.read()
         image = argv[argv.index(mount) + 1]
-        crashed = image.endswith("-vul") and poc == self.crashing
+        crashed = image.split("@", 1)[0].endswith("-vul") and poc == self.crashing
         out = ASAN if crashed else CLEAN
         return subprocess.CompletedProcess(argv, 1 if crashed else 0, stdout=out, stderr=b"")
 
@@ -114,15 +139,16 @@ def test_crash_detection_requires_expected_death_and_target_sanitizer():
 
 def test_backend_crashes_the_vulnerable_build_and_not_the_patched_build():
     fake = FakeDocker()
-    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=fake) == 1
-    assert docker_reproduce_backend("arvo:368", CRASHING, "fix", _run=fake) == 0
+    manifest = _manifest("arvo:368")
+    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", manifest=manifest, _run=fake) == 1
+    assert docker_reproduce_backend("arvo:368", CRASHING, "fix", manifest=manifest, _run=fake) == 0
     # a wrong input does not crash even the vulnerable build
-    assert docker_reproduce_backend("arvo:368", b"not-it", "vul", _run=fake) == 0
+    assert docker_reproduce_backend("arvo:368", b"not-it", "vul", manifest=manifest, _run=fake) == 0
 
 
 def test_backend_cleans_up_the_temp_poc_file():
     fake = FakeDocker()
-    docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=fake)
+    docker_reproduce_backend("arvo:368", CRASHING, "vul", manifest=_manifest("arvo:368"), _run=fake)
     assert fake.seen_paths and not os.path.exists(fake.seen_paths[0])
 
 
@@ -133,7 +159,8 @@ def test_backend_isolates_the_verify_container_network():
         seen["argv"] = argv
         return subprocess.CompletedProcess(argv, 0, stdout=CLEAN, stderr=b"")
 
-    docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=capture)
+    manifest = _manifest("arvo:368")
+    docker_reproduce_backend("arvo:368", CRASHING, "vul", manifest=manifest, _run=capture)
     argv = seen["argv"]
     # egress-deny: the adversarial build must have no network, and the flags must
     # precede the image so they apply to the run (not get parsed as image args).
@@ -146,7 +173,7 @@ def test_backend_isolates_the_verify_container_network():
     # Docker's default seccomp profile remains in force: this must never be
     # weakened to seccomp=unconfined on the untrusted-PoC execution path.
     assert "seccomp=unconfined" not in argv
-    image_ix = argv.index("n132/arvo:368-vul")
+    image_ix = argv.index(manifest.task("arvo:368").vulnerable_image)
     assert argv.index("--network") < image_ix
 
 
@@ -154,7 +181,7 @@ def test_backend_treats_a_timeout_as_no_crash():
     def timeout_run(argv, capture_output=False, timeout=None):
         raise subprocess.TimeoutExpired(argv, timeout)
 
-    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=timeout_run) == 0
+    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", manifest=_manifest("arvo:368"), _run=timeout_run) == 0
 
 
 def test_verify_container_is_resource_bounded_and_named():
@@ -165,7 +192,7 @@ def test_verify_container_is_resource_bounded_and_named():
     def capture(argv, capture_output=False, timeout=None):
         seen.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout=CLEAN, stderr=b"")
-    docker_reproduce_backend("arvo:368", b"x", "vul", _run=capture)
+    docker_reproduce_backend("arvo:368", b"x", "vul", manifest=_manifest("arvo:368"), _run=capture)
     argv = seen[0]
     for cap in ("--memory", "--cpus", "--pids-limit"):
         assert cap in argv, f"verify container is missing {cap}"
@@ -182,7 +209,7 @@ def test_a_hung_container_is_force_removed_on_timeout():
         if argv[1] == "run":
             raise subprocess.TimeoutExpired(argv, timeout)
         return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
-    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=run) == 0
+    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", manifest=_manifest("arvo:368"), _run=run) == 0
     assert any(c[:3] == ["docker", "rm", "-f"] for c in calls), "hung container not reaped"
 
 
@@ -191,7 +218,7 @@ def test_build_service_starts_and_dispatches():
     (a durable solve store OR opt-out, a gate policy OR opt-out) or the reference
     server raises on startup and cannot serve at all."""
     from cathedral_distill.cybergym_repro_server import build_service
-    svc = build_service(["arvo:368"], private_key=Ed25519PrivateKey.generate())
+    svc = build_service(_manifest("arvo:368"), private_key=Ed25519PrivateKey.generate())
     msg = svc.dispatch_for("5Miner", MODEL)
     assert msg.batch_id and [t.task_id for t in msg.tasks] == ["arvo:368"]
 
@@ -201,7 +228,7 @@ def test_build_service_default_stores_are_files_not_memory():
     file), so the reference server's zero-config boot has to hand it a real path
     or the shipped server stops booting at all: per-boot temp files."""
     from cathedral_distill.cybergym_repro_server import build_service
-    svc = build_service(["arvo:368"], private_key=Ed25519PrivateKey.generate())
+    svc = build_service(_manifest("arvo:368"), private_key=Ed25519PrivateKey.generate())
     score_path = svc._scores._db_path
     assert score_path != ":memory:" and os.path.isfile(score_path)
 
@@ -235,13 +262,14 @@ def test_a_wellformed_signing_seed_is_accepted_and_not_ephemeral(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_available_tasks_lists_only_fully_pulled_pairs():
-    listing = "n132/arvo:368-vul\nn132/arvo:368-fix\nn132/arvo:1065-vul\n"  # 1065 missing its -fix
+    manifest = _manifest("arvo:368", "arvo:1065")
 
     def images_run(argv, capture_output=False, timeout=None):
-        assert argv[:2] == ["docker", "images"]
-        return subprocess.CompletedProcess(argv, 0, stdout=listing.encode(), stderr=b"")
+        assert argv[:3] == ["docker", "image", "inspect"]
+        missing = manifest.task("arvo:1065").fixed_image
+        return subprocess.CompletedProcess(argv, 1 if argv[-1] == missing else 0, stdout=b"", stderr=b"")
 
-    got = available_tasks(["arvo:368", "arvo:1065", "arvo:9999"], _run=images_run)
+    got = available_tasks(manifest, _run=images_run)
     assert got == ["arvo:368"]
 
 
@@ -249,7 +277,7 @@ def test_available_tasks_is_empty_when_docker_is_unavailable():
     def broken_run(argv, capture_output=False, timeout=None):
         raise FileNotFoundError("docker not installed")
 
-    assert available_tasks(["arvo:368"], _run=broken_run) == []
+    assert available_tasks(_manifest("arvo:368"), _run=broken_run) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -257,8 +285,8 @@ def test_available_tasks_is_empty_when_docker_is_unavailable():
 # --------------------------------------------------------------------------- #
 
 def test_draw_is_deterministic_in_the_nonce():
-    a = ReproTaskSource(["arvo:368", "arvo:1065", "arvo:10400"])
-    b = ReproTaskSource(["arvo:10400", "arvo:368", "arvo:1065"])  # different input order
+    a = ReproTaskSource(_manifest("arvo:368", "arvo:1065", "arvo:10400"))
+    b = ReproTaskSource(_manifest("arvo:10400", "arvo:368", "arvo:1065"))  # different input order
     nonce = "cgnonce-sha256:" + "11" * 32
     ba = a.draw(size=2, nonce=nonce)
     bb = b.draw(size=2, nonce=nonce)
@@ -270,13 +298,70 @@ def test_draw_is_deterministic_in_the_nonce():
 
 
 def test_context_is_level_gated_metadata_and_artifact_is_the_image():
-    src = ReproTaskSource(["arvo:368"])
+    src = ReproTaskSource(_manifest("arvo:368"))
     ctx = src.context_provider("arvo:368")
-    assert "use-after-free" in ctx["description"] and "cffparse.c:440" in ctx["sanitizer_trace"]
+    assert "memory-safety" in ctx["description"] and "expected finding" in ctx["sanitizer_trace"]
     # the real repo is delivered as the image (binary_digest), not inline source
     assert src.artifact("arvo:368") is None
     task = src.draw(size=1, nonce="cgnonce-sha256:" + "33" * 32).tasks[0]
     assert task.binary_digest.startswith("sha256:")
+
+
+def test_tag_only_or_changed_image_bytes_cannot_share_a_task_identity():
+    unsafe = {
+        "schema": "cathedral_cybergym_private_repro_manifest_v1",
+        "source_epoch": 21,
+        "tasks": [{
+            "task_id": "arvo:368", "level": 2,
+            "disclosed_at": "2026-07-27T11:00:00Z",
+            "vulnerable_image": "registry.test/arvo-368-vul:latest",
+            "fixed_image": "registry.test/arvo-368-fix:latest",
+            "context": {},
+        }],
+    }
+    with pytest.raises(ReproManifestError, match="immutable repository@sha256"):
+        load_private_repro_manifest(unsafe)
+    with pytest.raises(ReproError, match="digest-pinned repro manifest"):
+        ReproTaskSource(["arvo:368"])
+
+    first = _manifest("arvo:368")
+    changed = load_private_repro_manifest({
+        "schema": "cathedral_cybergym_private_repro_manifest_v1",
+        "source_epoch": 21,
+        "tasks": [{
+            "task_id": "arvo:368", "level": 2,
+            "disclosed_at": "2026-07-27T11:00:00Z",
+            "vulnerable_image": f"registry.test/arvo-368-vul@sha256:{'ef' * 32}",
+            "fixed_image": f"registry.test/arvo-368-fix@sha256:{'cd' * 32}",
+            "context": {"description": "memory-safety task", "sanitizer_trace": "AddressSanitizer: expected finding"},
+        }],
+    })
+    assert first.task("arvo:368").binary_digest != changed.task("arvo:368").binary_digest
+    assert first.digest != changed.digest
+
+
+def test_batch_evidence_binds_the_exact_image_pair_and_is_signed_by_the_receipt(tmp_path):
+    fake = FakeDocker()
+    source = ReproTaskSource(_manifest("arvo:368"), backend=fake)
+    chain = ChainContext(block=100, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
+                         source_epoch=21, valid_from_block=100, valid_until_block=460)
+    from cathedral_distill import cybergym_validator as cv
+
+    result = cv.run_epoch(
+        [cv.MinerCommit(miner_hotkey="5Miner", model_commitment=MODEL, pocs={"arvo:368": CRASHING})],
+        source, chain, validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
+        backend=source.backend, score_store=CyberGymScoreStore(str(tmp_path / "scores.sqlite")),
+        cutoff=None, as_of=NOW, issued_at="2026-07-29T12:00:00.000000Z", batch_size=1,
+        gates_required=False,
+    )[0]
+
+    evidence = source.manifest.batch_evidence(result.batch.task_ids)
+    task = evidence["tasks"][0]
+    assert task["vulnerable_image"].endswith("@sha256:" + "ab" * 32)
+    assert task["fixed_image"].endswith("@sha256:" + "cd" * 32)
+    assert evidence["manifest_digest"] == source.manifest.digest
+    assert result.batch.evidence_digest == source.manifest.batch_evidence_digest(result.batch.task_ids)
+    assert result.receipt["batch"]["holdout_digest"] == result.batch.evidence_digest
 
 
 # --------------------------------------------------------------------------- #
@@ -284,7 +369,7 @@ def test_context_is_level_gated_metadata_and_artifact_is_the_image():
 # --------------------------------------------------------------------------- #
 
 def _service(tmp_path, fake):
-    src = ReproTaskSource(["arvo:368"], backend=fake)
+    src = ReproTaskSource(_manifest("arvo:368"), backend=fake)
     chain = ChainContext(block=100, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
                          source_epoch=21, valid_from_block=100, valid_until_block=460)
     return CyberGymService(

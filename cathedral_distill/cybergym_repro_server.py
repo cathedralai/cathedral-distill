@@ -16,12 +16,13 @@ Config (all via env):
   CYBERGYM_VALIDATOR_HOTKEY  validator hotkey ss58          (default cathedral-repro-validator)
   CYBERGYM_CORPUS_DB      corpus sqlite path                (default: a fresh per-boot temp file)
   CYBERGYM_SCORE_DB       score sqlite path                 (default: a fresh per-boot temp file)
-  CYBERGYM_TASKS          comma-separated task ids to serve (default: the pulled subset)
+  CYBERGYM_CORPUS_MANIFEST  private per-epoch digest-pinned task manifest (required)
 
-Only tasks whose vul+fix images are actually pulled are dispatched, so a miner
-never draws a challenge the verifier can't run.
+Every task in the private manifest must have both exact image digests available
+locally. A tag-only list or a partial image set refuses startup.
 
 Run:  PORT=8666 CYBERGYM_CORPUS_DB=/srv/cgd/corpus.sqlite \
+      CYBERGYM_CORPUS_MANIFEST=/srv/cgd/private-repro-manifest.json \
       python -m cathedral_distill.cybergym_repro_server
 """
 from __future__ import annotations
@@ -35,7 +36,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cathedral_distill.cybergym_holdout import Holdout
 from cathedral_distill.cybergym_http import make_threaded_server
 from cathedral_distill.cybergym_protocol import CyberGymCorpusStore
-from cathedral_distill.cybergym_repro import REPRO_SUBSET, ReproTaskSource, available_tasks
+from cathedral_distill.cybergym_repro import ReproTaskSource, available_tasks
+from cathedral_distill.cybergym_repro_manifest import (
+    PrivateReproManifest,
+    ReproManifestError,
+    load_private_repro_manifest_file,
+)
 from cathedral_distill.cybergym_scores import CyberGymScoreStore
 from cathedral_distill.cybergym_service import CYBERGYM_LANE, CyberGymService
 from cathedral_distill.cybergym_validator import ChainContext
@@ -62,15 +68,20 @@ def _signing_key() -> tuple[Ed25519PrivateKey, bool]:
     return Ed25519PrivateKey.from_private_bytes(raw), False
 
 
-def resolve_tasks() -> list[str]:
-    """The task ids to serve: an explicit CYBERGYM_TASKS list, else the subset whose
-    images are pulled, else the full subset (so the server still boots for a dry run)."""
-    explicit = os.environ.get("CYBERGYM_TASKS", "").strip()
-    ids = [t.strip() for t in explicit.split(",") if t.strip()] if explicit else list(REPRO_SUBSET)
-    return available_tasks(ids) or ids
+def _manifest_from_environment() -> PrivateReproManifest:
+    path = os.environ.get("CYBERGYM_CORPUS_MANIFEST", "").strip()
+    if not path:
+        raise SystemExit(
+            "CYBERGYM_CORPUS_MANIFEST is required: a tag-only task list cannot "
+            "start the real CyberGym reproduction server"
+        )
+    try:
+        return load_private_repro_manifest_file(path)
+    except ReproManifestError as exc:
+        raise SystemExit(f"CYBERGYM_CORPUS_MANIFEST is invalid: {exc}") from None
 
 
-def build_service(ids, *, private_key: Ed25519PrivateKey, corpus_db: str | None = None,
+def build_service(manifest: PrivateReproManifest, *, private_key: Ed25519PrivateKey, corpus_db: str | None = None,
                   score_db: str | None = None,
                   validator_hotkey: str = "cathedral-repro-validator") -> CyberGymService:
     """Wire a `CyberGymService` over the real source + Docker backend. Importable so
@@ -84,11 +95,15 @@ def build_service(ids, *, private_key: Ed25519PrivateKey, corpus_db: str | None 
         run_dir = tempfile.mkdtemp(prefix="cybergym-repro-")
         corpus_db = corpus_db or os.path.join(run_dir, "corpus.sqlite")
         score_db = score_db or os.path.join(run_dir, "scores.sqlite")
-    src = ReproTaskSource(ids)
+    src = ReproTaskSource(manifest)
     # Placeholder chain window; a live validator reads this from the subtensor and
     # only needs it to compose weights, not to run the dispatch/verify/score loop.
     chain = ChainContext(block=100, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
                          source_epoch=21, valid_from_block=100, valid_until_block=460)
+    if manifest.source_epoch != chain.source_epoch:
+        raise ReproManifestError(
+            f"manifest source_epoch {manifest.source_epoch} does not match chain epoch {chain.source_epoch}"
+        )
     return CyberGymService(
         Holdout(pool=src, _context={}), chain, backend=src.backend,
         corpus_store=CyberGymCorpusStore(corpus_db), score_store=CyberGymScoreStore(score_db),
@@ -107,9 +122,15 @@ def main() -> None:
     port = int(os.environ.get("PORT", "8666"))
     host = os.environ.get("CYBERGYM_HOST", "127.0.0.1")
     key, ephemeral = _signing_key()
-    ids = resolve_tasks()
+    manifest = _manifest_from_environment()
+    ids = available_tasks(manifest)
+    if set(ids) != set(task.task_id for task in manifest.tasks):
+        raise SystemExit(
+            "every digest-pinned manifest task must have both images available locally; "
+            "refusing to serve a partial or unverifiable corpus"
+        )
     svc = build_service(
-        ids, private_key=key,
+        manifest, private_key=key,
         # An unset or empty variable falls through to build_service's per-boot temp
         # files; ":memory:" is no longer a bootable score-store path (the store
         # refuses it, because the external adapter reads the database as a file).
