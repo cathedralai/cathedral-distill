@@ -3,8 +3,8 @@
 This ties the CyberGym primitives into one hardware-free epoch, the sibling of
 `cathedralconfidential/cathedral/neuron/validator.py::epoch` for the SAT lane.
 Given a task pool, finalized chain context, and each miner's committed model plus
-its PoC bytes, it: derives the post-commitment batch nonce from chain state,
-draws the sealed batch, runs the differential crash test through an injected
+its PoC bytes, it: derives the epoch batch nonce from finalized chain state,
+draws the common sealed batch, runs the differential crash test through an injected
 backend, scores the batch, signs a `cathedral_cybergym_receipt_v1`, records the
 verified units to the `cybergym_scores` mechanism table, and returns the per-lane
 contributions `lane_feed` composes into the signed SN39 vector.
@@ -27,7 +27,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral_distill import cybergym_receipt as cr
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level, PoCSubmission, score_batch
-from cathedral_distill.cybergym_batch import Batch, TaskPool, derive_batch_nonce
+from cathedral_distill.cybergym_batch import (
+    Batch,
+    TaskPool,
+    derive_epoch_batch_nonce,
+)
+from cathedral_distill.cybergym_eligibility import EligibilitySnapshot
 from cathedral_distill.cybergym_scores import CyberGymScoreStore
 from cathedral_distill.cybergym_synthetic import is_synthetic_task
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
@@ -143,6 +148,7 @@ class EmissionGatePolicy:
     """
 
     bundle_registry: Any = None
+    eligibility_snapshot: EligibilitySnapshot | None = None
     commitment_deadline: datetime | None = None
     reproductions: Mapping[str, Mapping[str, object]] | None = None
     reproduction_key_registry: Any = None
@@ -150,6 +156,7 @@ class EmissionGatePolicy:
     miner_coldkeys: Mapping[str, str] | None = None
     require_registered_bundle: bool = True
     require_no_contamination: bool = True
+    require_observed_eligibility: bool = True
     require_reproduction: bool = False
     require_independent_evaluator: bool = False
 
@@ -243,10 +250,20 @@ def emission_gate_policy_manifest(
             dict(policy.miner_coldkeys or {}), label="miner coldkeys"
         )
 
+    eligibility_snapshot = None
+    if policy.require_observed_eligibility:
+        snapshot = policy.eligibility_snapshot
+        eligibility_snapshot = (
+            {"status": "missing"}
+            if snapshot is None
+            else snapshot.reward_evidence_identity()
+        )
+
     return {
-        "schema": "cathedral_cybergym_emission_gate_policy_v1",
+        "schema": "cathedral_cybergym_emission_gate_policy_v2",
         "require_registered_bundle": bool(policy.require_registered_bundle),
         "require_no_contamination": bool(policy.require_no_contamination),
+        "require_observed_eligibility": bool(policy.require_observed_eligibility),
         "require_reproduction": bool(policy.require_reproduction),
         "require_independent_evaluator": bool(
             policy.require_independent_evaluator
@@ -257,6 +274,7 @@ def emission_gate_policy_manifest(
             else None
         ),
         "bundle_registry": bundle_registry,
+        "eligibility_snapshot": eligibility_snapshot,
         "reproductions_digest": reproductions_digest,
         "reproduction_key_registry": reproduction_registry,
         "evaluator_coldkey": (
@@ -297,6 +315,19 @@ def evaluate_emission_gates(
         except Exception:  # noqa: BLE001 - unreadable evidence is a gate failure
             return None
 
+    snapshot = policy.eligibility_snapshot
+    observed_entry = None
+    observed_snapshot_bound = False
+    if policy.require_observed_eligibility and isinstance(snapshot, EligibilitySnapshot):
+        observed_entry = snapshot.entry_for(miner_hotkey)
+        observed_snapshot_bound = bool(
+            snapshot.is_eligible(
+                miner_hotkey, model_commitment, source_epoch=source_epoch
+            )
+            and receipt.get("batch", {}).get("eligibility_snapshot_digest")
+            == snapshot.digest
+        )
+
     registration = None
     if policy.bundle_registry is not None:
         registration = lookup(
@@ -304,13 +335,17 @@ def evaluate_emission_gates(
         )
 
     if policy.require_registered_bundle:
-        registered = bool(
-            policy.bundle_registry is not None
-            and lookup(
-                policy.bundle_registry,
-                "is_cryptographically_verified_by",
-                model_commitment,
-                miner_hotkey,
+        registered = (
+            observed_snapshot_bound
+            if policy.require_observed_eligibility
+            else bool(
+                policy.bundle_registry is not None
+                and lookup(
+                    policy.bundle_registry,
+                    "is_cryptographically_verified_by",
+                    model_commitment,
+                    miner_hotkey,
+                )
             )
         )
         if not registered:
@@ -322,7 +357,11 @@ def evaluate_emission_gates(
         # could be scored on. If neither an explicit deadline nor a cutoff is known,
         # `deadline` is None and the gate fails closed (non-contamination unprovable).
         deadline = policy.commitment_deadline or commitment_cutoff
-        registered_at = getattr(registration, "registered_at", None)
+        registered_at = (
+            observed_entry.observed_at
+            if policy.require_observed_eligibility and observed_snapshot_bound
+            else getattr(registration, "registered_at", None)
+        )
         # A registration timestamp with no timezone cannot be compared with an aware
         # deadline: Python raises, and that raise used to abort the epoch for every
         # miner. It is also not evidence of anything, since the offset it means is
@@ -333,8 +372,11 @@ def evaluate_emission_gates(
             and registered_at.utcoffset() is not None
         )
         proven_pre_commitment = bool(
-            registration is not None
-            and registration.miner_hotkey == miner_hotkey
+            (
+                observed_snapshot_bound
+                if policy.require_observed_eligibility
+                else registration is not None and registration.miner_hotkey == miner_hotkey
+            )
             and deadline is not None
             and aware
             and registered_at <= deadline
@@ -372,6 +414,25 @@ def evaluate_emission_gates(
             failures.append(fr.GATE_INDEPENDENT_EVALUATOR)
 
     return tuple(failures)
+
+
+def observed_eligibility_allows_dispatch(
+    policy: EmissionGatePolicy | None,
+    *,
+    miner_hotkey: str,
+    model_commitment: str,
+    source_epoch: int,
+) -> bool:
+    """Return whether dispatch is permitted by the frozen paid-identity mapping."""
+    if policy is None or not policy.require_observed_eligibility:
+        return True
+    snapshot = policy.eligibility_snapshot
+    return bool(
+        isinstance(snapshot, EligibilitySnapshot)
+        and snapshot.is_eligible(
+            miner_hotkey, model_commitment, source_epoch=source_epoch
+        )
+    )
 
 
 def cybergym_track_policy(track: str = "cybergym-v0", **kw):
@@ -419,13 +480,12 @@ def derive_cybergym_candidate(
     doc = cr.verify_receipt(receipt, key_registry, source_epoch=source_epoch)
     miner_hotkey = str(doc["miner_hotkey"])
 
-    # no_contamination: the receipt's nonce must equal the nonce derived from
-    # finalized chain state AND this miner's committed model. A mismatch means we
-    # cannot prove the set post-dates the commitment -> treat as contaminated.
-    expected_nonce = derive_batch_nonce(
+    # no_contamination: every paid identity must receive the common nonce derived
+    # from finalized chain state. The model itself is frozen by the observed
+    # eligibility snapshot and bound to TDX report data, not used as a second draw.
+    expected_nonce = derive_epoch_batch_nonce(
         block=chain.block, block_hash=chain.block_hash, network=chain.network,
-        netuid=chain.netuid, source_epoch=source_epoch, miner_hotkey=miner_hotkey,
-        model_commitment=model_commitment,
+        netuid=chain.netuid, source_epoch=source_epoch,
     )
     contamination_detected = doc["batch"]["nonce"] != expected_nonce
 
@@ -487,13 +547,14 @@ def run_epoch(
     gates_required: bool = True,
     credit_synthetic_tasks: bool = False,
 ) -> list[MinerResult]:
-    """Score every miner on its own chain-anchored batch and persist the result.
+    """Score every miner on the common chain-anchored batch and persist the result.
 
-    Each miner draws a *different* batch (the nonce binds its own hotkey and model
-    commitment), so a miner cannot be scored on a set it could predict, and two
-    miners' scores are only ever compared through the frontier on the same
-    batch_id. Returns one `MinerResult` per miner, with the signed receipt and the
-    lane contribution ready for `lane_feed.compose_vector`.
+    All miners in one source epoch receive the same nonce and task frontier, so
+    scores are directly comparable. The nonce is derived only from finalized chain
+    context; a miner's model commitment remains separately pinned by the frozen
+    eligibility snapshot and bound into its TDX attestation. Returns one
+    `MinerResult` per miner, with the signed receipt and the lane contribution ready
+    for `lane_feed.compose_vector`.
 
     `pool` is any draw-capable source (see `cybergym_protocol.dispatch`'s
     docstring) — a real `TaskPool` or `cybergym_synthetic.SyntheticTaskSource`.
@@ -538,13 +599,22 @@ def run_epoch(
     key_registry = ReceiptKeyRegistry.from_keys(
         {signing_key_id: private_key.public_key().public_bytes_raw()}
     )
+    eligibility_snapshot_digest = None
+    if gate_policy is not None and gate_policy.require_observed_eligibility:
+        snapshot = gate_policy.eligibility_snapshot
+        if isinstance(snapshot, EligibilitySnapshot) and snapshot.source_epoch == chain.source_epoch:
+            eligibility_snapshot_digest = snapshot.digest
+
+    epoch_nonce = derive_epoch_batch_nonce(
+        block=chain.block,
+        block_hash=chain.block_hash,
+        network=chain.network,
+        netuid=chain.netuid,
+        source_epoch=chain.source_epoch,
+    )
     results: list[MinerResult] = []
     for miner in miners:
-        nonce = derive_batch_nonce(
-            block=chain.block, block_hash=chain.block_hash, network=chain.network,
-            netuid=chain.netuid, source_epoch=chain.source_epoch,
-            miner_hotkey=miner.miner_hotkey, model_commitment=miner.model_commitment,
-        )
+        nonce = epoch_nonce
         batch = pool.draw(size=batch_size, nonce=nonce, as_of=as_of, cutoff=cutoff)
 
         submissions: list[PoCSubmission] = []
@@ -579,6 +649,7 @@ def run_epoch(
                 batch.evidence_digest
                 or cr.holdout_digest(list(batch.task_ids))
             ),
+            eligibility_snapshot_digest=eligibility_snapshot_digest,
             valid_from_block=chain.valid_from_block, valid_until_block=chain.valid_until_block,
             issued_at=issued_at, private_key=private_key, signing_key_id=signing_key_id,
             level_weights=level_weights,

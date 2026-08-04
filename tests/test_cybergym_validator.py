@@ -58,9 +58,9 @@ def _backend(solved_task_ids):
 
 def _batch_score(solved=("arvo:1", "arvo:2")):
     pool = _pool()
-    nonce = cb.derive_batch_nonce(
+    nonce = cb.derive_epoch_batch_nonce(
         block=100, block_hash=BLOCK_HASH, network="finney", netuid=39,
-        source_epoch=SOURCE_EPOCH, miner_hotkey="5Miner", model_commitment=_digest("ckpt"))
+        source_epoch=SOURCE_EPOCH)
     batch = cb.draw_batch(pool, size=3, nonce=nonce, as_of=NOW, cutoff=CUTOFF)
     subs = []
     for task in batch.tasks:
@@ -238,10 +238,11 @@ def test_full_epoch_persists_scores_and_feeds_the_vector(tmp_path):
         cutoff=CUTOFF, as_of=NOW, issued_at=ISSUED, batch_size=3, gates_required=False)
 
     assert {r.miner_hotkey for r in results} == {"5Alice", "5Bob"}
-    # every receipt independently verifies, and each miner drew its own batch
+    # every receipt independently verifies, and every paid identity drew the same
+    # post-anchor opportunity.
     for r in results:
         cr.verify_receipt(r.receipt, KEYREG, source_epoch=SOURCE_EPOCH)
-    assert results[0].batch.batch_id != results[1].batch.batch_id
+    assert results[0].batch.batch_id == results[1].batch.batch_id
 
     # verified units persisted for the adapter to read
     assert store.epoch_scores(SOURCE_EPOCH) == {"5Alice": Decimal("12"), "5Bob": Decimal("8")}

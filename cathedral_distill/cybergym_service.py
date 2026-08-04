@@ -50,6 +50,7 @@ from cathedral_distill.cybergym_validator import (
     MinerCommit,
     MinerResult,
     emission_gate_policy_manifest,
+    observed_eligibility_allows_dispatch,
     run_epoch,
 )
 from cathedral_distill.cybergym_synthetic import is_synthetic_task
@@ -77,8 +78,9 @@ class CyberGymService:
 
     Durability: accepted solves are written through to `solve_store` as they are
     accepted and rehydrated at construction, so a restart mid-epoch resumes with
-    the same scoring input (`run_epoch` re-draws each batch from the chain-anchored
-    nonce, so the commitment plus the PoC bytes are all it needs). The *dispatch*
+    the same scoring input (`run_epoch` re-draws the common batch from the
+    chain-anchored nonce, while the commitment plus the PoC bytes identify each
+    miner's submissions). The *dispatch*
     messages are still in-memory only: after a restart a miner must re-request its
     batch (same commitment, same nonce, same batch) before it can submit again.
     `compose_lane` refuses to publish while durable evidence shows solves this run
@@ -183,6 +185,17 @@ class CyberGymService:
                 "pass gate_policy=EmissionGatePolicy(bundle_registry=...), or "
                 "gates_required=False for the dev/test path (which persists scores "
                 "with NO registered-bundle or contamination gate)."
+            )
+        if (
+            gates_required
+            and gate_policy is not None
+            and gate_policy.require_observed_eligibility
+            and gate_policy.eligibility_snapshot is None
+        ):
+            raise ProtocolError(
+                "CyberGym reward dispatch requires a frozen externally observed "
+                "eligibility snapshot; a miner-supplied registration timestamp or "
+                "an unfrozen registry cannot select a paid commitment."
             )
         self.holdout = holdout
         self.chain = chain
@@ -325,10 +338,10 @@ class CyberGymService:
     def _restore_solves(self) -> None:
         """Rehydrate this epoch's accepted solves from the durable solve store.
 
-        Byte-identical recovery: `run_epoch` re-draws each miner's batch from the
-        chain-anchored nonce (derived from its hotkey and committed model), so the
-        model commitment plus the accepted PoC bytes are the complete input, GIVEN
-        the same epoch anchor, which `_pin_epoch_manifest` is what enforces.
+        Byte-identical recovery: `run_epoch` re-draws the common batch from the
+        chain-anchored nonce, so each miner's commitment plus accepted PoC bytes
+        are the complete input, GIVEN the same epoch anchor, which
+        `_pin_epoch_manifest` enforces.
         """
         if self._solves is None:
             return
@@ -355,41 +368,33 @@ class CyberGymService:
             raise ProtocolError(
                 f"authenticated caller {authenticated_caller!r} may not dispatch for "
                 f"{miner_hotkey!r}")
+        if not observed_eligibility_allows_dispatch(
+            self._gate_policy,
+            miner_hotkey=miner_hotkey,
+            model_commitment=model_commitment,
+            source_epoch=self.chain.source_epoch,
+        ):
+            raise ProtocolError(
+                "dispatch is not eligible in the frozen observed registration "
+                "snapshot for this source epoch"
+            )
         previous = self._miners.get(miner_hotkey)
-        # A commitment change abandons the previous batch. When accepted solves would
-        # be dropped, require the caller to be the miner — otherwise this is a
-        # reward-denial attack, not a self-re-commit. Checked BEFORE drawing, so an
-        # unauthorized call has no side effects at all.
+        # A commitment change is refused before dispatch, so an unauthorized call
+        # has no side effects and accepted solves are never abandoned.
         if previous is not None and previous.model_commitment != model_commitment:
             # The commitment is PINNED for the epoch on first dispatch, and the
             # refusal is unconditional -- not conditioned on accepted solves, and
             # not waived for a caller authenticated as the miner.
             #
-            # It used to be `and previous.pocs and authenticated_caller !=
-            # miner_hotkey`, which never applied to a miner acting as itself. That
-            # made batch SELECTION free: `model_commitment` is miner-supplied and
-            # feeds derive_batch_nonce, so a miner could commit, look at the batch
-            # it would draw, discard it, and commit again until the draw landed on
-            # tasks it already held PoCs for. Measured: a miner holding PoCs for 8
-            # of 60 tasks went from earning NOTHING honestly to full marks after
-            # 1771 accepted re-dispatches -- same capability, 0 -> 100% (#34).
-            #
-            # The v2 attestation report_data also binds this commitment, but that
-            # only proves the enclave used whichever commitment was dispatched.
-            # It does not remove the miner's choice among commitments, so the
-            # service must pin the first one for the epoch. Nor does transport
-            # authentication help: the grinding miner authenticates as itself.
-            #
-            # The unpredictability argument -- derive_batch_nonce binds a finalized
-            # block hash that postdates the commitment -- is true of any SINGLE
-            # commitment and says nothing about a CHOICE among many. Each candidate
-            # registration legitimately predates the block; the selection happens
-            # after the hash is public.
+            # The common frontier prevents task-selection grinding, but the model
+            # commitment is still part of the TDX-bound submission identity and the
+            # frozen eligibility snapshot permits exactly one commitment. A change
+            # would invalidate durable solves and create conflicting evidence.
             raise ProtocolError(
                 f"model_commitment for {miner_hotkey!r} is pinned for source_epoch "
                 f"{self.chain.source_epoch} to {previous.model_commitment}; a "
-                f"different commitment ({model_commitment}) would re-draw the sealed "
-                "batch, so it is refused for the rest of the epoch")
+                f"different commitment ({model_commitment}) conflicts with the "
+                "frozen eligibility evidence, so it is refused for the rest of the epoch")
         message = dispatch(
             self.holdout.pool, self.chain,
             miner_hotkey=miner_hotkey, model_commitment=model_commitment,
@@ -398,9 +403,8 @@ class CyberGymService:
         )
         # A repeat dispatch must not silently erase accepted solves. Same committed
         # model -> same nonce -> same batch, so the solves already accepted this
-        # epoch still belong to it and are kept. A different commitment is a
-        # different batch, so the old solves are for other tasks: drop them, and
-        # drop them durably, or a later restart would resurrect them.
+        # epoch still belong to it and are kept. A different commitment is refused,
+        # so accepted solves are never discarded by re-dispatch.
         if previous is not None and previous.model_commitment == model_commitment:
             self._miners[miner_hotkey] = _MinerState(
                 model_commitment, message, dict(previous.pocs)
@@ -573,7 +577,7 @@ class CyberGymService:
     def score_epoch(self, *, issued_at: str) -> list[MinerResult]:
         """Score every dispatched miner on its collected solves and persist.
 
-        Reuses the canonical `run_epoch` scorer (it re-draws each miner's batch
+        Reuses the canonical `run_epoch` scorer (it re-draws the common batch
         from the same chain-anchored nonce and re-verifies, so the persisted score
         is the one any peer validator would derive). Records to `cybergym_scores`.
 

@@ -303,6 +303,7 @@ def test_restart_that_changes_reward_gate_policy_is_refused(tmp_path):
         gate_policy=EmissionGatePolicy(
             bundle_registry=_verified_registry(),
             require_reproduction=True,
+            require_observed_eligibility=False,
         ),
         gates_required=True,
     )
@@ -314,8 +315,9 @@ def test_restart_that_changes_reward_gate_policy_is_refused(tmp_path):
             tmp_path,
             durable=True,
             gate_policy=EmissionGatePolicy(
-                bundle_registry=_verified_registry(),
-                require_reproduction=False,
+            bundle_registry=_verified_registry(),
+            require_reproduction=False,
+            require_observed_eligibility=False,
             ),
             gates_required=True,
         )
@@ -325,7 +327,9 @@ def test_restart_that_changes_reward_registry_identity_is_refused(tmp_path):
     killed = _service(
         tmp_path,
         durable=True,
-        gate_policy=EmissionGatePolicy(bundle_registry=_verified_registry()),
+        gate_policy=EmissionGatePolicy(
+            bundle_registry=_verified_registry(), require_observed_eligibility=False
+        ),
         gates_required=True,
     )
     _solve(killed)
@@ -336,7 +340,8 @@ def test_restart_that_changes_reward_registry_identity_is_refused(tmp_path):
             tmp_path,
             durable=True,
             gate_policy=EmissionGatePolicy(
-                bundle_registry=_verified_registry(digest=OTHER_MODEL)
+                bundle_registry=_verified_registry(digest=OTHER_MODEL),
+                require_observed_eligibility=False,
             ),
             gates_required=True,
         )
@@ -350,6 +355,7 @@ def test_restart_that_changes_reproduction_evidence_is_refused(tmp_path):
             bundle_registry=_verified_registry(),
             require_reproduction=True,
             reproductions={"5Miner": {"receipt_id": "receipt-a"}},
+            require_observed_eligibility=False,
         ),
         gates_required=True,
     )
@@ -362,8 +368,9 @@ def test_restart_that_changes_reproduction_evidence_is_refused(tmp_path):
             durable=True,
             gate_policy=EmissionGatePolicy(
                 bundle_registry=_verified_registry(),
-                require_reproduction=True,
-                reproductions={"5Miner": {"receipt_id": "receipt-b"}},
+            require_reproduction=True,
+            reproductions={"5Miner": {"receipt_id": "receipt-b"}},
+            require_observed_eligibility=False,
             ),
             gates_required=True,
         )
