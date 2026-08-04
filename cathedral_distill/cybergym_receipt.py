@@ -53,6 +53,7 @@ _RECEIPT_KEYS = frozenset(
     }
 )
 _BATCH_KEYS = frozenset({"batch_id", "nonce", "holdout_digest", "graded_tasks"})
+_BATCH_EXECUTION_PROFILE_KEY = "execution_profile_digest"
 _SCORE_KEYS = frozenset(
     {
         "solved_tasks", "per_level_solved", "level_weights",
@@ -121,6 +122,7 @@ def build_receipt(
     miner_hotkey: str,
     nonce: str,
     holdout_digest_value: str,
+    execution_profile_digest: str | None = None,
     valid_from_block: int,
     valid_until_block: int,
     issued_at: str,
@@ -157,6 +159,12 @@ def build_receipt(
         },
         "signing_key_id": signing_key_id,
     }
+    if execution_profile_digest is not None:
+        if not _DIGEST_RE.fullmatch(execution_profile_digest):
+            raise CyberGymReceiptError(
+                "execution_profile_digest must be sha256:<64 hex>"
+            )
+        body["batch"][_BATCH_EXECUTION_PROFILE_KEY] = execution_profile_digest
     body["receipt_id"] = compute_receipt_id(body)
     signature = private_key.sign(canonical_bytes(body))
     body["signature"] = {
@@ -212,13 +220,28 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
     if last <= first:
         raise CyberGymReceiptError("valid_until_block must exceed valid_from_block")
 
-    batch = _exact_keys(doc["batch"], _BATCH_KEYS, "batch")
+    batch = doc["batch"]
+    batch_keys = set(batch) if isinstance(batch, Mapping) else set()
+    allowed_batch_keys = (
+        set(_BATCH_KEYS),
+        set(_BATCH_KEYS) | {_BATCH_EXECUTION_PROFILE_KEY},
+    )
+    if batch_keys not in allowed_batch_keys:
+        raise CyberGymReceiptError("batch has unsupported keys")
+    batch = _exact_keys(batch, frozenset(batch_keys), "batch")
     if not _BATCH_ID_RE.match(str(batch["batch_id"])):
         raise CyberGymReceiptError("batch_id must be sha256:<64 hex>")
     if not _HEX_NONCE_RE.match(str(batch["nonce"])):
         raise CyberGymReceiptError("nonce is invalid")
     if not _DIGEST_RE.match(str(batch["holdout_digest"])):
         raise CyberGymReceiptError("holdout_digest must be sha256:<64 hex>")
+    if (
+        _BATCH_EXECUTION_PROFILE_KEY in batch
+        and not _DIGEST_RE.match(str(batch[_BATCH_EXECUTION_PROFILE_KEY]))
+    ):
+        raise CyberGymReceiptError(
+            "execution_profile_digest must be sha256:<64 hex>"
+        )
     graded = _nonneg_int(batch["graded_tasks"], "graded_tasks")
 
     score = _exact_keys(doc["score"], _SCORE_KEYS, "score")

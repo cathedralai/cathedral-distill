@@ -25,6 +25,8 @@ import os
 import re
 import subprocess
 import tempfile
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
@@ -35,6 +37,7 @@ from cathedral_distill.cybergym_task_manifest import (
 )
 
 DOCKER_TIMEOUT = 300
+EXECUTION_PROFILE_SCHEMA = "cathedral_cybergym_execution_profile_v1"
 
 #: Isolation flags for the verify container. `--network none` is egress-deny — the
 #: PoC is an adversarial, deliberately-crashing input, so the build must have no way
@@ -87,6 +90,21 @@ Runner = Callable[..., subprocess.CompletedProcess]
 
 class ReproError(ValueError):
     """A malformed task id or reproduce request. Fails closed."""
+
+
+def execution_profile_digest(
+    sandbox_flags: Sequence[str] = SANDBOX_FLAGS,
+) -> str:
+    """Digest the exact verifier-isolation profile carried into reward evidence."""
+    if not all(isinstance(flag, str) and flag for flag in sandbox_flags):
+        raise ReproError("sandbox flags must be non-empty strings")
+    body = json.dumps(
+        {"schema": EXECUTION_PROFILE_SCHEMA, "docker_flags": list(sandbox_flags)},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return "sha256:" + hashlib.sha256(body).hexdigest()
 
 
 def _image_and_command(task_id: str, mode: str) -> tuple[str, list[str]]:
@@ -279,6 +297,11 @@ class ReproTaskSource:
     def source_epoch(self) -> int:
         return self._manifest.source_epoch
 
+    @property
+    def execution_profile_digest(self) -> str:
+        """The signed-evidence handle for the Docker isolation posture."""
+        return execution_profile_digest()
+
     def draw(self, *, size: int, nonce: str, as_of=None, cutoff=None) -> Batch:
         if as_of is None or cutoff is None:
             raise ReproError("immutable task draws require as_of and cutoff timestamps")
@@ -312,5 +335,6 @@ class ReproTaskSource:
 
 __all__ = [
     "REPRO_SUBSET", "ReproError", "docker_reproduce_backend", "available_tasks",
-    "ReproTaskSource", "DOCKER_TIMEOUT",
+    "ReproTaskSource", "DOCKER_TIMEOUT", "EXECUTION_PROFILE_SCHEMA",
+    "execution_profile_digest",
 ]

@@ -110,6 +110,7 @@ class DispatchMessage:
     valid_until_block: int
     tasks: tuple[DispatchedTask, ...]
     task_manifest_digest: str = ""
+    execution_profile_digest: str = ""
 
     def task(self, task_id: str) -> DispatchedTask | None:
         for t in self.tasks:
@@ -133,6 +134,8 @@ class DispatchMessage:
         }
         if self.task_manifest_digest:
             document["task_manifest_digest"] = self.task_manifest_digest
+        if self.execution_profile_digest:
+            document["execution_profile_digest"] = self.execution_profile_digest
         return document
 
 
@@ -180,6 +183,9 @@ def dispatch(
     tasks: list[DispatchedTask] = []
     image_references = getattr(pool, "image_references", None)
     manifest_digest = str(getattr(pool, "manifest_digest", "") or "")
+    execution_profile_digest = str(
+        getattr(pool, "execution_profile_digest", "") or ""
+    )
     for task in batch.tasks:
         allowed = LEVEL_CONTEXT_FIELDS.get(int(task.level), ())
         full = dict(context_provider(task.task_id)) if context_provider else {}
@@ -210,6 +216,7 @@ def dispatch(
         valid_until_block=chain.valid_until_block,
         tasks=tuple(tasks),
         task_manifest_digest=manifest_digest,
+        execution_profile_digest=execution_profile_digest,
     )
 
 

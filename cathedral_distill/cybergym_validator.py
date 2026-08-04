@@ -590,6 +590,9 @@ def run_epoch(
     )
     results: list[MinerResult] = []
     task_manifest_digest = str(getattr(pool, "manifest_digest", "") or "")
+    execution_profile_digest = str(
+        getattr(pool, "execution_profile_digest", "") or ""
+    )
     manifest_epoch = getattr(pool, "source_epoch", None)
     if manifest_epoch is not None and int(manifest_epoch) != int(chain.source_epoch):
         raise EmissionGateError(
@@ -646,6 +649,9 @@ def run_epoch(
                 task_manifest_digest
                 if task_manifest_digest
                 else cr.holdout_digest(list(batch.task_ids))
+            ),
+            execution_profile_digest=(
+                execution_profile_digest or None
             ),
             valid_from_block=chain.valid_from_block, valid_until_block=chain.valid_until_block,
             issued_at=issued_at, private_key=private_key, signing_key_id=signing_key_id,

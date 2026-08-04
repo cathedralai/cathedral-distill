@@ -282,6 +282,9 @@ class CyberGymService:
             "task_manifest_digest": str(
                 getattr(self.holdout.pool, "manifest_digest", "") or ""
             ),
+            "execution_profile_digest": str(
+                getattr(self.holdout.pool, "execution_profile_digest", "") or ""
+            ),
             "gates_required": bool(self._gates_required),
             "gate_policy": emission_gate_policy_manifest(self._gate_policy),
         }
