@@ -21,7 +21,6 @@ unit-tested without Docker; the live differential is proven on the challenge box
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import subprocess
@@ -29,8 +28,11 @@ import tempfile
 from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
-from cathedral_distill.cybergym import Level, Task
-from cathedral_distill.cybergym_batch import Batch, batch_id_for
+from cathedral_distill.cybergym_batch import Batch
+from cathedral_distill.cybergym_task_manifest import (
+    ImmutableTaskManifest,
+    TaskManifestError,
+)
 
 DOCKER_TIMEOUT = 300
 
@@ -53,6 +55,8 @@ SANDBOX_FLAGS: tuple[str, ...] = (
     "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
     "--memory", "4g", "--cpus", "2", "--pids-limit", "512",
 )
+
+_PINNED_IMAGE_RE = re.compile(r"\A[^@\s]+@sha256:[0-9a-f]{64}\Z")
 
 # A real subset with level-gated metadata; the vulnerable repo itself is the image
 # the miner pulls by binary_digest. Extend from cybergym's download_subset.py.
@@ -188,13 +192,18 @@ def _is_crash(output: str, returncode: int, *, task_id: str) -> bool:
 
 
 def docker_reproduce_backend(task_id: str, poc: bytes, mode: str, *,
-                             docker: str = "docker", timeout: int = DOCKER_TIMEOUT,
+                             image_ref: str, docker: str = "docker", timeout: int = DOCKER_TIMEOUT,
                              sandbox_flags: Sequence[str] = SANDBOX_FLAGS,
                              _run: Runner = subprocess.run) -> int:
     """Run one PoC against the real vulnerable (mode!='fix') or patched build via
     Docker, network-isolated. Returns nonzero iff the build crashes on the PoC — the
     differential signal `verify_poc` composes into solved = crash-vuln AND clean-patch."""
-    image, cmd = _image_and_command(task_id, mode)
+    _unused_image, cmd = _image_and_command(task_id, mode)
+    if not isinstance(image_ref, str) or _PINNED_IMAGE_RE.fullmatch(image_ref) is None:
+        raise ReproError(
+            "image_ref must be an immutable repo@sha256:<64 lowercase hex> reference"
+        )
+    image = image_ref
     fd, path = tempfile.mkstemp()
     name = "cgverify-" + os.path.basename(path)
     try:
@@ -246,12 +255,8 @@ def available_tasks(ids: Sequence[str], *, docker: str = "docker",
     return out
 
 
-def _digest(s: str) -> str:
-    return "sha256:" + hashlib.sha256(s.encode()).hexdigest()
-
-
 class ReproTaskSource:
-    """DISTRIBUTE: a draw-capable source over the real corpus subset, nonce-sealed.
+    """DISTRIBUTE: a draw-capable source over one immutable private manifest.
 
     Same draw/context/artifact/backend interface as `SyntheticTaskSource`, so it
     drops straight into `CyberGymService`. Selection is deterministic in the batch
@@ -259,31 +264,50 @@ class ReproTaskSource:
     miner pulls (no inline source), so `artifact()` returns None.
     """
 
-    def __init__(self, ids: Sequence[str], *, metadata: Mapping[str, dict] = REPRO_SUBSET,
-                 backend: Runner = subprocess.run) -> None:
-        self.ids = list(ids)
-        self._meta = metadata
+    def __init__(self, manifest: ImmutableTaskManifest, *, backend: Runner = subprocess.run) -> None:
+        if not isinstance(manifest, ImmutableTaskManifest):
+            raise ReproError("ReproTaskSource requires an ImmutableTaskManifest")
+        self._manifest = manifest
+        self._pool = manifest.task_pool()
         self._run = backend
 
+    @property
+    def manifest_digest(self) -> str:
+        return self._manifest.digest
+
+    @property
+    def source_epoch(self) -> int:
+        return self._manifest.source_epoch
+
     def draw(self, *, size: int, nonce: str, as_of=None, cutoff=None) -> Batch:
-        order = sorted(self.ids, key=lambda t: hashlib.sha256((nonce + t).encode()).hexdigest())
-        picked = order[:size]
-        tasks = tuple(
-            Task(task_id=t, level=Level(int(self._meta.get(t, {}).get("level", 0))),
-                 binary_digest=_digest(_image_and_command(t, "vul")[0]))
-            for t in picked)
-        return Batch(batch_id=batch_id_for(nonce, [t.task_id for t in tasks]), nonce=nonce, tasks=tasks)
+        if as_of is None or cutoff is None:
+            raise ReproError("immutable task draws require as_of and cutoff timestamps")
+        try:
+            self._manifest.assert_private_at(as_of)
+            if cutoff != self._manifest.commitment_cutoff:
+                raise TaskManifestError(
+                    "draw cutoff does not match the immutable task manifest"
+                )
+            return self._pool.draw(size=size, nonce=nonce, as_of=as_of, cutoff=cutoff)
+        except (TaskManifestError, ValueError) as exc:
+            raise ReproError(str(exc)) from exc
 
     def context_provider(self, task_id: str) -> Mapping[str, str]:
-        m = self._meta.get(task_id, {})
-        return {"description": str(m.get("description", "")),
-                "sanitizer_trace": str(m.get("sanitizer_trace", ""))}
+        return dict(self._manifest.task(task_id).context)
 
     def artifact(self, task_id: str):
         return None  # the real repo is the image; the miner fetches it by binary_digest
 
+    def image_references(self, task_id: str) -> Mapping[str, str]:
+        task = self._manifest.task(task_id)
+        return {"vulnerable": task.vulnerable_image, "fixed": task.fixed_image}
+
     def backend(self, task_id: str, poc: bytes, mode: str) -> int:
-        return docker_reproduce_backend(task_id, poc, mode, _run=self._run)
+        task = self._manifest.task(task_id)
+        image = task.fixed_image if mode == "fix" else task.vulnerable_image
+        return docker_reproduce_backend(
+            task_id, poc, mode, image_ref=image, _run=self._run
+        )
 
 
 __all__ = [

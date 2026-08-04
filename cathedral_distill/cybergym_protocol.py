@@ -77,14 +77,18 @@ class DispatchedTask:
     level: int
     binary_digest: str
     context: Mapping[str, str]  # only the level-appropriate fields, revealed
+    image_references: Mapping[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        document: dict[str, Any] = {
             "task_id": self.task_id,
             "level": self.level,
             "binary_digest": self.binary_digest,
             "context": dict(self.context),
         }
+        if self.image_references:
+            document["image_references"] = dict(self.image_references)
+        return document
 
 
 @dataclass(frozen=True)
@@ -101,6 +105,7 @@ class DispatchMessage:
     valid_from_block: int
     valid_until_block: int
     tasks: tuple[DispatchedTask, ...]
+    task_manifest_digest: str = ""
 
     def task(self, task_id: str) -> DispatchedTask | None:
         for t in self.tasks:
@@ -109,7 +114,7 @@ class DispatchMessage:
         return None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        document: dict[str, Any] = {
             "schema": DISPATCH_SCHEMA,
             "network": self.network,
             "netuid": self.netuid,
@@ -122,6 +127,9 @@ class DispatchMessage:
             "valid_until_block": self.valid_until_block,
             "tasks": [t.to_dict() for t in self.tasks],
         }
+        if self.task_manifest_digest:
+            document["task_manifest_digest"] = self.task_manifest_digest
+        return document
 
 
 def dispatch(
@@ -160,16 +168,24 @@ def dispatch(
     )
     batch = pool.draw(size=batch_size, nonce=nonce, as_of=as_of, cutoff=cutoff)
     tasks: list[DispatchedTask] = []
+    image_references = getattr(pool, "image_references", None)
+    manifest_digest = str(getattr(pool, "manifest_digest", "") or "")
     for task in batch.tasks:
         allowed = LEVEL_CONTEXT_FIELDS.get(int(task.level), ())
         full = dict(context_provider(task.task_id)) if context_provider else {}
         revealed = {k: str(full[k]) for k in allowed if k in full}
+        refs = (
+            dict(image_references(task.task_id))
+            if callable(image_references)
+            else {}
+        )
         tasks.append(
             DispatchedTask(
                 task_id=task.task_id,
                 level=int(task.level),
                 binary_digest=task.binary_digest,
                 context=revealed,
+                image_references=refs,
             )
     )
     return DispatchMessage(
@@ -183,6 +199,7 @@ def dispatch(
         valid_from_block=chain.valid_from_block,
         valid_until_block=chain.valid_until_block,
         tasks=tuple(tasks),
+        task_manifest_digest=manifest_digest,
     )
 
 

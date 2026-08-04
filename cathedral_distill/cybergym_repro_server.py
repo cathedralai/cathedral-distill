@@ -16,10 +16,10 @@ Config (all via env):
   CYBERGYM_VALIDATOR_HOTKEY  validator hotkey ss58          (default cathedral-repro-validator)
   CYBERGYM_CORPUS_DB      corpus sqlite path                (default: a fresh per-boot temp file)
   CYBERGYM_SCORE_DB       score sqlite path                 (default: a fresh per-boot temp file)
-  CYBERGYM_TASKS          comma-separated task ids to serve (default: the pulled subset)
+  CYBERGYM_TASK_MANIFEST  immutable per-epoch task manifest (required)
 
-Only tasks whose vul+fix images are actually pulled are dispatched, so a miner
-never draws a challenge the verifier can't run.
+The manifest pins every vulnerable/fixed image as ``repo@sha256``.  Tag-only
+references are refused before the service can dispatch a reward-bearing task.
 
 Run:  PORT=8666 CYBERGYM_CORPUS_DB=/srv/cgd/corpus.sqlite \
       python -m cathedral_distill.cybergym_repro_server
@@ -35,9 +35,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cathedral_distill.cybergym_holdout import Holdout
 from cathedral_distill.cybergym_http import make_threaded_server
 from cathedral_distill.cybergym_protocol import CyberGymCorpusStore
-from cathedral_distill.cybergym_repro import REPRO_SUBSET, ReproTaskSource, available_tasks
+from cathedral_distill.cybergym_repro import ReproTaskSource
 from cathedral_distill.cybergym_scores import CyberGymScoreStore
 from cathedral_distill.cybergym_service import CYBERGYM_LANE, CyberGymService
+from cathedral_distill.cybergym_task_manifest import ImmutableTaskManifest, load_task_manifest
 from cathedral_distill.cybergym_validator import ChainContext
 
 
@@ -62,17 +63,11 @@ def _signing_key() -> tuple[Ed25519PrivateKey, bool]:
     return Ed25519PrivateKey.from_private_bytes(raw), False
 
 
-def resolve_tasks() -> list[str]:
-    """The task ids to serve: an explicit CYBERGYM_TASKS list, else the subset whose
-    images are pulled, else the full subset (so the server still boots for a dry run)."""
-    explicit = os.environ.get("CYBERGYM_TASKS", "").strip()
-    ids = [t.strip() for t in explicit.split(",") if t.strip()] if explicit else list(REPRO_SUBSET)
-    return available_tasks(ids) or ids
-
-
-def build_service(ids, *, private_key: Ed25519PrivateKey, corpus_db: str | None = None,
+def build_service(manifest: ImmutableTaskManifest, *, private_key: Ed25519PrivateKey, corpus_db: str | None = None,
                   score_db: str | None = None,
-                  validator_hotkey: str = "cathedral-repro-validator") -> CyberGymService:
+                  validator_hotkey: str = "cathedral-repro-validator",
+                  batch_size: int = 8,
+                  as_of: datetime | None = None) -> CyberGymService:
     """Wire a `CyberGymService` over the real source + Docker backend. Importable so
     the wiring is testable with an injected backend and per-run temp stores."""
     if corpus_db is None or score_db is None:
@@ -84,16 +79,17 @@ def build_service(ids, *, private_key: Ed25519PrivateKey, corpus_db: str | None 
         run_dir = tempfile.mkdtemp(prefix="cybergym-repro-")
         corpus_db = corpus_db or os.path.join(run_dir, "corpus.sqlite")
         score_db = score_db or os.path.join(run_dir, "scores.sqlite")
-    src = ReproTaskSource(ids)
+    src = ReproTaskSource(manifest)
     # Placeholder chain window; a live validator reads this from the subtensor and
     # only needs it to compose weights, not to run the dispatch/verify/score loop.
     chain = ChainContext(block=100, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
-                         source_epoch=21, valid_from_block=100, valid_until_block=460)
+                         source_epoch=manifest.source_epoch, valid_from_block=100, valid_until_block=460)
     return CyberGymService(
         Holdout(pool=src, _context={}), chain, backend=src.backend,
         corpus_store=CyberGymCorpusStore(corpus_db), score_store=CyberGymScoreStore(score_db),
         validator_hotkey=validator_hotkey, private_key=private_key, signing_key_id="cybergym-1",
-        batch_size=1, cutoff=None, as_of=datetime.now(UTC), attestation_required=False,
+        batch_size=batch_size, cutoff=manifest.commitment_cutoff,
+        as_of=as_of or datetime.now(UTC), attestation_required=False,
         # This reference server is a dry-run harness (ephemeral signing key, per-boot
         # temp stores by default), so it explicitly opts out of the durable-solve-store
         # and anti-gaming-gate requirements the constructor otherwise enforces
@@ -107,9 +103,15 @@ def main() -> None:
     port = int(os.environ.get("PORT", "8666"))
     host = os.environ.get("CYBERGYM_HOST", "127.0.0.1")
     key, ephemeral = _signing_key()
-    ids = resolve_tasks()
+    manifest_path = os.environ.get("CYBERGYM_TASK_MANIFEST", "").strip()
+    if not manifest_path:
+        raise SystemExit(
+            "CYBERGYM_TASK_MANIFEST is required; tag-only task lists cannot start "
+            "the immutable CyberGym verifier"
+        )
+    manifest = load_task_manifest(manifest_path)
     svc = build_service(
-        ids, private_key=key,
+        manifest, private_key=key,
         # An unset or empty variable falls through to build_service's per-boot temp
         # files; ":memory:" is no longer a bootable score-store path (the store
         # refuses it, because the external adapter reads the database as a file).
@@ -117,12 +119,12 @@ def main() -> None:
         score_db=os.environ.get("CYBERGYM_SCORE_DB") or None,
         validator_hotkey=os.environ.get("CYBERGYM_VALIDATOR_HOTKEY", "cathedral-repro-validator"))
     server = make_threaded_server(svc, host=host, port=port,
-                                  healthz={"status": "ok", "tasks": ids,
+                                  healthz={"status": "ok", "tasks": [task.task_id for task in manifest.tasks],
                                            "lane": CYBERGYM_LANE})
     if ephemeral:
         print("WARNING: no CYBERGYM_SIGNING_SEED set — using an ephemeral key; "
               "receipts will not verify across restarts.", flush=True)
-    print(f"CyberGym validator serving real tasks {ids} on {host}:{port} "
+    print(f"CyberGym validator serving immutable manifest {manifest.digest} on {host}:{port} "
           f"(threaded, GET /healthz)", flush=True)
     try:
         server.serve_forever()

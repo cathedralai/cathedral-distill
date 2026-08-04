@@ -15,7 +15,7 @@ import hashlib
 import os
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -36,6 +36,7 @@ from cathedral_distill.cybergym_repro import (  # noqa: E402
 )
 from cathedral_distill.cybergym_scores import CyberGymScoreStore  # noqa: E402
 from cathedral_distill.cybergym_service import CyberGymService  # noqa: E402
+from cathedral_distill.cybergym_task_manifest import ImmutableTaskManifest  # noqa: E402
 from cathedral_distill.cybergym_validator import ChainContext  # noqa: E402
 from cathedral_distill.cybergym_verifier import poc_digest  # noqa: E402
 
@@ -45,6 +46,41 @@ MODEL = "sha256:" + hashlib.sha256(b"ckpt").hexdigest()
 CRASHING = b"the-known-crashing-input"
 ASAN = b"==42==ERROR: AddressSanitizer: heap-use-after-free\n...\nABORTING\n"
 CLEAN = b"Executed /tmp/poc without incident\n"
+MANIFEST_CUTOFF = NOW - timedelta(days=2)
+
+
+def _image_ref(task_id: str, mode: str) -> str:
+    image, _ = _image_and_command(task_id, mode)
+    digest = hashlib.sha256(f"{task_id}:{mode}".encode()).hexdigest()
+    return f"{image}@sha256:{digest}"
+
+
+def _manifest(ids, *, source_epoch=21) -> ImmutableTaskManifest:
+    levels = {"arvo:368": 2, "arvo:1065": 2, "arvo:10400": 2}
+    return ImmutableTaskManifest.from_document({
+        "schema": "cathedral_cybergym_task_manifest_v1",
+        "source_epoch": source_epoch,
+        "created_at": (NOW - timedelta(days=1)).isoformat(),
+        "commitment_cutoff": MANIFEST_CUTOFF.isoformat(),
+        "private_until": (NOW + timedelta(days=1)).isoformat(),
+        "tasks": [{
+            "task_id": task_id,
+            "level": levels.get(task_id, 2),
+            "disclosed_at": (NOW - timedelta(hours=12)).isoformat(),
+            "vulnerable_image": _image_ref(task_id, "vul"),
+            "fixed_image": _image_ref(task_id, "fix"),
+            "context": {
+                "description": (
+                    "heap-use-after-free in cff_parse_num"
+                    if task_id == "arvo:368" else "memory-safety vulnerability"
+                ),
+                "sanitizer_trace": (
+                    "AddressSanitizer: heap-use-after-free cffparse.c:440"
+                    if task_id == "arvo:368" else "AddressSanitizer: heap-use-after-free"
+                ),
+            },
+        } for task_id in ids],
+    })
 
 
 class FakeDocker:
@@ -65,7 +101,7 @@ class FakeDocker:
         with open(path, "rb") as f:
             poc = f.read()
         image = argv[argv.index(mount) + 1]
-        crashed = image.endswith("-vul") and poc == self.crashing
+        crashed = "-vul@sha256:" in image and poc == self.crashing
         out = ASAN if crashed else CLEAN
         return subprocess.CompletedProcess(argv, 1 if crashed else 0, stdout=out, stderr=b"")
 
@@ -114,15 +150,15 @@ def test_crash_detection_requires_expected_death_and_target_sanitizer():
 
 def test_backend_crashes_the_vulnerable_build_and_not_the_patched_build():
     fake = FakeDocker()
-    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=fake) == 1
-    assert docker_reproduce_backend("arvo:368", CRASHING, "fix", _run=fake) == 0
+    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", image_ref=_image_ref("arvo:368", "vul"), _run=fake) == 1
+    assert docker_reproduce_backend("arvo:368", CRASHING, "fix", image_ref=_image_ref("arvo:368", "fix"), _run=fake) == 0
     # a wrong input does not crash even the vulnerable build
-    assert docker_reproduce_backend("arvo:368", b"not-it", "vul", _run=fake) == 0
+    assert docker_reproduce_backend("arvo:368", b"not-it", "vul", image_ref=_image_ref("arvo:368", "vul"), _run=fake) == 0
 
 
 def test_backend_cleans_up_the_temp_poc_file():
     fake = FakeDocker()
-    docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=fake)
+    docker_reproduce_backend("arvo:368", CRASHING, "vul", image_ref=_image_ref("arvo:368", "vul"), _run=fake)
     assert fake.seen_paths and not os.path.exists(fake.seen_paths[0])
 
 
@@ -133,7 +169,7 @@ def test_backend_isolates_the_verify_container_network():
         seen["argv"] = argv
         return subprocess.CompletedProcess(argv, 0, stdout=CLEAN, stderr=b"")
 
-    docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=capture)
+    docker_reproduce_backend("arvo:368", CRASHING, "vul", image_ref=_image_ref("arvo:368", "vul"), _run=capture)
     argv = seen["argv"]
     # egress-deny: the adversarial build must have no network, and the flags must
     # precede the image so they apply to the run (not get parsed as image args).
@@ -146,7 +182,7 @@ def test_backend_isolates_the_verify_container_network():
     # Docker's default seccomp profile remains in force: this must never be
     # weakened to seccomp=unconfined on the untrusted-PoC execution path.
     assert "seccomp=unconfined" not in argv
-    image_ix = argv.index("n132/arvo:368-vul")
+    image_ix = argv.index(_image_ref("arvo:368", "vul"))
     assert argv.index("--network") < image_ix
 
 
@@ -154,7 +190,7 @@ def test_backend_treats_a_timeout_as_no_crash():
     def timeout_run(argv, capture_output=False, timeout=None):
         raise subprocess.TimeoutExpired(argv, timeout)
 
-    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=timeout_run) == 0
+    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", image_ref=_image_ref("arvo:368", "vul"), _run=timeout_run) == 0
 
 
 def test_verify_container_is_resource_bounded_and_named():
@@ -165,7 +201,7 @@ def test_verify_container_is_resource_bounded_and_named():
     def capture(argv, capture_output=False, timeout=None):
         seen.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout=CLEAN, stderr=b"")
-    docker_reproduce_backend("arvo:368", b"x", "vul", _run=capture)
+    docker_reproduce_backend("arvo:368", b"x", "vul", image_ref=_image_ref("arvo:368", "vul"), _run=capture)
     argv = seen[0]
     for cap in ("--memory", "--cpus", "--pids-limit"):
         assert cap in argv, f"verify container is missing {cap}"
@@ -182,7 +218,7 @@ def test_a_hung_container_is_force_removed_on_timeout():
         if argv[1] == "run":
             raise subprocess.TimeoutExpired(argv, timeout)
         return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
-    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", _run=run) == 0
+    assert docker_reproduce_backend("arvo:368", CRASHING, "vul", image_ref=_image_ref("arvo:368", "vul"), _run=run) == 0
     assert any(c[:3] == ["docker", "rm", "-f"] for c in calls), "hung container not reaped"
 
 
@@ -191,7 +227,8 @@ def test_build_service_starts_and_dispatches():
     (a durable solve store OR opt-out, a gate policy OR opt-out) or the reference
     server raises on startup and cannot serve at all."""
     from cathedral_distill.cybergym_repro_server import build_service
-    svc = build_service(["arvo:368"], private_key=Ed25519PrivateKey.generate())
+    svc = build_service(_manifest(["arvo:368"]), private_key=Ed25519PrivateKey.generate(),
+                        batch_size=1, as_of=NOW)
     msg = svc.dispatch_for("5Miner", MODEL)
     assert msg.batch_id and [t.task_id for t in msg.tasks] == ["arvo:368"]
 
@@ -201,7 +238,7 @@ def test_build_service_default_stores_are_files_not_memory():
     file), so the reference server's zero-config boot has to hand it a real path
     or the shipped server stops booting at all: per-boot temp files."""
     from cathedral_distill.cybergym_repro_server import build_service
-    svc = build_service(["arvo:368"], private_key=Ed25519PrivateKey.generate())
+    svc = build_service(_manifest(["arvo:368"]), private_key=Ed25519PrivateKey.generate())
     score_path = svc._scores._db_path
     assert score_path != ":memory:" and os.path.isfile(score_path)
 
@@ -257,25 +294,26 @@ def test_available_tasks_is_empty_when_docker_is_unavailable():
 # --------------------------------------------------------------------------- #
 
 def test_draw_is_deterministic_in_the_nonce():
-    a = ReproTaskSource(["arvo:368", "arvo:1065", "arvo:10400"])
-    b = ReproTaskSource(["arvo:10400", "arvo:368", "arvo:1065"])  # different input order
+    a = ReproTaskSource(_manifest(["arvo:368", "arvo:1065", "arvo:10400"]))
+    b = ReproTaskSource(_manifest(["arvo:10400", "arvo:368", "arvo:1065"]))
     nonce = "cgnonce-sha256:" + "11" * 32
-    ba = a.draw(size=2, nonce=nonce)
-    bb = b.draw(size=2, nonce=nonce)
+    ba = a.draw(size=2, nonce=nonce, as_of=NOW, cutoff=MANIFEST_CUTOFF)
+    bb = b.draw(size=2, nonce=nonce, as_of=NOW, cutoff=MANIFEST_CUTOFF)
     assert [t.task_id for t in ba.tasks] == [t.task_id for t in bb.tasks]
     assert ba.batch_id == bb.batch_id
     # a different nonce reorders the draw
-    other = a.draw(size=2, nonce="cgnonce-sha256:" + "22" * 32)
+    other = a.draw(size=2, nonce="cgnonce-sha256:" + "22" * 32, as_of=NOW, cutoff=MANIFEST_CUTOFF)
     assert other.batch_id != ba.batch_id
 
 
 def test_context_is_level_gated_metadata_and_artifact_is_the_image():
-    src = ReproTaskSource(["arvo:368"])
+    src = ReproTaskSource(_manifest(["arvo:368"]))
     ctx = src.context_provider("arvo:368")
     assert "use-after-free" in ctx["description"] and "cffparse.c:440" in ctx["sanitizer_trace"]
     # the real repo is delivered as the image (binary_digest), not inline source
     assert src.artifact("arvo:368") is None
-    task = src.draw(size=1, nonce="cgnonce-sha256:" + "33" * 32).tasks[0]
+    task = src.draw(size=1, nonce="cgnonce-sha256:" + "33" * 32,
+                    as_of=NOW, cutoff=MANIFEST_CUTOFF).tasks[0]
     assert task.binary_digest.startswith("sha256:")
 
 
@@ -284,7 +322,7 @@ def test_context_is_level_gated_metadata_and_artifact_is_the_image():
 # --------------------------------------------------------------------------- #
 
 def _service(tmp_path, fake):
-    src = ReproTaskSource(["arvo:368"], backend=fake)
+    src = ReproTaskSource(_manifest(["arvo:368"]), backend=fake)
     chain = ChainContext(block=100, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
                          source_epoch=21, valid_from_block=100, valid_until_block=460)
     return CyberGymService(
@@ -292,7 +330,7 @@ def _service(tmp_path, fake):
         corpus_store=CyberGymCorpusStore(str(tmp_path / "corpus.sqlite")),
         score_store=CyberGymScoreStore(str(tmp_path / "scores.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
-        batch_size=1, cutoff=None, as_of=NOW, attestation_required=False,
+        batch_size=1, cutoff=MANIFEST_CUTOFF, as_of=NOW, attestation_required=False,
         # These tests exercise the reproduce backend: not restart durability (they
         # never restart the service) and not the anti-gaming gates (there is no
         # bundle registry here). Both are now required precisely so that a real

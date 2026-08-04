@@ -313,13 +313,24 @@ def score_batch(
         if sub is not None and sub.result.solved:
             solved += 1
             per_level[int(task.level)] = per_level.get(int(task.level), 0) + 1
-            leaves.append(sub.leaf())
+            # The verified result is meaningful only for the exact vulnerable/fixed
+            # image pair.  Bind the task's pair digest into every leaf so a receipt
+            # cannot retain the same task id and PoC while swapping the judged bytes.
+            leaves.append(
+                hashlib.sha256(
+                    SUBMISSION_DOMAIN + task.binary_digest.encode("ascii") + b"\x00" + sub.leaf()
+                ).digest()
+            )
         else:
             # A missing/unsolved task still commits a leaf, so the root covers the
             # whole batch and a validator can spot-check a claimed *failure* too.
             leaves.append(
                 hashlib.sha256(
-                    SUBMISSION_DOMAIN + task.task_id.encode() + b"\x00unsolved"
+                    SUBMISSION_DOMAIN
+                    + task.binary_digest.encode("ascii")
+                    + b"\x00"
+                    + task.task_id.encode()
+                    + b"\x00unsolved"
                 ).digest()
             )
 

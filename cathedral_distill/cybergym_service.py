@@ -264,6 +264,9 @@ class CyberGymService:
                 str(int(level)): str(w) for level, w in self._weights.items()
             },
             "credit_synthetic_tasks": bool(self._credit_synthetic_tasks),
+            "task_manifest_digest": str(
+                getattr(self.holdout.pool, "manifest_digest", "") or ""
+            ),
             "gates_required": bool(self._gates_required),
             "gate_policy": emission_gate_policy_manifest(self._gate_policy),
         }

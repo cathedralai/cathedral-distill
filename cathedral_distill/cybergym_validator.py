@@ -577,6 +577,7 @@ def run_epoch(
         {signing_key_id: private_key.public_key().public_bytes_raw()}
     )
     results: list[MinerResult] = []
+    task_manifest_digest = str(getattr(pool, "manifest_digest", "") or "")
     for miner in miners:
         nonce = derive_batch_nonce(
             block=chain.block, block_hash=chain.block_hash, network=chain.network,
@@ -609,7 +610,15 @@ def run_epoch(
             batch_score,
             network=chain.network, netuid=chain.netuid, source_epoch=chain.source_epoch,
             validator_hotkey=validator_hotkey, miner_hotkey=miner.miner_hotkey,
-            nonce=nonce, holdout_digest_value=cr.holdout_digest(list(batch.task_ids)),
+            nonce=nonce,
+            # A manifest-backed source provides a digest over every exact task and
+            # vulnerable/fixed image pair.  Generic/synthetic sources retain the
+            # legacy task-id set digest for non-reward test paths.
+            holdout_digest_value=(
+                task_manifest_digest
+                if task_manifest_digest
+                else cr.holdout_digest(list(batch.task_ids))
+            ),
             valid_from_block=chain.valid_from_block, valid_until_block=chain.valid_until_block,
             issued_at=issued_at, private_key=private_key, signing_key_id=signing_key_id,
             level_weights=level_weights,
