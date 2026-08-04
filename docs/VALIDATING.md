@@ -152,35 +152,36 @@ The reference real backend is [`cybergym_repro.py`](../cathedral_distill/cybergy
 the same `draw / context / artifact / backend` interface as the synthetic source,
 so `CyberGymService` runs identically, but wired to the genuine corpus:
 
-- **`docker_reproduce_backend(task_id, poc, mode)`** — the real differential. It
-  maps a task to its prebuilt image (`n132/arvo:{id}-{vul|fix}` running `/bin/arvo`,
-  or `cybergym/oss-fuzz:{id}-{vul|fix}` running `/usr/local/bin/run_poc` — the exact
-  images CyberGym publishes), runs the PoC mounted at `/tmp/poc`, and reports a
-  crash. Drops straight into `CyberGymService(backend=...)`.
-- **`ReproTaskSource(ids)`** — draws a nonce-sealed batch from a real subset;
-  `artifact()` is `None` because the vulnerable repo *is* the image, fetched out of
-  band by `binary_digest`; `context_provider` serves the level-gated description +
-  sanitizer trace.
-- **`available_tasks(ids)`** — the subset whose vul+fix images are actually pulled,
-  so dispatch never hands out a task the verifier can't run.
+- **`docker_reproduce_backend(task_id, poc, mode, manifest=...)`** — the real
+  differential. It executes the task's immutable vulnerable/fixed
+  `repository@sha256:...` references, never a mutable tag, and accepts only the
+  configured sanitizer plus expected process-death evidence.
+- **`ReproTaskSource(manifest)`** — draws a nonce-sealed batch from a private
+  per-epoch manifest. Its evidence digest commits task metadata and both image
+  identities; `artifact()` remains `None` and `context_provider` serves level-gated
+  context.
+- **`available_tasks(manifest)`** — verifies that every exact pinned image needed
+  by a manifest is local before the server starts.
 
 Serve it with the production spine — a `ThreadingHTTPServer` (connections thread so
 a slow verify never refuses sockets), serialised stateful handlers (one Docker
 differential at a time), and a lock-free `GET /healthz`:
 
 ```bash
-# Pull + digest-pin the vul+fix pair for every task, into a manifest (Phase 1.4:
-# a re-pull can't swap the image under a running validator and change a verdict):
-cathedral-cybergym-pull --tasks arvo:368 arvo:10400 --out /srv/cgd/corpus_images.json
+# Pull + inspect the vul+fix pair and create the validator-held private epoch
+# manifest. A re-pull cannot alter its `@sha256` references:
+cathedral-cybergym-pull --tasks arvo:368 arvo:10400 --source-epoch 21 \
+  --disclosed-at 2026-08-04T12:00:00Z --out /srv/cgd/private-repro-manifest.json
 PORT=8666 CYBERGYM_CORPUS_DB=/srv/cgd/corpus.sqlite \
+CYBERGYM_CORPUS_MANIFEST=/srv/cgd/private-repro-manifest.json \
 CYBERGYM_SIGNING_SEED=$(openssl rand -hex 32) \
   python -m cathedral_distill.cybergym_repro_server            # or: cathedral-cybergym-server
 ```
 
-`corpus_images.py` records each image's content digest; `unpinned()` flags any task
-whose vul or fix build did not pull, so a deployment refuses to serve a half-pinned
-task rather than dispatch one the verifier can't run. The verify container itself runs
-`--network none` (egress-deny) — the PoC is adversarial.
+`corpus_images.py` rejects an unpinned pair and writes a private manifest with exact
+vulnerable/fixed digests and disclosure time. The server refuses tag-only or partial
+manifests. The verify container is networkless, non-root, capability-free and
+read-only; Docker's default seccomp profile remains enabled.
 
 The mapping, crash-detection, draw determinism, and the full dispatch→submit→verify
 loop are covered by `tests/test_cybergym_repro.py` with the subprocess runner

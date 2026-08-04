@@ -571,7 +571,14 @@ def run_epoch(
             batch_score,
             network=chain.network, netuid=chain.netuid, source_epoch=chain.source_epoch,
             validator_hotkey=validator_hotkey, miner_hotkey=miner.miner_hotkey,
-            nonce=nonce, holdout_digest_value=cr.holdout_digest(list(batch.task_ids)),
+            # A real-corpus batch supplies a digest of its immutable manifest plus
+            # exact vulnerable/fixed image identities.  Synthetic/general pools
+            # retain the legacy task-id commitment.
+            nonce=nonce,
+            holdout_digest_value=(
+                batch.evidence_digest
+                or cr.holdout_digest(list(batch.task_ids))
+            ),
             valid_from_block=chain.valid_from_block, valid_until_block=chain.valid_until_block,
             issued_at=issued_at, private_key=private_key, signing_key_id=signing_key_id,
             level_weights=level_weights,

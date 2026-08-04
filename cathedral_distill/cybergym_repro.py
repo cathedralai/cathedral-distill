@@ -5,16 +5,14 @@ The hardware-free tests inject a stub backend; THIS is the real one, proven live
 OSS-Fuzz/ARVO Docker builds and returns the differential exit code, and it draws
 challenges from the real corpus.
 
-  * `docker_reproduce_backend` — VERIFY: `(task_id, poc, mode) -> exit_code`. Maps
-    a task to its prebuilt Docker image (`n132/arvo:{id}-{vul|fix}` running
-    `/bin/arvo`, or `cybergym/oss-fuzz:{id}-{vul|fix}` running `/usr/local/bin/run_poc`
-    — the exact images CyberGym uses), runs the PoC mounted at `/tmp/poc`
-    network-isolated (`--network none`, egress-deny — the PoC is adversarial), and
-    reports a crash. Drops into `CyberGymService(backend=...)` in place of the stub.
-  * `ReproTaskSource` — DISTRIBUTE: a draw-capable source over a real subset,
-    nonce-sealed. `artifact()` returns None — the miner fetches the real vulnerable
-    repo out of band by `binary_digest` (the image); `context_provider` serves the
-    level-gated description + sanitizer trace.
+  * `docker_reproduce_backend` — VERIFY: `(task_id, poc, mode) -> exit_code` against
+    the task's exact immutable `repository@sha256:...` image, never a mutable tag.
+    It runs the PoC mounted at `/tmp/poc` in a networkless, non-root, capability-free
+    read-only container and reports only target-specific crash evidence.
+  * `ReproTaskSource` — DISTRIBUTE: a draw-capable source over a validator-held
+    per-epoch private manifest. Its batch evidence digest binds every selected task's
+    metadata and vulnerable/fixed image pair; `artifact()` returns None and
+    `context_provider` serves the level-gated description + sanitizer trace.
 
 The subprocess runner is injected (`_run`) so the mapping + crash-detection logic is
 unit-tested without Docker; the live differential is proven on the challenge box.
@@ -29,8 +27,11 @@ import tempfile
 from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
-from cathedral_distill.cybergym import Level, Task
 from cathedral_distill.cybergym_batch import Batch, batch_id_for
+from cathedral_distill.cybergym_repro_manifest import (
+    PrivateReproManifest,
+    ReproManifestError,
+)
 
 DOCKER_TIMEOUT = 300
 
@@ -191,13 +192,19 @@ def _is_crash(output: str, returncode: int, *, task_id: str) -> bool:
 
 
 def docker_reproduce_backend(task_id: str, poc: bytes, mode: str, *,
+                             manifest: PrivateReproManifest,
                              docker: str = "docker", timeout: int = DOCKER_TIMEOUT,
                              sandbox_flags: Sequence[str] = SANDBOX_FLAGS,
                              _run: Runner = subprocess.run) -> int:
     """Run one PoC against the real vulnerable (mode!='fix') or patched build via
     Docker, network-isolated. Returns nonzero iff the build crashes on the PoC — the
     differential signal `verify_poc` composes into solved = crash-vuln AND clean-patch."""
-    image, cmd = _image_and_command(task_id, mode)
+    try:
+        pinned_task = manifest.task(task_id)
+    except ReproManifestError as exc:
+        raise ReproError(str(exc)) from exc
+    image = pinned_task.fixed_image if mode == "fix" else pinned_task.vulnerable_image
+    _, cmd = _image_and_command(task_id, mode)
     fd, path = tempfile.mkstemp()
     name = "cgverify-" + os.path.basename(path)
     try:
@@ -231,21 +238,25 @@ def docker_reproduce_backend(task_id: str, poc: bytes, mode: str, *,
             pass
 
 
-def available_tasks(ids: Sequence[str], *, docker: str = "docker",
+def available_tasks(manifest: PrivateReproManifest, *, docker: str = "docker",
                     _run: Runner = subprocess.run) -> list[str]:
-    """The subset whose vul+fix images are actually present locally (so dispatch
-    never hands out a task the verifier can't run yet)."""
-    try:
-        have = _run([docker, "images", "--format", "{{.Repository}}:{{.Tag}}"],
-                    capture_output=True, timeout=30).stdout.decode("utf-8", "replace")
-    except (subprocess.SubprocessError, OSError):
-        return []
-    out = []
-    for t in ids:
-        image, _ = _image_and_command(t, "vul")
-        image_fix, _ = _image_and_command(t, "fix")
-        if image in have and image_fix in have:
-            out.append(t)
+    """Pinned tasks whose exact vulnerable and fixed images are available locally.
+
+    ``docker image inspect repo@sha256:...`` checks the same immutable reference
+    the verifier will execute; listing tags would allow a mutable tag to masquerade
+    as the manifest's bytes.
+    """
+    out: list[str] = []
+    for task in manifest.tasks:
+        try:
+            vul = _run([docker, "image", "inspect", task.vulnerable_image],
+                       capture_output=True, timeout=30)
+            fixed = _run([docker, "image", "inspect", task.fixed_image],
+                         capture_output=True, timeout=30)
+        except (subprocess.SubprocessError, OSError):
+            continue
+        if vul.returncode == 0 and fixed.returncode == 0:
+            out.append(task.task_id)
     return out
 
 
@@ -262,31 +273,62 @@ class ReproTaskSource:
     miner pulls (no inline source), so `artifact()` returns None.
     """
 
-    def __init__(self, ids: Sequence[str], *, metadata: Mapping[str, dict] = REPRO_SUBSET,
-                 backend: Runner = subprocess.run) -> None:
-        self.ids = list(ids)
-        self._meta = metadata
+    def __init__(self, manifest: PrivateReproManifest, *, backend: Runner = subprocess.run) -> None:
+        if not isinstance(manifest, PrivateReproManifest):
+            raise ReproError(
+                "ReproTaskSource requires a private digest-pinned repro manifest; "
+                "tag-only task lists are not dispatchable"
+            )
+        self.manifest = manifest
+        self.ids = [task.task_id for task in manifest.tasks]
         self._run = backend
 
     def draw(self, *, size: int, nonce: str, as_of=None, cutoff=None) -> Batch:
-        order = sorted(self.ids, key=lambda t: hashlib.sha256((nonce + t).encode()).hexdigest())
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            raise ReproError("batch size must be a positive integer")
+        if not nonce:
+            raise ReproError("a batch draw requires a nonce")
+        eligible = self.manifest.tasks
+        if cutoff is not None:
+            if as_of is None:
+                raise ReproError("a private holdout draw requires as_of with cutoff")
+            if cutoff > as_of:
+                raise ReproError("cutoff cannot be after as_of")
+            eligible = tuple(
+                task for task in eligible if cutoff < task.disclosed_at <= as_of
+            )
+        if len(eligible) < size:
+            raise ReproError(
+                f"only {len(eligible)} private manifest tasks available; need {size}"
+            )
+        order = sorted(
+            eligible, key=lambda task: hashlib.sha256((nonce + task.task_id).encode()).hexdigest()
+        )
         picked = order[:size]
         tasks = tuple(
-            Task(task_id=t, level=Level(int(self._meta.get(t, {}).get("level", 0))),
-                 binary_digest=_digest(_image_and_command(t, "vul")[0]))
-            for t in picked)
-        return Batch(batch_id=batch_id_for(nonce, [t.task_id for t in tasks]), nonce=nonce, tasks=tasks)
+            task.to_task()
+            for task in picked)
+        task_ids = [task.task_id for task in tasks]
+        return Batch(
+            batch_id=batch_id_for(nonce, task_ids),
+            nonce=nonce,
+            tasks=tasks,
+            evidence_digest=self.manifest.batch_evidence_digest(task_ids),
+        )
 
     def context_provider(self, task_id: str) -> Mapping[str, str]:
-        m = self._meta.get(task_id, {})
-        return {"description": str(m.get("description", "")),
-                "sanitizer_trace": str(m.get("sanitizer_trace", ""))}
+        try:
+            return dict(self.manifest.task(task_id).context)
+        except ReproManifestError as exc:
+            raise ReproError(str(exc)) from exc
 
     def artifact(self, task_id: str):
         return None  # the real repo is the image; the miner fetches it by binary_digest
 
     def backend(self, task_id: str, poc: bytes, mode: str) -> int:
-        return docker_reproduce_backend(task_id, poc, mode, _run=self._run)
+        return docker_reproduce_backend(
+            task_id, poc, mode, manifest=self.manifest, _run=self._run
+        )
 
 
 __all__ = [
