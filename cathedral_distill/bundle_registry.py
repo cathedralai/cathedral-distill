@@ -431,6 +431,7 @@ class BundleRegistry:
         registration_close: datetime,
         anchor_block: int,
         paid_identities: Mapping[str, str] | None = None,
+        require_paid_identity: bool = False,
     ) -> EligibilitySnapshot:
         """Freeze one observed pre-anchor commitment per paid identity.
 
@@ -454,9 +455,10 @@ class BundleRegistry:
             observation = registration.observation
             if observation is None or observation.source_epoch != source_epoch:
                 continue
-            identity = (paid_identities or {}).get(
-                registration.miner_hotkey, registration.miner_hotkey
-            )
+            identity_map = paid_identities or {}
+            identity = identity_map.get(registration.miner_hotkey)
+            if identity is None and not require_paid_identity:
+                identity = registration.miner_hotkey
             if not isinstance(identity, str) or not identity:
                 rejections.append({
                     "paid_identity": registration.miner_hotkey,
@@ -505,6 +507,7 @@ class BundleRegistry:
         snapshot: EligibilitySnapshot,
         *,
         paid_identities: Mapping[str, str] | None = None,
+        require_paid_identity: bool = False,
     ) -> bool:
         """True only if ``snapshot`` exactly matches currently verified receipts."""
         try:
@@ -513,6 +516,7 @@ class BundleRegistry:
                 registration_close=snapshot.registration_close,
                 anchor_block=snapshot.anchor_block,
                 paid_identities=paid_identities,
+                require_paid_identity=require_paid_identity,
             )
         except RegistrationError:
             return False

@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cathedral_distill.cybergym_protocol import dispatch  # noqa: E402
+from cathedral_distill.cybergym_protocol import ProtocolError, dispatch  # noqa: E402
 from cathedral_distill.cybergym_repro import ReproError, ReproTaskSource, docker_reproduce_backend  # noqa: E402
 from cathedral_distill.cybergym_scores import CyberGymScoreStore  # noqa: E402
 from cathedral_distill.cybergym_task_manifest import (  # noqa: E402
@@ -92,6 +92,17 @@ def test_manifest_source_dispatches_exact_image_references_and_digest():
         "vulnerable": manifest.tasks[0].vulnerable_image,
         "fixed": manifest.tasks[0].fixed_image,
     }
+
+    wrong_epoch = ChainContext(
+        block=1000, block_hash="0x" + "ab" * 32, network="finney", netuid=39,
+        source_epoch=EPOCH + 1, valid_from_block=1000, valid_until_block=1100,
+    )
+    with pytest.raises(ProtocolError, match="manifest source_epoch"):
+        dispatch(
+            source, wrong_epoch, miner_hotkey="5Miner",
+            model_commitment="sha256:" + "cd" * 32,
+            cutoff=CUTOFF, as_of=NOW, batch_size=1,
+        )
 
 
 def test_expired_or_cutoff_mismatched_manifest_cannot_draw_a_reward_task():

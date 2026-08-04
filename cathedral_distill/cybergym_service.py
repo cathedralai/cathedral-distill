@@ -29,6 +29,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral_distill.attestation import AttestationPolicy
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level
+from cathedral_distill.cybergym_batch import derive_common_batch_nonce
 from cathedral_distill.cybergym_holdout import Holdout
 from cathedral_distill.cybergym_protocol import (
     DispatchMessage,
@@ -215,7 +216,10 @@ class CyberGymService:
         self._credit_synthetic_tasks = credit_synthetic_tasks
         self._max_verification_attempts_per_task = max_verification_attempts_per_task
         self._miners: dict[str, _MinerState] = {}
-        self._by_batch: dict[str, str] = {}  # batch_id -> miner_hotkey
+        # A reward epoch uses one common task batch, so a batch can be owned by
+        # several separately authenticated miners.  Keep every owner instead of
+        # overwriting the first one (which would otherwise misroute submissions).
+        self._by_batch: dict[str, set[str]] = {}
         self._dispatched: set[str] = set()  # task_ids actually served this epoch
         self._results: list[MinerResult] = []
         self._scored_miners: set[str] = set()  # miners this process actually scored
@@ -378,12 +382,14 @@ class CyberGymService:
             self._gate_policy.require_registered_bundle
             or self._gate_policy.require_no_contamination
         ):
-            identity = (self._gate_policy.paid_identities or {}).get(
-                miner_hotkey, miner_hotkey
-            )
+            identity = (self._gate_policy.paid_identities or {}).get(miner_hotkey)
+            if identity is None and not self._gate_policy.require_paid_identity:
+                identity = miner_hotkey
             snapshot = self._gate_policy.eligibility_snapshot
             if (
                 snapshot is None
+                or not isinstance(identity, str)
+                or not identity
                 or not snapshot.permits(
                     miner_hotkey=miner_hotkey,
                     model_commitment=model_commitment,
@@ -430,6 +436,18 @@ class CyberGymService:
                 f"different commitment ({model_commitment}) would re-draw the sealed "
                 "batch, so it is refused for the rest of the epoch"
             )
+        common_nonce = (
+            derive_common_batch_nonce(
+                block=self.chain.block,
+                block_hash=self.chain.block_hash,
+                network=self.chain.network,
+                netuid=self.chain.netuid,
+                source_epoch=self.chain.source_epoch,
+            )
+            if self._gate_policy is not None
+            and self._gate_policy.require_common_batch
+            else None
+        )
         message = dispatch(
             self.holdout.pool,
             self.chain,
@@ -439,6 +457,7 @@ class CyberGymService:
             as_of=self._as_of,
             batch_size=self._batch_size,
             context_provider=self.holdout.context_provider,
+            nonce=common_nonce,
         )
         # A repeat dispatch must not silently erase accepted solves. Same committed
         # model -> same nonce -> same batch, so the solves already accepted this
@@ -467,7 +486,7 @@ class CyberGymService:
                         f"{previous.model_commitment} were abandoned",
                     )
             self._miners[miner_hotkey] = _MinerState(model_commitment, message)
-        self._by_batch[message.batch_id] = miner_hotkey
+        self._by_batch.setdefault(message.batch_id, set()).add(miner_hotkey)
         self._dispatched.update(t.task_id for t in message.tasks)
         return message
 
@@ -492,10 +511,11 @@ class CyberGymService:
         a solve of a non-rewardable task reports zero here as well as at emission, so
         the wire and the reward agree.
         """
-        miner_hotkey = self._by_batch.get(envelope.batch_id)
-        if miner_hotkey is None:
+        owners = self._by_batch.get(envelope.batch_id)
+        if owners is None:
             raise ProtocolError("submission references an unknown or expired batch")
-        if envelope.miner_hotkey != miner_hotkey:
+        miner_hotkey = envelope.miner_hotkey
+        if miner_hotkey not in owners:
             raise ProtocolError("submission hotkey does not own this batch")
         if authenticated_caller is not None and authenticated_caller != miner_hotkey:
             raise ProtocolError("authenticated caller does not own this batch")
@@ -609,14 +629,19 @@ class CyberGymService:
         if not isinstance(batch_id, str) or not batch_id:
             return {"error": "batch_id is required"}
         try:
-            miner_hotkey = self._by_batch.get(batch_id)
-            if miner_hotkey is None:
+            owners = self._by_batch.get(batch_id)
+            if owners is None:
                 raise ProtocolError("artifact references an unknown or expired batch")
-            if (
-                authenticated_caller is not None
-                and authenticated_caller != miner_hotkey
-            ):
-                raise ProtocolError("authenticated caller does not own this batch")
+            if authenticated_caller is None:
+                if len(owners) != 1:
+                    raise ProtocolError(
+                        "artifact access for a common batch requires an authenticated caller"
+                    )
+                miner_hotkey = next(iter(owners))
+            else:
+                if authenticated_caller not in owners:
+                    raise ProtocolError("authenticated caller does not own this batch")
+                miner_hotkey = authenticated_caller
             if self._miners[miner_hotkey].dispatch.task(task_id) is None:
                 raise ProtocolError("artifact task is not in this batch")
             return {"task_id": task_id, "program": self.artifact_for(task_id)}

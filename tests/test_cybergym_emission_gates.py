@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -146,11 +147,26 @@ def _registry(*, hotkey=MINER, digest=COMMITMENT, registered_at=None, observed_a
     return registry
 
 
-def _run(store, policy, *, miners=None, gates_required=True):
+def _run(store, policy, *, miners=None, gates_required=True, with_identity=True):
     commits = miners or [
         cv.MinerCommit(miner_hotkey=MINER, model_commitment=COMMITMENT,
                        pocs={"arvo:1": b"poc-1"}),
     ]
+    # Every normal test fixture represents a configured paid-identity registry.
+    # Individual identity-gate tests pass an explicit map (or absence) themselves.
+    if (
+        with_identity
+        and policy is not None
+        and policy.require_paid_identity
+        and not policy.paid_identities
+    ):
+        policy = replace(
+            policy,
+            paid_identities={
+                commit.miner_hotkey: f"coldkey:{commit.miner_hotkey}"
+                for commit in commits
+            },
+        )
     return cv.run_epoch(
         commits, _pool(), _chain(), validator_hotkey="5Validator", private_key=KEY,
         signing_key_id="cybergym-1", backend=_backend, score_store=store,
@@ -219,6 +235,20 @@ def test_no_bundle_registry_at_all_fails_closed(tmp_path):
     store = _store(tmp_path)
     results = _run(store, cv.EmissionGatePolicy())
     assert fr.GATE_REGISTERED_BUNDLE in results[0].gate_failures
+    assert store.epoch_scores(SOURCE_EPOCH) == {}
+
+
+def test_missing_paid_identity_fails_closed_before_credit(tmp_path):
+    store = _store(tmp_path)
+    result = _run(
+        store,
+        cv.EmissionGatePolicy(bundle_registry=_registry(), paid_identities={}),
+        with_identity=False,
+    )[0]
+    assert set(result.gate_failures) == {
+        fr.GATE_REGISTERED_BUNDLE,
+        fr.GATE_NO_CONTAMINATION,
+    }
     assert store.epoch_scores(SOURCE_EPOCH) == {}
 
 
@@ -308,7 +338,8 @@ def test_required_reproduction_is_not_satisfied_by_the_validators_own_receipt(tm
         [cv.MinerCommit(miner_hotkey=MINER, model_commitment=COMMITMENT, pocs={"arvo:1": b"poc-1"})],
         _pool(), _chain(), validator_hotkey="5PeerValidator", private_key=PEER_KEY,
         signing_key_id="cybergym-peer-1", backend=_backend, score_store=peer_store,
-        cutoff=CUTOFF, as_of=NOW, issued_at=ISSUED, batch_size=2, gates_required=False,
+        cutoff=CUTOFF, as_of=NOW, issued_at=ISSUED, batch_size=2,
+        gate_policy=cv.EmissionGatePolicy(bundle_registry=_registry()),
     )[0].receipt
     from cathedral_distill.receipt_keys import ReceiptKeyRegistry
     peer_registry = ReceiptKeyRegistry.from_keys(
@@ -471,6 +502,21 @@ def test_one_gated_miner_does_not_stop_the_others(tmp_path):
     assert store.epoch_scores(SOURCE_EPOCH) == {MINER: Decimal("8")}
     # both receipts still exist for audit; only one was paid
     assert all(r.receipt["schema"] for r in results)
+
+
+def test_reward_mode_uses_one_common_batch_even_for_different_commitments(tmp_path):
+    """The paid path must not give each hotkey an independent task lottery."""
+    bob_commitment = _dg("bob-checkpoint")
+    results = _run(
+        _store(tmp_path),
+        cv.EmissionGatePolicy(bundle_registry=_registry()),
+        miners=[
+            cv.MinerCommit(miner_hotkey=MINER, model_commitment=COMMITMENT, pocs={}),
+            cv.MinerCommit(miner_hotkey="5Bob", model_commitment=bob_commitment, pocs={}),
+        ],
+    )
+    assert len({result.batch.batch_id for result in results}) == 1
+    assert len({result.batch.nonce for result in results}) == 1
 
 
 def test_a_gated_miner_earns_nothing_through_the_returned_contribution_either(tmp_path):

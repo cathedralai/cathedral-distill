@@ -142,6 +142,7 @@ def dispatch(
     as_of,
     batch_size: int,
     context_provider: Callable[[str], Mapping[str, str]] | None = None,
+    nonce: str | None = None,
 ) -> DispatchMessage:
     """Draw this miner's sealed batch and serve only its level-appropriate context.
 
@@ -157,7 +158,12 @@ def dispatch(
     `cybergym_synthetic.SyntheticTaskSource` (nonce-generated, unlimited,
     never in any public dataset) both satisfy it identically.
     """
-    nonce = derive_batch_nonce(
+    manifest_epoch = getattr(pool, "source_epoch", None)
+    if manifest_epoch is not None and int(manifest_epoch) != int(chain.source_epoch):
+        raise ProtocolError(
+            "immutable task manifest source_epoch does not match the chain epoch"
+        )
+    batch_nonce = nonce or derive_batch_nonce(
         block=chain.block,
         block_hash=chain.block_hash,
         network=chain.network,
@@ -166,7 +172,7 @@ def dispatch(
         miner_hotkey=miner_hotkey,
         model_commitment=model_commitment,
     )
-    batch = pool.draw(size=batch_size, nonce=nonce, as_of=as_of, cutoff=cutoff)
+    batch = pool.draw(size=batch_size, nonce=batch_nonce, as_of=as_of, cutoff=cutoff)
     tasks: list[DispatchedTask] = []
     image_references = getattr(pool, "image_references", None)
     manifest_digest = str(getattr(pool, "manifest_digest", "") or "")
@@ -193,7 +199,7 @@ def dispatch(
         netuid=chain.netuid,
         source_epoch=chain.source_epoch,
         batch_id=batch.batch_id,
-        nonce=nonce,
+        nonce=batch_nonce,
         miner_hotkey=miner_hotkey,
         model_commitment=model_commitment,
         valid_from_block=chain.valid_from_block,

@@ -28,7 +28,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cathedral_distill import cybergym_receipt as cr
 from cathedral_distill.bundle_registry import EligibilitySnapshot, RegistrationError
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level, PoCSubmission, score_batch
-from cathedral_distill.cybergym_batch import Batch, TaskPool, derive_batch_nonce
+from cathedral_distill.cybergym_batch import (
+    Batch,
+    TaskPool,
+    derive_batch_nonce,
+    derive_common_batch_nonce,
+)
 from cathedral_distill.cybergym_scores import CyberGymScoreStore
 from cathedral_distill.cybergym_synthetic import is_synthetic_task
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
@@ -151,6 +156,13 @@ class EmissionGatePolicy:
     require_no_contamination: bool = True
     require_reproduction: bool = False
     require_independent_evaluator: bool = False
+    # Reward-bearing epochs compare capability on one post-anchor task set.  The
+    # compatibility escape hatch is explicit for non-paying tests only.
+    require_common_batch: bool = True
+    # A hotkey is cheap to multiply.  Reward mode requires an externally
+    # registered coldkey or attested-platform identity for every participant;
+    # unknown identities fail closed rather than falling back to hotkey.
+    require_paid_identity: bool = True
 
 
 def freeze_emission_gate_policy(
@@ -180,13 +192,16 @@ def freeze_emission_gate_policy(
             registration_close=policy.commitment_deadline or commitment_cutoff,
             anchor_block=anchor_block,
             paid_identities=policy.paid_identities,
+            require_paid_identity=policy.require_paid_identity,
         )
     except (RegistrationError, ValueError, TypeError) as exc:
         raise EmissionGateError("could not freeze observed registration eligibility") from exc
     if policy.eligibility_snapshot is not None:
         verifier = getattr(policy.bundle_registry, "verify_eligibility_snapshot", None)
         if not callable(verifier) or not verifier(
-            policy.eligibility_snapshot, paid_identities=policy.paid_identities
+            policy.eligibility_snapshot,
+            paid_identities=policy.paid_identities,
+            require_paid_identity=policy.require_paid_identity,
         ):
             raise EmissionGateError("provided eligibility snapshot is not verified")
         if policy.eligibility_snapshot.as_dict() != snapshot.as_dict():
@@ -300,6 +315,8 @@ def emission_gate_policy_manifest(
         "require_independent_evaluator": bool(
             policy.require_independent_evaluator
         ),
+        "require_common_batch": bool(policy.require_common_batch),
+        "require_paid_identity": bool(policy.require_paid_identity),
         "commitment_deadline": (
             policy.commitment_deadline.isoformat()
             if policy.commitment_deadline is not None
@@ -348,7 +365,9 @@ def evaluate_emission_gates(
         except Exception:  # noqa: BLE001 - unreadable evidence is a gate failure
             return None
 
-    paid_identity = (policy.paid_identities or {}).get(miner_hotkey, miner_hotkey)
+    paid_identity = (policy.paid_identities or {}).get(miner_hotkey)
+    if paid_identity is None and not policy.require_paid_identity:
+        paid_identity = miner_hotkey
     snapshot = policy.eligibility_snapshot
     observed_eligible = bool(
         isinstance(paid_identity, str)
@@ -578,8 +597,24 @@ def run_epoch(
     )
     results: list[MinerResult] = []
     task_manifest_digest = str(getattr(pool, "manifest_digest", "") or "")
+    manifest_epoch = getattr(pool, "source_epoch", None)
+    if manifest_epoch is not None and int(manifest_epoch) != int(chain.source_epoch):
+        raise EmissionGateError(
+            "immutable task manifest source_epoch does not match the chain epoch"
+        )
+    common_nonce = (
+        derive_common_batch_nonce(
+            block=chain.block,
+            block_hash=chain.block_hash,
+            network=chain.network,
+            netuid=chain.netuid,
+            source_epoch=chain.source_epoch,
+        )
+        if gate_policy is not None and gate_policy.require_common_batch
+        else None
+    )
     for miner in miners:
-        nonce = derive_batch_nonce(
+        nonce = common_nonce or derive_batch_nonce(
             block=chain.block, block_hash=chain.block_hash, network=chain.network,
             netuid=chain.netuid, source_epoch=chain.source_epoch,
             miner_hotkey=miner.miner_hotkey, model_commitment=miner.model_commitment,

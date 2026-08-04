@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -170,6 +171,10 @@ def _service(
     gates_required: bool = False,
 ):
     """A service over the SAME storage every time, so a new one is a restart."""
+    if gate_policy is not None and gate_policy.require_paid_identity and not gate_policy.paid_identities:
+        gate_policy = replace(
+            gate_policy, paid_identities={"5Miner": "coldkey:5Miner"}
+        )
     kwargs = {}
     if durable:
         kwargs["solve_store"] = CyberGymSolveStore(str(tmp_path / "solves.sqlite"))
@@ -601,6 +606,33 @@ def test_a_recommit_cannot_be_used_to_grind_the_sealed_batch(tmp_path):
     # and the batch it is held to is the one it was originally sealed to
     still = service.dispatch_for("5Grinder", MODEL, authenticated_caller="5Grinder")
     assert still.batch_id == honest.batch_id
+
+
+def test_common_batch_tracks_all_owners_and_requires_artifact_authentication(tmp_path):
+    """A common reward batch must not overwrite the first miner's ownership."""
+    service = _service(
+        tmp_path,
+        durable=True,
+        gate_policy=EmissionGatePolicy(
+            require_registered_bundle=False,
+            require_no_contamination=False,
+            require_common_batch=True,
+            require_paid_identity=False,
+        ),
+        gates_required=True,
+    )
+    alice = service.dispatch_for("5Miner", MODEL)
+    bob = service.dispatch_for("5Bob", OTHER_MODEL)
+    assert alice.batch_id == bob.batch_id
+    assert service._by_batch[alice.batch_id] == {"5Miner", "5Bob"}
+
+    anonymous = service.handle_artifact({"batch_id": alice.batch_id, "task_id": "arvo:1"})
+    assert "requires an authenticated caller" in anonymous["error"]
+    authenticated = service.handle_artifact(
+        {"batch_id": alice.batch_id, "task_id": "arvo:1"},
+        authenticated_caller="5Miner",
+    )
+    assert "requires an authenticated caller" not in authenticated["error"]
 
 
 def test_the_commitment_pin_survives_a_restart(tmp_path):
