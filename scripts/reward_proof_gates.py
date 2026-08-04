@@ -2,9 +2,9 @@
 """The five reward-proof gates for activating CyberGym rewards, in one recorded run.
 
 From cathedral-distill#41: CyberGym rewards may not be activated until ONE recorded
-run proves every step below end to end. This is the owner's go/no-go for the re-pin,
-not a test — and its ONLY dangerous failure mode is a false PASS, so every gate here
-demands direct evidence and refuses to self-certify from anything weaker.
+run proves every step below end to end. This is the go/no-go for the re-pin, not a
+test — and its ONLY dangerous failure mode is a false PASS, so every gate here demands
+direct evidence and refuses to self-certify from anything weaker.
 
     1. Production transport delivers a fresh, complete CyberGym score backed by a
        result-bound Intel TDX receipt for a REAL-CORPUS solve.
@@ -18,17 +18,18 @@ demands direct evidence and refuses to self-certify from anything weaker.
        without operator bypasses.
 
 Design, in response to review of #59:
-  * No gate passes on counts or an unread flag. Gate 1 verifies an actual attested
-    receipt (verify_cathedral_attestation) for a NON-synthetic task; gate 2 checks
-    the feed's key_id against an expected value and the miner's lane weight; gates 3
-    and 5 consume EVIDENCE FILES a validator/external operator produced, so
-    `ALL FIVE PROVEN` is reachable — but only with that evidence attached.
+  * No gate passes on counts, an unread flag, a trusted-issuer assertion, or an
+    operator-supplied scalar. Gate 1 verifies an actual attested receipt
+    (verify_cathedral_attestation) for a NON-synthetic task; gate 2 checks the
+    feed's key_id against an expected value and the miner's lane weight. Gates 3
+    and 5 remain BLOCKED until their independently verifiable evidence formats and
+    trust roots are configured.
   * The intended miner (hotkey AND uid) and the full run context (endpoints,
     network, netuid, evaluation time) are bound into every gate and the transcript.
-  * A gate with no evidence is BLOCKED (owner action outstanding), never a silent
+  * A gate with no independently verifiable evidence is BLOCKED, never a silent
     PASS; a gate with contradicting evidence is FAIL.
 
-Usage (all evidence present -> can go green):
+Usage (records the current proof state; unverifiable evidence stays BLOCKED):
     python scripts/reward_proof_gates.py \
         --miner 5CyberMiner --miner-uid 42 \
         --publisher https://api.cathedral.computer --expect-key-id cathedral-weight-policy \
@@ -126,6 +127,10 @@ def gate1_score_backed_by_tdx(args) -> Gate:
     if receipt_hotkey and receipt_hotkey != args.miner:
         return g.set(FAIL, f"receipt is for {receipt_hotkey!r}, not the intended "
                            f"miner {args.miner!r}")
+    if not att.trustless:
+        return g.set(BLOCKED, "receipt is a trusted-issuer assertion; gate 1 needs "
+                              "an independently verified raw TDX quote and canonical "
+                              "artifacts-list binding before it can pass")
     return g.set(PASS, f"attested {att.tee} solve of {args.receipt_task} bound to "
                        f"{args.miner} (receipt {att.receipt_id[:12]}…"
                        f"{', trustless' if att.trustless else ''})")
@@ -169,8 +174,9 @@ def gate2_feed_has_miner_and_burn(args) -> Gate:
 def gate3_validator_accepts_and_submits(args) -> Gate:
     """A v3-pinned validator accepted the vector AND wrote weights on chain.
 
-    Evidence: the JSON transcript from assert_live_v3_contract.py (validator repo)
-    showing acceptance, plus the block at which the validator wrote weights.
+    The current local acceptance transcript and a caller-supplied block number are
+    diagnostic only. This gate remains blocked until it receives independently
+    verifiable finalized-chain evidence.
     """
     g = Gate(3, "canonical validator accepts the v3 vector and writes on chain")
     acc = _load_json(args.validator_acceptance)
@@ -186,12 +192,13 @@ def gate3_validator_accepts_and_submits(args) -> Gate:
         return g.set(FAIL, f"acceptance is for {acc.get('accepted_by')!r}, not "
                            "validated_supply_v3")
     if args.validator_wrote_block is None:
-        return g.set(BLOCKED, "acceptance confirmed; pass --validator-wrote-block "
-                              "<n> to record the on-chain weight write that proves "
-                              "it submitted, not just accepted")
-    return g.set(PASS, f"v3 vector accepted ({acc.get('uids_weighted')} uids, sum "
-                       f"{acc.get('weight_sum')}) and weights written at block "
-                       f"{args.validator_wrote_block}")
+        return g.set(BLOCKED, "acceptance confirmed, but no independently verified "
+                              "finalized-chain write proof is supplied")
+    return g.set(BLOCKED, f"v3 vector was accepted ({acc.get('uids_weighted')} uids, "
+                          f"sum {acc.get('weight_sum')}), but --validator-wrote-block "
+                          f"{args.validator_wrote_block} is caller-supplied and cannot "
+                          "prove a finalized chain write; require signed, independently "
+                          "queried chain evidence")
 
 
 def gate4_chain_shows_emission(args) -> Gate:
@@ -234,8 +241,7 @@ def gate5_external_miner(args) -> Gate:
         status, _ = _get(f"{args.publisher}/v1/release/release.json", timeout=15)
         if status != 200:
             return g.set(BLOCKED, f"release.json HTTP {status}: no external miner can "
-                                  "install an engine yet (owner ceremony — publish + "
-                                  "sign release.json)")
+                                  "install an engine yet (publish and sign release.json)")
         return g.set(BLOCKED, "release is published, but gate 5 needs a transcript "
                               "from a REAL external operator (--external-miner-"
                               "transcript); it cannot be self-certified")
@@ -248,8 +254,9 @@ def gate5_external_miner(args) -> Gate:
     if not (ext.get("installed_signed_release") and ext.get("completed_without_bypass")):
         return g.set(FAIL, "the external transcript does not attest a clean "
                            "install->test path without operator bypass")
-    return g.set(PASS, f"external operator {ext_hotkey[:12]}… installed the signed "
-                       "release and completed the path")
+    return g.set(BLOCKED, f"external transcript names {ext_hotkey[:12]}…, but it is "
+                          "unsigned and unbound to a release digest; configure a trusted "
+                          "external-attestor signature verifier before gate 5 can pass")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -266,7 +273,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--receipt-poc-sha256")
     p.add_argument("--receipt-trace-id")
     p.add_argument("--validator-acceptance", help="assert_live_v3_contract.py --json output")
-    p.add_argument("--validator-wrote-block", type=int, default=None)
+    p.add_argument("--validator-wrote-block", type=int, default=None,
+                   help="diagnostic only; a caller-supplied block number never proves a chain write")
     p.add_argument("--external-miner-transcript")
     p.add_argument("--out", help="write the transcript JSON here")
     args = p.parse_args(argv)

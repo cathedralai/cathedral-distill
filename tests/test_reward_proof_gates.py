@@ -1,5 +1,5 @@
 """The reward-proof harness must be honest: PROVEN only when all five hold, with
-evidence, and never a false pass (review of #59).
+independently verifiable evidence, and never a false pass (review of #59).
 
 Tests the gate logic with network calls and receipt verification mocked; the live
 behaviour is exercised by running it against the real feed/box.
@@ -57,13 +57,13 @@ def test_gate1_refuses_a_synthetic_task(monkeypatch, tmp_path):
     assert g.status == rpg.FAIL and "synthetic" in g.detail
 
 
-def test_gate1_passes_with_a_genuine_attested_real_corpus_receipt(tmp_path):
+def test_gate1_blocks_a_trusted_issuer_receipt_until_the_raw_quote_is_verified(tmp_path):
     import json as _json
     r = tmp_path / "r.json"; r.write_text(_json.dumps(_tdx_receipt()))
     g = rpg.gate1_score_backed_by_tdx(_args(
         attested_receipt=str(r), receipt_task=REAL_TASK,
         receipt_poc_sha256=POC, receipt_trace_id=TRACE))
-    assert g.status == rpg.PASS and REAL_TASK in g.detail
+    assert g.status == rpg.BLOCKED and "trusted-issuer" in g.detail
 
 
 def test_gate1_fails_a_receipt_for_a_different_miner(tmp_path):
@@ -114,14 +114,53 @@ def test_gate3_fails_a_rejection_transcript(tmp_path):
     assert g.status == rpg.FAIL and "did NOT accept" in g.detail
 
 
-def test_gate3_passes_with_acceptance_and_a_write_block(tmp_path):
+def test_gate3_blocks_acceptance_without_a_finalized_write_proof(tmp_path):
+    import json as _json
+    a = tmp_path / "a.json"
+    a.write_text(_json.dumps({"ok": True, "accepted_by": "validated_supply_v3",
+                              "uids_weighted": 4, "weight_sum": 1.0}))
+    g = rpg.gate3_validator_accepts_and_submits(_args(validator_acceptance=str(a)))
+    assert g.status == rpg.BLOCKED and "finalized-chain" in g.detail
+
+
+def test_gate3_blocks_a_caller_supplied_write_block(tmp_path):
     import json as _json
     a = tmp_path / "a.json"
     a.write_text(_json.dumps({"ok": True, "accepted_by": "validated_supply_v3",
                               "uids_weighted": 4, "weight_sum": 1.0}))
     g = rpg.gate3_validator_accepts_and_submits(
         _args(validator_acceptance=str(a), validator_wrote_block=8801234))
-    assert g.status == rpg.PASS and "8801234" in g.detail
+    assert g.status == rpg.BLOCKED and "caller-supplied" in g.detail
+
+
+# --- gate 4: finalized-chain reward state ------------------------------------ #
+def _install_chain(monkeypatch, *, hotkey="5CyberMiner", incentive=0.5, emission=0.7):
+    class _MG:
+        hotkeys = ["x"] * 42 + [hotkey]
+        I = [0.0] * 42 + [incentive]
+        E = [0.0] * 42 + [emission]
+
+    class _ST:
+        def __init__(self, network):
+            self.network = network
+
+        def metagraph(self, netuid, lite):
+            return _MG()
+
+    monkeypatch.setitem(__import__("sys").modules, "bittensor.core.subtensor",
+                        SimpleNamespace(Subtensor=_ST))
+
+
+def test_gate4_fails_when_the_finalized_row_has_zero_emission(monkeypatch):
+    _install_chain(monkeypatch, emission=0.0)
+    g = rpg.gate4_chain_shows_emission(_args())
+    assert g.status == rpg.FAIL and "not yet paid" in g.detail
+
+
+def test_gate4_fails_when_uid_no_longer_belongs_to_miner(monkeypatch):
+    _install_chain(monkeypatch, hotkey="5DifferentMiner")
+    g = rpg.gate4_chain_shows_emission(_args())
+    assert g.status == rpg.FAIL and "binding is stale" in g.detail
 
 
 # --- gate 5: cannot self-certify --------------------------------------------- #
@@ -147,18 +186,18 @@ def test_gate5_rejects_our_own_hotkey_as_external(tmp_path):
     assert g.status == rpg.FAIL and "DIFFERENT operator" in g.detail
 
 
-def test_gate5_passes_with_a_genuine_external_transcript(tmp_path):
+def test_gate5_blocks_an_unsigned_external_transcript(tmp_path):
     import json as _json
     e = tmp_path / "e.json"
     e.write_text(_json.dumps({"miner_hotkey": "5ExternalParty",
                               "installed_signed_release": True,
                               "completed_without_bypass": True}))
     g = rpg.gate5_external_miner(_args(external_miner_transcript=str(e)))
-    assert g.status == rpg.PASS
+    assert g.status == rpg.BLOCKED and "unsigned" in g.detail
 
 
-# --- the whole run: green is reachable, and the transcript binds the miner ---- #
-def test_all_five_proven_is_reachable_with_full_evidence(monkeypatch, tmp_path):
+# --- the whole run: proof stays blocked without independent verifiers ---------- #
+def test_all_five_proven_is_blocked_without_independent_verifiers(monkeypatch, tmp_path):
     import json as _json
     rec = tmp_path / "r.json"; rec.write_text(_json.dumps(_tdx_receipt()))
     acc = tmp_path / "a.json"; acc.write_text(_json.dumps(
@@ -195,11 +234,12 @@ def test_all_five_proven_is_reachable_with_full_evidence(monkeypatch, tmp_path):
         "--external-miner-transcript", str(ext),
         "--now", "2026-07-30T12:00:00Z", "--out", str(out),
     ])
-    assert rc == 0
+    assert rc == 1
     t = _json.loads(out.read_text())
-    assert t["proven"] is True
+    assert t["proven"] is False
     assert t["bound"]["miner_hotkey"] == "5CyberMiner" and t["bound"]["miner_uid"] == 42
-    assert all(g["status"] == "PASS" for g in t["gates"])
+    assert [g["status"] for g in t["gates"]] == [
+        rpg.BLOCKED, rpg.PASS, rpg.BLOCKED, rpg.PASS, rpg.BLOCKED]
 
 
 def test_todays_reality_is_not_proven(monkeypatch):
