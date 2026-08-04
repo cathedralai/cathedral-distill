@@ -411,7 +411,6 @@ def _public_pool():
 
 
 def test_task_pool_draw_public_is_deterministic_and_uses_the_public_set():
-    from cathedral_distill.cybergym_mix import PublicCanarySource
     pool = _public_pool()
     b1 = pool.draw_public(size=3, nonce=NONCE, cutoff=CUTOFF)
     b2 = pool.draw_public(size=3, nonce=NONCE, cutoff=CUTOFF)

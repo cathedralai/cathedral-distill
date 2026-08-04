@@ -46,10 +46,9 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Callable, Mapping
 
 #: This module is a DEMONSTRATION of an architecture, not a production control.
 #: It is unproven, gates nothing in the SN39 reward path, and has documented
@@ -427,14 +426,16 @@ class SafeClawGuard:
             try:
                 out = runner()
             except Exception as exc:  # a failing sandbox run is an observation, not a crash
-                emit("error", str(exc)); return GuardResult(a.decision, True, f"error: {exc}", a)
+                emit("error", str(exc))
+                return GuardResult(a.decision, True, f"error: {exc}", a)
             emit("sandboxed")
             return GuardResult(a.decision, True, out, a)
         # ALLOW (or approved ASK)
         try:
             out = run()
         except Exception as exc:
-            emit("error", str(exc)); return GuardResult(a.decision, True, f"error: {exc}", a)
+            emit("error", str(exc))
+            return GuardResult(a.decision, True, f"error: {exc}", a)
         emit("executed")
         return GuardResult(a.decision, True, out, a)
 

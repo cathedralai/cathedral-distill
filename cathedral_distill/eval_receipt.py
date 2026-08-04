@@ -42,7 +42,6 @@ from typing import Any, Mapping
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
-    Ed25519PublicKey,
 )
 
 # v2 adds `signing_key_id` so the receipt's own signature can be cryptographically

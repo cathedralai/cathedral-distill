@@ -37,7 +37,6 @@ from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 from cathedral_distill.cybergym_batch import (
     MAX_BATCH,
     Batch,
-    BatchError,
     batch_id_for,
     derive_batch_nonce,
 )

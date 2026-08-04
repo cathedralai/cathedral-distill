@@ -37,6 +37,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+)
+
 _SCORE_Q = Decimal("0.000000000001")  # 12 dp, the shared score-comparison quantum
 
 
@@ -46,12 +51,6 @@ def _parse_ts(value: str) -> datetime:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
     except (TypeError, ValueError) as exc:
         raise DistillReceiptError("issued_at is not a valid UTC timestamp") from exc
-
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-    Ed25519PublicKey,
-)
 
 RECEIPT_SCHEMA = "cathedral_distill_receipt_v1"
 EVALUATION_SCHEMA = "cathedral_distill_evaluation_v1"

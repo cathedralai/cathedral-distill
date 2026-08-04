@@ -387,7 +387,7 @@ def test_attestation_cannot_be_reused_for_a_different_model_commitment():
     out = process_submission(
         env, changed, source.backend, attestation_policy=POLICY, now=NOW
     )
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_service_requires_attestation_policy_by_default(tmp_path):

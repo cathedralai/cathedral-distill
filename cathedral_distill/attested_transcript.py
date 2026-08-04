@@ -42,7 +42,6 @@ roots for real NRAS/DCAP material, the commitment shape is unchanged.
 """
 from __future__ import annotations
 
-import binascii
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime

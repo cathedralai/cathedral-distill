@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Mapping, Sequence
+from typing import Sequence
 
 # v2: safe composition (#8928a23, issue #1 Req 6) added per-lane
 # `burned_allocation` and populated `burn_snapshot.forced_burn_percentage` /

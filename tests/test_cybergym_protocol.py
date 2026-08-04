@@ -287,6 +287,7 @@ def test_poc_digest_mismatch_is_refused():
 def test_unlicenced_trace_is_refused():
     d = _dispatch()
     poc = b"exploit"
-    bad = _good_trace("arvo:1", poc_digest(poc)); bad["licence"] = ""
+    bad = _good_trace("arvo:1", poc_digest(poc))
+    bad["licence"] = ""
     with pytest.raises(cp.ProtocolError, match="malformed"):
         cp.process_submission(_envelope(d, "arvo:1", poc, bad), d, _backend({"arvo:1"}))

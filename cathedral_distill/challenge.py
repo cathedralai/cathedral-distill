@@ -48,7 +48,6 @@ from cathedral_distill.eval_receipt import (
     ITEM_NODE_DOMAIN,
     digest_bytes,
     item_leaf,
-    items_root,
 )
 
 CHALLENGE_DOMAIN = b"cathedral-ml-eval-challenge-v1\x00"
