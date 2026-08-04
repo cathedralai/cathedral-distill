@@ -238,6 +238,10 @@ tested:
 - **[Live status API](docs/STATUS_API.md)**: `GET /v1/status` and `GET /v1/keys`.
   Every field, a real example, and how a miner reads a win, a loss, or a
   re-commit.
+- **[Fresh CyberGym verifier E2E](docs/FRESH_CYBERGYM_E2E.md)**: a loopback-only,
+  durable fresh-task path for miner/verifier testing. It is explicitly
+  non-reward-bearing until the production identity, TDX, and emission controls
+  are configured.
 - **[TDX attestation](docs/TDX_ATTESTATION.md)**: the two profiles, what each
   binds, and the production path.
 
@@ -262,7 +266,7 @@ pip install -e '.[dev]'
 pytest
 ```
 
-The suite collects 852 tests, all hardware-free: the verifier backend is
+The suite collects 858 tests, all hardware-free: the verifier backend is
 injected, so the full mechanism is exercised without the CyberGym binary corpus.
 How many of them *run* depends on the machine, which is why no passing total is
 claimed here. `tests/test_cybergym_hw.py` skips without `CYBERGYM_RUN_HW=1` and

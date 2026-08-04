@@ -47,7 +47,10 @@ CRASH_CLEAN_CODES = frozenset({0, 300})
 
 _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 # arvo:<n> / oss-fuzz:<n> are the public corpus; synthvuln:<nonce8>:<n> is a
-# validator-generated holdout challenge (cybergym_synthetic) — un-lookup-able.
+# development-only generated challenge; freshvuln:<nonce8>:<n> is the sealed,
+# validator-held fresh challenge source.  The two generated prefixes remain
+# distinct because ``synthvuln`` deliberately renders its answer and therefore
+# must never be rewardable, while ``freshvuln`` has a separate admission path.
 # ONE definition of what a synthetic nonce may contain. The task-ID grammar and the
 # nonce check below are both built from it, so a caller that validates a nonce and a
 # parser that validates the resulting task id cannot disagree. They did: the agent CLI
@@ -57,8 +60,11 @@ _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 _SYNTH_NONCE_CHARS = "[0-9a-z]+"
 SYNTHETIC_NONCE_RE = re.compile(rf"\A{_SYNTH_NONCE_CHARS}\Z")
 _TASK_ID_RE = re.compile(
-    rf"\A((arvo|oss-fuzz):[0-9]+|synthvuln:{_SYNTH_NONCE_CHARS}:[0-9]+)\Z")
-_TASK_ID_HELP = "task_id must be arvo:<n>, oss-fuzz:<n>, or synthvuln:<nonce>:<n>"
+    rf"\A((arvo|oss-fuzz):[0-9]+|(synthvuln|freshvuln):{_SYNTH_NONCE_CHARS}:[0-9]+)\Z")
+_TASK_ID_HELP = (
+    "task_id must be arvo:<n>, oss-fuzz:<n>, synthvuln:<nonce>:<n>, "
+    "or freshvuln:<nonce>:<n>"
+)
 
 
 def validate_synthetic_nonce(nonce: str) -> str:

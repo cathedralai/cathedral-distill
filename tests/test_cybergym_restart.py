@@ -287,10 +287,11 @@ def test_the_pinned_epoch_manifest_covers_every_scoring_input(tmp_path):
         "schema", "source_epoch", "network", "netuid", "block", "block_hash",
         "valid_from_block", "valid_until_block", "batch_size", "cutoff", "as_of",
         "validator_hotkey", "signing_key_id", "signing_public_key_digest",
-        "level_weights", "credit_synthetic_tasks", "gates_required", "gate_policy",
+        "level_weights", "credit_synthetic_tasks", "task_source", "gates_required", "gate_policy",
     }
     assert manifest["gates_required"] is False
     assert manifest["gate_policy"] is None
+    assert manifest["task_source"] is None
     pinned = service._solves.manifest_for(SOURCE_EPOCH)
     assert pinned["manifest"] == manifest
     assert pinned["digest"].startswith("sha256:")

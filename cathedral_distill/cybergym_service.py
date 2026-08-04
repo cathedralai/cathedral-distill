@@ -268,9 +268,22 @@ class CyberGymService:
             ),
             "level_weights": {str(int(level)): str(w) for level, w in self._weights.items()},
             "credit_synthetic_tasks": bool(self._credit_synthetic_tasks),
+            # A generated source must commit its private generator configuration
+            # without disclosing it.  A changed fresh seed would otherwise make a
+            # restarted verifier score different task bytes under the same epoch.
+            "task_source": self._task_source_manifest(),
             "gates_required": bool(self._gates_required),
             "gate_policy": emission_gate_policy_manifest(self._gate_policy),
         }
+
+    def _task_source_manifest(self) -> Mapping[str, object] | None:
+        provider = getattr(self.holdout.pool, "epoch_manifest", None)
+        if provider is None:
+            return None
+        manifest = provider()
+        if not isinstance(manifest, Mapping):
+            raise ProtocolError("task source epoch_manifest must return an object")
+        return dict(manifest)
 
     def _pin_epoch_manifest(self) -> None:
         """Pin the epoch's inputs on first run; refuse a restart that changed them."""

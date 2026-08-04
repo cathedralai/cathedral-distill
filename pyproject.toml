@@ -19,6 +19,7 @@ cathedral-cybergym = "cathedral_distill.operator_cli:main"
 cathedral-cybergym-verify = "cathedral_distill.cybergym_verify_cli:main"
 cathedral-cybergym-agent = "cathedral_distill.cybergym_agent_cli:main"
 cathedral-cybergym-server = "cathedral_distill.cybergym_repro_server:main"
+cathedral-cybergym-fresh-e2e-server = "cathedral_distill.cybergym_fresh_server:main"
 cathedral-cybergym-pull = "cathedral_distill.corpus_images:main"
 
 [tool.setuptools]
