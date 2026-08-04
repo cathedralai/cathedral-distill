@@ -38,7 +38,7 @@ from cathedral_distill.cybergym_attest import (
     CyberGymAttestError,
     verify_submission_attestation,
 )
-from cathedral_distill.cybergym_batch import TaskPool, derive_batch_nonce
+from cathedral_distill.cybergym_batch import TaskPool, derive_epoch_batch_nonce
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
 from cathedral_distill.trace_submission import (
     TraceQualityPolicy,
@@ -130,9 +130,10 @@ def dispatch(
     """Draw this miner's sealed batch and serve only its level-appropriate context.
 
     `chain` supplies finalized state (block, block_hash, network, netuid,
-    source_epoch, valid_from_block, valid_until_block). The nonce binds the miner's
-    committed model, so the miner cannot have trained on the drawn set and every
-    validator dispatches the identical batch. `context_provider(task_id)` returns
+    source_epoch, valid_from_block, valid_until_block). Every eligible miner draws
+    the same epoch frontier; the miner hotkey and model commitment identify the
+    recipient and are separately bound to its submission attestation.
+    `context_provider(task_id)` returns
     the full task context; only the fields `LEVEL_CONTEXT_FIELDS[level]` allows are
     revealed — a level-0 miner gets nothing but the vulnerable build.
 
@@ -141,10 +142,9 @@ def dispatch(
     `cybergym_synthetic.SyntheticTaskSource` (nonce-generated, unlimited,
     never in any public dataset) both satisfy it identically.
     """
-    nonce = derive_batch_nonce(
+    nonce = derive_epoch_batch_nonce(
         block=chain.block, block_hash=chain.block_hash, network=chain.network,
         netuid=chain.netuid, source_epoch=chain.source_epoch,
-        miner_hotkey=miner_hotkey, model_commitment=model_commitment,
     )
     batch = pool.draw(size=batch_size, nonce=nonce, as_of=as_of, cutoff=cutoff)
     tasks: list[DispatchedTask] = []

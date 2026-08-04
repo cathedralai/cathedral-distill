@@ -30,12 +30,14 @@ from typing import Any, Mapping
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
-    Ed25519PublicKey,
 )
 
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level
 
-RECEIPT_SCHEMA = "cathedral_cybergym_receipt_v1"
+RECEIPT_SCHEMA_V1 = "cathedral_cybergym_receipt_v1"
+RECEIPT_SCHEMA_V2 = "cathedral_cybergym_receipt_v2"
+# Kept for callers constructing legacy/dev receipts without observed eligibility.
+RECEIPT_SCHEMA = RECEIPT_SCHEMA_V1
 RECEIPT_ID_DOMAIN = b"cathedral-cybergym-receipt-id-v1\x00"
 MAX_RECEIPT_BYTES = 262_144
 
@@ -53,7 +55,8 @@ _RECEIPT_KEYS = frozenset(
         "batch", "score", "receipt_id", "signing_key_id", "signature",
     }
 )
-_BATCH_KEYS = frozenset({"batch_id", "nonce", "holdout_digest", "graded_tasks"})
+_BATCH_KEYS_V1 = frozenset({"batch_id", "nonce", "holdout_digest", "graded_tasks"})
+_BATCH_KEYS_V2 = _BATCH_KEYS_V1 | frozenset({"eligibility_snapshot_digest"})
 _SCORE_KEYS = frozenset(
     {
         "solved_tasks", "per_level_solved", "level_weights",
@@ -122,6 +125,7 @@ def build_receipt(
     miner_hotkey: str,
     nonce: str,
     holdout_digest_value: str,
+    eligibility_snapshot_digest: str | None = None,
     valid_from_block: int,
     valid_until_block: int,
     issued_at: str,
@@ -131,7 +135,7 @@ def build_receipt(
 ) -> dict[str, Any]:
     """Assemble and sign a receipt from a `cybergym.BatchScore` and its context."""
     body: dict[str, Any] = {
-        "schema": RECEIPT_SCHEMA,
+        "schema": RECEIPT_SCHEMA_V2 if eligibility_snapshot_digest is not None else RECEIPT_SCHEMA_V1,
         "network": network,
         "netuid": netuid,
         "source_epoch": source_epoch,
@@ -158,6 +162,8 @@ def build_receipt(
         },
         "signing_key_id": signing_key_id,
     }
+    if eligibility_snapshot_digest is not None:
+        body["batch"]["eligibility_snapshot_digest"] = eligibility_snapshot_digest
     body["receipt_id"] = compute_receipt_id(body)
     signature = private_key.sign(canonical_bytes(body))
     body["signature"] = {
@@ -201,7 +207,7 @@ def _nonneg_int(value: Any, label: str) -> int:
 
 def validate_structure(receipt: Any) -> Mapping[str, Any]:
     doc = _exact_keys(receipt, _RECEIPT_KEYS, "cybergym receipt")
-    if doc["schema"] != RECEIPT_SCHEMA:
+    if doc["schema"] not in (RECEIPT_SCHEMA_V1, RECEIPT_SCHEMA_V2):
         raise CyberGymReceiptError("unsupported cybergym receipt schema")
     if len(canonical_bytes({k: v for k, v in doc.items() if k != "signature"})) > MAX_RECEIPT_BYTES:
         raise CyberGymReceiptError("receipt exceeds 256 KiB")
@@ -213,13 +219,22 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
     if last <= first:
         raise CyberGymReceiptError("valid_until_block must exceed valid_from_block")
 
-    batch = _exact_keys(doc["batch"], _BATCH_KEYS, "batch")
+    batch = _exact_keys(
+        doc["batch"],
+        _BATCH_KEYS_V2 if doc["schema"] == RECEIPT_SCHEMA_V2 else _BATCH_KEYS_V1,
+        "batch",
+    )
     if not _BATCH_ID_RE.match(str(batch["batch_id"])):
         raise CyberGymReceiptError("batch_id must be sha256:<64 hex>")
     if not _HEX_NONCE_RE.match(str(batch["nonce"])):
         raise CyberGymReceiptError("nonce is invalid")
     if not _DIGEST_RE.match(str(batch["holdout_digest"])):
         raise CyberGymReceiptError("holdout_digest must be sha256:<64 hex>")
+    if (
+        doc["schema"] == RECEIPT_SCHEMA_V2
+        and not _DIGEST_RE.match(str(batch["eligibility_snapshot_digest"]))
+    ):
+        raise CyberGymReceiptError("eligibility_snapshot_digest must be sha256:<64 hex>")
     graded = _nonneg_int(batch["graded_tasks"], "graded_tasks")
 
     score = _exact_keys(doc["score"], _SCORE_KEYS, "score")

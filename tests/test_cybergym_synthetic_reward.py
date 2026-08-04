@@ -109,9 +109,9 @@ def test_synthetic_task_ids_are_identifiable():
 def _run_synthetic_epoch(tmp_path, *, credit: bool, name="scores.sqlite"):
     source = SyntheticTaskSource(levels=(0,))
     # draw the batch once to learn the ids, then solve every one of them
-    nonce = cv.derive_batch_nonce(
+    nonce = cv.derive_epoch_batch_nonce(
         block=100, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
-        source_epoch=SOURCE_EPOCH, miner_hotkey=MINER, model_commitment=COMMITMENT,
+        source_epoch=SOURCE_EPOCH,
     )
     batch = source.draw(size=4, nonce=nonce)
     pocs = {

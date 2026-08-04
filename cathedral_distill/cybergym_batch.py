@@ -34,6 +34,7 @@ from cathedral_distill.cybergym import Level, Task
 
 BATCH_DOMAIN = b"cathedral-cybergym-batch-draw-v1\x00"
 NONCE_DOMAIN = b"cathedral-cybergym-batch-nonce-v1\x00"
+EPOCH_NONCE_DOMAIN = b"cathedral-cybergym-epoch-batch-nonce-v1\x00"
 
 MAX_BATCH = 4096
 _BLOCK_HASH_RE = re.compile(r"\A(0x)?[0-9a-f]{64}\Z")
@@ -98,6 +99,45 @@ def derive_batch_nonce(
         sort_keys=True, separators=(",", ":"), ensure_ascii=True,
     ).encode("ascii")
     return "cgnonce-sha256:" + hashlib.sha256(NONCE_DOMAIN + material).hexdigest()
+
+
+def derive_epoch_batch_nonce(
+    *,
+    block: int,
+    block_hash: str,
+    network: str,
+    netuid: int,
+    source_epoch: int,
+) -> str:
+    """Derive one post-anchor batch nonce shared by every paid identity.
+
+    The common frontier removes independent task-difficulty draws from the reward
+    function.  Model commitments remain separately frozen and attested, but cannot
+    change which task opportunity a hotkey receives after the anchor is known.
+    """
+    if isinstance(block, bool) or not isinstance(block, int) or block < 0:
+        raise BatchError("block height is invalid")
+    if not isinstance(block_hash, str) or _BLOCK_HASH_RE.match(block_hash.strip().lower()) is None:
+        raise BatchError("block_hash must be a 32-byte hex value")
+    if not network or not isinstance(network, str):
+        raise BatchError("network is invalid")
+    if isinstance(netuid, bool) or not isinstance(netuid, int) or netuid < 0:
+        raise BatchError("netuid is invalid")
+    if isinstance(source_epoch, bool) or not isinstance(source_epoch, int) or source_epoch < 0:
+        raise BatchError("source_epoch is invalid")
+    material = json.dumps(
+        {
+            "block": int(block),
+            "block_hash": block_hash.strip().lower().removeprefix("0x"),
+            "netuid": int(netuid),
+            "network": network,
+            "source_epoch": int(source_epoch),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return "cgnonce-sha256:" + hashlib.sha256(EPOCH_NONCE_DOMAIN + material).hexdigest()
 
 
 @dataclass(frozen=True)

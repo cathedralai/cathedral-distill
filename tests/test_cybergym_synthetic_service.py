@@ -261,12 +261,12 @@ def test_two_independent_validators_dispatch_the_identical_batch(tmp_path):
     assert [t.binary_digest for t in d_a.tasks] == [t.binary_digest for t in d_b.tasks]
 
 
-def test_different_miners_in_the_same_epoch_get_different_batches(tmp_path):
+def test_different_miners_in_the_same_epoch_get_the_common_batch(tmp_path):
     svc = _service(tmp_path)
     d1 = svc.dispatch_for("5MinerOne", MODEL)
     d2 = svc.dispatch_for("5MinerTwo", MODEL)
-    assert d1.nonce != d2.nonce
-    assert {t.task_id for t in d1.tasks} != {t.task_id for t in d2.tasks}
+    assert d1.nonce == d2.nonce
+    assert {t.task_id for t in d1.tasks} == {t.task_id for t in d2.tasks}
 
 
 def test_the_same_miner_gets_a_different_batch_next_epoch(tmp_path):

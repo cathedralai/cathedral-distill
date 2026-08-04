@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -110,6 +111,11 @@ def _registry(*, hotkey=MINER, digest=COMMITMENT, registered_at=None):
 
 
 def _run(store, policy, *, miners=None, gates_required=True):
+    # These tests exercise the pre-snapshot registry gates in isolation. Production
+    # policy requires an observed eligibility snapshot; dedicated tests cover that
+    # stronger boundary below.
+    if policy is not None and policy.eligibility_snapshot is None:
+        policy = replace(policy, require_observed_eligibility=False)
     commits = miners or [
         cv.MinerCommit(miner_hotkey=MINER, model_commitment=COMMITMENT,
                        pocs={"arvo:1": b"poc-1"}),
