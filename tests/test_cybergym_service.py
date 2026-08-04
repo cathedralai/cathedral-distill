@@ -210,7 +210,8 @@ def test_http_shim_dispatch_and_submit(tmp_path):
         base = f"http://127.0.0.1:{port}"
         status, dispatch_doc = _post(base, chttp.DISPATCH_PATH,
                                      {"miner_hotkey": "5Miner", "model_commitment": MODEL})
-        assert status == 200 and dispatch_doc["schema"] == "cathedral_cybergym_dispatch_v1"
+        assert status == 200 and dispatch_doc["schema"] == "cathedral_cybergym_dispatch_v2"
+        assert dispatch_doc["model_commitment"] == MODEL
         batch_id = dispatch_doc["batch_id"]
 
         poc = b"exploit-bytes-for-arvo-1"

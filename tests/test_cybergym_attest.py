@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -39,6 +40,7 @@ ROOT_PUB = Ed25519PrivateKey.from_private_bytes(ROOT_SEED).public_key().public_b
 ISSUED = "2026-07-29T12:00:00Z"
 NOW = datetime(2026, 7, 29, 12, 0, 0, tzinfo=UTC)
 MINER = "5AttestedMiner"
+MODEL = "sha256:" + hashlib.sha256(b"attested-model").hexdigest()
 
 POLICY = AttestationPolicy(
     trusted_roots={ROOT_ID: ROOT_PUB},
@@ -101,6 +103,7 @@ def _fixture(nonce="ance10ab", *, size=1):
                         binary_digest=task.binary_digest, context={})
     msg = DispatchMessage(network="finney", netuid=39, source_epoch=11,
                           batch_id=batch.batch_id, nonce=nonce, miner_hotkey=MINER,
+                          model_commitment=MODEL,
                           valid_from_block=1, valid_until_block=999, tasks=(dt,))
     return source, msg, task.task_id, bug.trigger
 
@@ -121,7 +124,8 @@ def _envelope(batch_id, task_id, poc, *, attestation=None, miner=MINER):
 def _attested_envelope(msg, task_id, poc, **over):
     digest = "sha256:" + hashlib.sha256(poc).hexdigest()
     rd = submission_report_data(batch_id=msg.batch_id, task_id=task_id, poc_sha256=digest,
-                                trace_id=_trace_id_of(task_id, digest), miner_hotkey=MINER)
+                                trace_id=_trace_id_of(task_id, digest), miner_hotkey=MINER,
+                                model_commitment=msg.model_commitment)
     token = _make_token(report_data=rd, **over)
     return _envelope(msg.batch_id, task_id, poc, attestation=base64.b64encode(token).decode())
 
@@ -130,7 +134,8 @@ def _attested_envelope(msg, task_id, poc, **over):
 # report_data binding
 # --------------------------------------------------------------------------- #
 def test_report_data_is_deterministic_and_binds_every_field():
-    base = dict(batch_id="b", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m")
+    base = dict(batch_id="b", task_id="t", poc_sha256="p", trace_id="tr",
+                miner_hotkey="m", model_commitment="sha256:model")
     rd = submission_report_data(**base)
     assert rd == submission_report_data(**base)          # deterministic
     assert len(rd) == 64 and all(c in "0123456789abcdef" for c in rd)
@@ -141,7 +146,8 @@ def test_report_data_is_deterministic_and_binds_every_field():
 
 def test_report_data_requires_all_fields():
     with pytest.raises(CyberGymAttestError):
-        submission_report_data(batch_id="", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m")
+        submission_report_data(batch_id="", task_id="t", poc_sha256="p", trace_id="tr",
+                               miner_hotkey="m", model_commitment="sha256:model")
 
 
 # --------------------------------------------------------------------------- #
@@ -205,7 +211,8 @@ def test_replayed_attestation_for_another_poc_earns_zero():
     other_digest = "sha256:" + hashlib.sha256(other_poc).hexdigest()
     real_digest = "sha256:" + hashlib.sha256(poc).hexdigest()
     rd = submission_report_data(batch_id=msg.batch_id, task_id=task_id, poc_sha256=other_digest,
-                                trace_id=_trace_id_of(task_id, real_digest), miner_hotkey=MINER)
+                                trace_id=_trace_id_of(task_id, real_digest), miner_hotkey=MINER,
+                                model_commitment=msg.model_commitment)
     token = _make_token(report_data=rd)                    # bound to other_poc
     env = _envelope(msg.batch_id, task_id, poc, attestation=base64.b64encode(token).decode())
     out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
@@ -217,7 +224,8 @@ def test_attestation_from_another_miner_earns_zero():
     source, msg, task_id, poc = _fixture()
     digest = "sha256:" + hashlib.sha256(poc).hexdigest()
     rd_other = submission_report_data(batch_id=msg.batch_id, task_id=task_id, poc_sha256=digest,
-                                      trace_id=_trace_id_of(task_id, digest), miner_hotkey="5SomeoneElse")
+                                      trace_id=_trace_id_of(task_id, digest), miner_hotkey="5SomeoneElse",
+                                      model_commitment=msg.model_commitment)
     token = _make_token(report_data=rd_other)
     env = _envelope(msg.batch_id, task_id, poc, attestation=base64.b64encode(token).decode())
     out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
@@ -251,6 +259,18 @@ def test_swapped_trace_earns_zero():
     assert out.solved and not out.attested and out.work_units == Decimal(0)
 
 
+def test_attestation_cannot_be_reused_for_a_different_model_commitment():
+    source, msg, task_id, poc = _fixture()
+    env = _attested_envelope(msg, task_id, poc)
+    changed = replace(
+        msg, model_commitment="sha256:" + hashlib.sha256(b"different-model").hexdigest()
+    )
+    out = process_submission(
+        env, changed, source.backend, attestation_policy=POLICY, now=NOW
+    )
+    assert out.solved and not out.attested and out.work_units == Decimal(0)
+
+
 def test_service_requires_attestation_policy_by_default(tmp_path):
     """Fail-closed: the stateful service refuses to start without a policy unless
     the operator explicitly opts out (a forgotten kwarg must not credit unattested)."""
@@ -276,14 +296,17 @@ def test_service_requires_attestation_policy_by_default(tmp_path):
 # direct verifier unit checks
 # --------------------------------------------------------------------------- #
 def test_verify_submission_attestation_accepts_and_rejects():
-    rd = submission_report_data(batch_id="b", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m")
+    rd = submission_report_data(batch_id="b", task_id="t", poc_sha256="p", trace_id="tr",
+                                miner_hotkey="m", model_commitment="sha256:model")
     good = _make_token(report_data=rd)
     doc = verify_submission_attestation(good, batch_id="b", task_id="t", poc_sha256="p",
-                                        trace_id="tr", miner_hotkey="m", policy=POLICY, now=NOW)
+                                        trace_id="tr", miner_hotkey="m", model_commitment="sha256:model",
+                                        policy=POLICY, now=NOW)
     assert doc["tee"] == "intel_tdx"
     with pytest.raises(CyberGymAttestError):               # rebound trace -> mismatch
         verify_submission_attestation(good, batch_id="b", task_id="t", poc_sha256="p",
-                                      trace_id="OTHER", miner_hotkey="m", policy=POLICY, now=NOW)
+                                      trace_id="OTHER", miner_hotkey="m", model_commitment="sha256:model",
+                                      policy=POLICY, now=NOW)
 
 
 # --------------------------------------------------------------------------- #
@@ -323,7 +346,8 @@ def test_service_only_attested_miner_earns_and_composes(tmp_path):
             if attest:
                 rd = submission_report_data(batch_id=msg.batch_id, task_id=t.task_id,
                                             poc_sha256=digest, trace_id=_trace_id_of(t.task_id, digest),
-                                            miner_hotkey=miner)
+                                            miner_hotkey=miner,
+                                            model_commitment=msg.model_commitment)
                 att = base64.b64encode(_make_token(report_data=rd)).decode()
             env = SubmissionEnvelope(batch_id=msg.batch_id, task_id=t.task_id, miner_hotkey=miner,
                                      poc_base64=base64.b64encode(poc).decode(),

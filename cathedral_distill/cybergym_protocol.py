@@ -24,7 +24,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping
 
 from cathedral_distill.attestation import AttestationPolicy
 from cathedral_distill.cybergym import (
@@ -38,7 +38,7 @@ from cathedral_distill.cybergym_attest import (
     CyberGymAttestError,
     verify_submission_attestation,
 )
-from cathedral_distill.cybergym_batch import Batch, TaskPool, derive_batch_nonce
+from cathedral_distill.cybergym_batch import TaskPool, derive_batch_nonce
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
 from cathedral_distill.trace_submission import (
     TraceQualityPolicy,
@@ -47,7 +47,7 @@ from cathedral_distill.trace_submission import (
     submission_bonus,
 )
 
-DISPATCH_SCHEMA = "cathedral_cybergym_dispatch_v1"
+DISPATCH_SCHEMA = "cathedral_cybergym_dispatch_v2"
 ENVELOPE_SCHEMA = "cathedral_cybergym_submission_envelope_v1"
 MAX_POC_BYTES = 1024 * 1024
 
@@ -91,6 +91,7 @@ class DispatchMessage:
     batch_id: str
     nonce: str
     miner_hotkey: str
+    model_commitment: str
     valid_from_block: int
     valid_until_block: int
     tasks: tuple[DispatchedTask, ...]
@@ -108,6 +109,7 @@ class DispatchMessage:
             "source_epoch": self.source_epoch,
             "batch_id": self.batch_id, "nonce": self.nonce,
             "miner_hotkey": self.miner_hotkey,
+            "model_commitment": self.model_commitment,
             "valid_from_block": self.valid_from_block,
             "valid_until_block": self.valid_until_block,
             "tasks": [t.to_dict() for t in self.tasks],
@@ -155,6 +157,7 @@ def dispatch(
     return DispatchMessage(
         network=chain.network, netuid=chain.netuid, source_epoch=chain.source_epoch,
         batch_id=batch.batch_id, nonce=nonce, miner_hotkey=miner_hotkey,
+        model_commitment=model_commitment,
         valid_from_block=chain.valid_from_block, valid_until_block=chain.valid_until_block,
         tasks=tuple(tasks),
     )
@@ -331,6 +334,7 @@ def process_submission(
                     token, batch_id=envelope.batch_id, task_id=envelope.task_id,
                     poc_sha256=digest, trace_id=submission.trace_id(),
                     miner_hotkey=envelope.miner_hotkey,
+                    model_commitment=dispatch_msg.model_commitment,
                     policy=attestation_policy, now=now,
                 )
             except (ValueError, TypeError, CyberGymAttestError) as exc:
