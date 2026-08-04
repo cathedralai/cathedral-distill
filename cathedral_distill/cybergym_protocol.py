@@ -24,7 +24,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping
 
 from cathedral_distill.attestation import AttestationPolicy
 from cathedral_distill.cybergym import (
@@ -38,7 +38,7 @@ from cathedral_distill.cybergym_attest import (
     CyberGymAttestError,
     verify_submission_attestation,
 )
-from cathedral_distill.cybergym_batch import Batch, TaskPool, derive_batch_nonce
+from cathedral_distill.cybergym_batch import TaskPool, derive_batch_nonce
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
 from cathedral_distill.trace_submission import (
     TraceQualityPolicy,
