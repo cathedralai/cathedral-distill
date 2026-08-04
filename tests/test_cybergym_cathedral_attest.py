@@ -156,7 +156,8 @@ def test_trustless_mode_verifies_the_raw_quote_and_ignores_the_issuer_flag():
     # even with Cathedral's own flags false, a passing raw-quote verify credits it
     r = verify_cathedral_attestation(_receipt(intel_verified=False, report_data_match=False),
                                      task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID,
-                                     now=NOW, quote_verifier=verifier)
+                                     now=NOW, quote_verifier=verifier,
+                                     artifacts_digest_recipe=lambda a: "58" * 16)
     assert r.attested and r.trustless and r.reason == "attested_intel_tdx_trustless"
     assert seen["quote"].startswith("BAAC") and len(seen["rd"]) == 64
 
@@ -164,7 +165,8 @@ def test_trustless_mode_verifies_the_raw_quote_and_ignores_the_issuer_flag():
 def test_trustless_mode_fails_closed_when_the_quote_is_rejected():
     r = verify_cathedral_attestation(_receipt(), task_id=TASK, poc_sha256=POC_SHA,
                                      trace_id=TRACE_ID, now=NOW,
-                                     quote_verifier=lambda q, rd: False)
+                                     quote_verifier=lambda q, rd: False,
+                                     artifacts_digest_recipe=lambda a: "58" * 16)
     assert not r.attested and "raw TDX quote" in r.reason
 
 
@@ -266,3 +268,60 @@ def test_boot_quote_trustless_mode_checks_the_raw_quote():
     assert ok.attested and seen["q"].startswith("BAAC")
     bad = _boot(_boot_receipt(), quote_verifier=lambda q, rd: False)
     assert not bad.attested and "raw boot quote" in bad.reason
+
+
+# --------------------------------------------------------------------------- #
+# trustless seam: the artifacts list -> scalar binding (Phase 2)
+# --------------------------------------------------------------------------- #
+def test_trustless_without_the_scalar_recipe_fails_closed():
+    """Passing a quote_verifier switches to the trustless path. Without the
+    list->scalar binding recipe, report_data (which binds the scalar) and the
+    commitment (which binds the list) are never tied, so a genuine quote could be
+    re-paired with a swapped result.txt. The path must refuse, not trust."""
+    r = verify_cathedral_attestation(
+        _receipt(), task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID, now=NOW,
+        quote_verifier=lambda q, rd: True,   # a quote that "verifies"
+    )
+    assert not r.attested
+    assert "list→scalar binding recipe" in r.reason
+
+
+def test_trustless_refuses_when_the_scalar_does_not_match_the_list():
+    """With the recipe supplied, a receipt whose claimed artifacts_sha256 does not
+    equal the recomputed digest of its artifacts[] list is refused — this is the
+    swapped-result.txt attack."""
+    r = verify_cathedral_attestation(
+        _receipt(), task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID, now=NOW,
+        quote_verifier=lambda q, rd: True,
+        artifacts_digest_recipe=lambda artifacts: "ff" * 16,  # != receipt's "58"*16
+    )
+    assert not r.attested
+    assert "does not match the artifacts[] list" in r.reason
+
+
+def test_trustless_passes_when_scalar_binds_the_list_and_the_quote_verifies():
+    """The whole chain holds: recomputed scalar == claimed scalar, and the quote
+    verifies against report_data derived from it."""
+    r = verify_cathedral_attestation(
+        _receipt(), task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID, now=NOW,
+        quote_verifier=lambda q, rd: True,
+        artifacts_digest_recipe=lambda artifacts: "58" * 16,  # == receipt's claim
+    )
+    assert r.attested and r.trustless
+    assert r.reason == "attested_intel_tdx_trustless"
+
+
+def test_a_recipe_that_throws_is_a_refusal_never_a_pass():
+    def broken(artifacts):
+        raise ValueError("bad recipe")
+
+    r = verify_cathedral_attestation(
+        _receipt(), task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID, now=NOW,
+        quote_verifier=lambda q, rd: True, artifacts_digest_recipe=broken,
+    )
+    assert not r.attested and "recipe failed" in r.reason
+
+
+def test_trusted_issuer_default_is_unchanged_by_the_seam_fix():
+    """No quote_verifier -> trusted-issuer path -> the scalar recipe is irrelevant."""
+    assert _ok(_receipt()).attested

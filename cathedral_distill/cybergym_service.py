@@ -109,6 +109,7 @@ class CyberGymService:
         gate_policy: EmissionGatePolicy | None = None,
         gates_required: bool = True,
         credit_synthetic_tasks: bool = False,
+        acknowledge_synthetic_is_gameable: bool = False,
     ) -> None:
         # Fail closed: Intel-TDX attestation is a MANDATORY control for this track,
         # so the running service refuses to start without an attestation policy
@@ -128,6 +129,27 @@ class CyberGymService:
                 "(attestation_required=False): every solved PoC is credited with no "
                 "attestation. Dev/test only — never in production.",
                 stacklevel=2,
+            )
+        # Fail closed on synthetic credit. A synthetic task's answer is a pure,
+        # deterministic function of the batch nonce, and the nonce is derivable from
+        # public chain state after the block finalizes: `generate_bug(nonce, i)`
+        # returns the exploit bytes directly, and `render_source` prints the magic
+        # guard and buffer size in plaintext even at level 0. Crediting synthetic
+        # solves therefore pays real emission for values a miner computes with no
+        # model at all. It is permissible ONLY on the hardware-free dev path, where
+        # nothing is at stake; an attested (production) service that also credits
+        # synthetic tasks would pay for public-computable answers, so it is refused.
+        if credit_synthetic_tasks and attestation_required and not acknowledge_synthetic_is_gameable:
+            raise ProtocolError(
+                "credit_synthetic_tasks=True is refused in an attested "
+                "(production) service: a synthetic task's answer is computable from "
+                "public chain state, so crediting it pays emission for no capability. "
+                "Synthetic tasks are a dev oracle — run them with "
+                "attestation_required=False, or leave credit_synthetic_tasks=False "
+                "to grade them without paying. A test that scores synthetic tasks "
+                "ON PURPOSE (e.g. to isolate the attestation gate) must set "
+                "acknowledge_synthetic_is_gameable=True to say so explicitly; the "
+                "launch configuration must never set it."
             )
         # Fail closed on durability too. Accepted solves lived only in memory
         # until epoch close, so a restart mid-epoch lost them all while the corpus
