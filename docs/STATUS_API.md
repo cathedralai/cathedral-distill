@@ -70,7 +70,9 @@ A real response, captured live off a running validator mid-epoch:
   "corpus": {
     "available": true,
     "total_rows": 5,
-    "this_epoch_rows": 5
+    "this_epoch_rows": 5,
+    "excluded_duplicates": 0,
+    "this_epoch_excluded_duplicates": 0
   },
   "cache": {
     "ttl_secs": 5.0,
@@ -141,8 +143,10 @@ licensing
 
 | Field | Meaning |
 |---|---|
-| `total_rows` | Every corpus-eligible solve across all epochs this validator has run. Accumulates; never resets. |
-| `this_epoch_rows` | The subset from the current epoch — the rate the corpus is growing at right now. |
+| `total_rows` | Every canonical corpus solve across all epochs. The canonical identity is `(source_epoch, task_id, poc_sha256)`, so trace-text variants cannot increase training weight. |
+| `this_epoch_rows` | The current-epoch subset of canonical solves — the rate the corpus is growing at right now. |
+| `excluded_duplicates` | All corpus-eligible trace variants excluded from training because their canonical solve already exists. |
+| `this_epoch_excluded_duplicates` | The current-epoch subset of excluded trace variants. |
 
 **`key_registry`** — present only if this validator serves one (see below);
 same shape as `GET /v1/keys`'s `status()`, so a dashboard can show key freshness
@@ -191,8 +195,8 @@ The honest, minimal story `/v1/status` tells a miner, end to end:
 1. **Dispatch** (`POST /cybergym/dispatch`) puts you in `committed` the moment
    your first solve for this commitment lands.
 2. A solved, submitted PoC moves you to `pending` — accepted and durable, not
-   yet scored. `corpus.this_epoch_rows` ticks up here too, if your trace
-   cleared the quality floor.
+   yet scored. `corpus.this_epoch_rows` ticks up here too if its canonical solve
+   is new; a trace variant increments `this_epoch_excluded_duplicates` instead.
 3. A scoring pass moves scored miners from `pending` to `scored`, and
    populates `leaderboard.top` with your rank and earned units.
 4. **`unscorable`** has two causes. A miner can re-commit to a different model
