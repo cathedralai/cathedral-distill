@@ -102,6 +102,7 @@ def verify_cathedral_attestation(
     receipt: Mapping[str, Any], *, task_id: str, poc_sha256: str, trace_id: str,
     now: datetime | None = None, max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
     quote_verifier: QuoteVerifier | None = None,
+    artifacts_digest_recipe: "Callable[[list], str] | None" = None,
 ) -> CathedralAttestation:
     """Verify a Cathedral worker receipt attests THIS submission ran in real Intel TDX.
 
@@ -157,14 +158,40 @@ def verify_cathedral_attestation(
     # --- the quote itself: trusted-issuer by default, trustless if a verifier is given ---
     # SECURITY (trustless seam): report_data[32:64] binds the `artifacts_sha256`
     # SCALAR, while the commitment above is matched against the `artifacts[]` LIST.
-    # The adapter does not yet recompute the scalar from the list, so before the
-    # trustless DCAP path is wired in production the list→scalar binding MUST be
-    # verified with Cathedral's canonical `artifacts_sha256` recipe — otherwise a
-    # genuine quote can be re-paired with a swapped result.txt. Trusted-issuer
-    # (default) is unaffected: Cathedral validates the full binding server-side.
+    # If nothing ties the scalar to the list, a GENUINE quote (which commits to some
+    # real scalar S) can be re-paired with a swapped `artifacts[]` list that contains
+    # a different result.txt: the commitment-vs-list check passes on the swapped list,
+    # the quote check passes on the claimed scalar S, and the two are never
+    # cross-checked. The fix is to recompute the scalar FROM the list with Cathedral's
+    # canonical recipe and confirm it equals the claimed field before trusting either.
+    #
+    # That recipe lives server-side, so it is injected (`artifacts_digest_recipe`)
+    # rather than reimplemented-and-guessed here. Until it is supplied, the trustless
+    # path FAILS CLOSED: it refuses rather than trust an unverified scalar. Trusted-
+    # issuer (default) is unaffected — Cathedral validates the full binding server-side.
     verification = receipt.get("verification", {})
     trustless = False
     if quote_verifier is not None:
+        claimed_scalar = str(receipt.get("artifacts_sha256", ""))
+        if artifacts_digest_recipe is None:
+            return no(
+                "trustless attestation requires the artifacts list→scalar binding "
+                "recipe (artifacts_digest_recipe=...): report_data binds the "
+                "artifacts_sha256 scalar, the commitment binds the artifacts[] list, "
+                "and nothing here ties them, so a genuine quote could be re-paired "
+                "with a swapped result.txt. Refusing rather than trusting the "
+                "claimed scalar."
+            )
+        try:
+            recomputed = str(artifacts_digest_recipe(list(receipt.get("artifacts", []))))
+        except Exception as exc:  # a recipe that throws is a refusal, never a pass
+            return no(f"artifacts digest recipe failed: {exc}")
+        if not claimed_scalar or recomputed != claimed_scalar:
+            return no(
+                "artifacts_sha256 scalar does not match the artifacts[] list "
+                f"(recomputed {recomputed[:16]}… != claimed {claimed_scalar[:16]}…): "
+                "a genuine quote may have been re-paired with a swapped result.txt"
+            )
         quote_b64 = str(receipt.get("tee_attestation", {}).get("quote_b64", ""))
         expected_rd = _expected_report_data_hex(receipt)
         if not quote_b64 or expected_rd is None or not quote_verifier(quote_b64, expected_rd):
