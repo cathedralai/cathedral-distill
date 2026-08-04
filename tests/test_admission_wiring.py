@@ -136,29 +136,22 @@ class TestSyntheticCreditInvariant:
         must say so, and then it is allowed."""
         from cathedral_distill.cybergym_service import ProtocolError
 
-        try:
+        # Construction reaches the next required gate.  If the synthetic-credit
+        # guard regresses, its "computable from" refusal appears instead.
+        with pytest.raises(ProtocolError, match="durable solve store"):
             self._construct(attestation_policy=object(),
                             credit_synthetic_tasks=True,
                             acknowledge_synthetic_is_gameable=True)
-        except ProtocolError as exc:
-            assert "computable from" not in str(exc)
-        except Exception:
-            pass
 
     def test_the_dev_path_may_still_grade_synthetic(self):
         from cathedral_distill.cybergym_service import ProtocolError
 
         # attestation_required=False is the dev oracle; the synthetic guard must NOT
-        # fire. It may fail later for an unrelated placeholder reason, never on the
-        # synthetic invariant.
-        try:
+        # fire. Construction reaches the next required anti-gaming gate instead.
+        with pytest.raises(ProtocolError, match="anti-gaming gate policy"):
             self._construct(attestation_required=False,
                             solve_durability_required=False,
                             credit_synthetic_tasks=True)
-        except ProtocolError as exc:
-            assert "computable from" not in str(exc)
-        except Exception:
-            pass
 
 
 class TestLoadHoldoutEnforcesAdmission:
@@ -178,7 +171,7 @@ class TestLoadHoldoutEnforcesAdmission:
 
         # arvo:3938 loaded from an ordinary manifest, no admitted field -> fail closed.
         h = load_holdout([self._entry("arvo:3938", admitted=None)])
-        assert h.pool._tasks[0].admitted is False
+        assert h.pool.admitted_count() == 0
         with pytest.raises(BatchError, match="no task in the pool passed corpus admission"):
             draw_batch(h.pool, size=1, nonce="x",
                        as_of=dt.datetime(2026, 7, 27, 12, tzinfo=dt.timezone.utc),

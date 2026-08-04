@@ -237,6 +237,15 @@ class TaskPool:
             key=lambda t: t.task_id,
         )
 
+    def admitted_count(self) -> int:
+        """Return the number of tasks that have an explicit admission verdict.
+
+        The count is intentionally a narrow public query: draw failures need to
+        distinguish an exhausted private window from a pool where no task was
+        admitted at all, without coupling callers to the pool's storage.
+        """
+        return sum(1 for task in self._tasks if task.admitted)
+
     def draw(self, *, size: int, nonce: str, as_of: datetime, cutoff: datetime) -> "Batch":
         """The uniform draw interface `dispatch`/`run_epoch` call. Delegates to
         the free `draw_batch` function — same behavior, just callable
@@ -302,7 +311,7 @@ def draw_batch(
         # score nothing while looking merely quiet. Say so, rather than reporting an
         # exhausted holdout when the real problem is that every task was refused at
         # admission (degenerate, or its answer is public).
-        admitted = sum(1 for t in pool._tasks if t.admitted)
+        admitted = pool.admitted_count()
         detail = (
             "no task in the pool passed corpus admission — every candidate either "
             "does not discriminate or ships its answer in a public image; a scored "
