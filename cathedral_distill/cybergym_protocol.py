@@ -364,9 +364,16 @@ def process_submission(
 # --------------------------------------------------------------------------- #
 
 class CyberGymCorpusStore:
-    """The verified-solution corpus. Rows are the trajectory verbatim — the exact
-    training format — so a solved+trainable submission compounds into the corpus
-    with no transformation. Only verified, trainable, licenced, sealed rows land."""
+    """Verified, canonical training examples plus bounded duplicate evidence.
+
+    A corpus row is one solved ``(source_epoch, task_id, poc_sha256)``.  Trace
+    text and model seals make a trace content-addressed, but they must not let a
+    repeated solution inflate the training corpus or durable-progress counters.
+    Variants therefore increment an audit counter and retain only bounded
+    metadata; they never become additional training rows.
+    """
+
+    MAX_DUPLICATE_AUDIT_VARIANTS = 3
 
     def __init__(self, db_path: str) -> None:
         import sqlite3
@@ -379,24 +386,43 @@ class CyberGymCorpusStore:
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute(
             "CREATE TABLE IF NOT EXISTS cybergym_corpus ("
-            "  trace_id TEXT PRIMARY KEY,"
+            "  trace_id TEXT NOT NULL,"
             "  task_id TEXT NOT NULL, level INTEGER NOT NULL, source_epoch INTEGER NOT NULL,"
             "  miner_hotkey TEXT NOT NULL, model_id TEXT NOT NULL,"
             "  poc_sha256 TEXT NOT NULL, licence TEXT NOT NULL, model_seal TEXT NOT NULL,"
-            "  work_units TEXT NOT NULL, steps_json TEXT NOT NULL)"
+            "  work_units TEXT NOT NULL, steps_json TEXT NOT NULL,"
+            "  PRIMARY KEY (source_epoch, task_id, poc_sha256))"
         )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS cybergym_corpus_dedup_audit ("
+            "  source_epoch INTEGER NOT NULL, task_id TEXT NOT NULL, poc_sha256 TEXT NOT NULL,"
+            "  excluded_duplicates INTEGER NOT NULL, recorded_variants INTEGER NOT NULL,"
+            "  PRIMARY KEY (source_epoch, task_id, poc_sha256))"
+        )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS cybergym_corpus_duplicate_variants ("
+            "  source_epoch INTEGER NOT NULL, task_id TEXT NOT NULL, poc_sha256 TEXT NOT NULL,"
+            "  trace_id TEXT NOT NULL, miner_hotkey TEXT NOT NULL, model_id TEXT NOT NULL,"
+            "  model_seal TEXT NOT NULL,"
+            "  PRIMARY KEY (source_epoch, task_id, poc_sha256, trace_id))"
+        )
+        self._migrate_canonical_solve_identity()
         self._connection.commit()
 
     def record(self, outcome: SubmissionOutcome) -> bool:
-        """Persist a verified+trainable row. Returns True if it was added (or was
-        already present), False if the outcome is not corpus-eligible."""
+        """Persist a verified+trainable canonical solve.
+
+        Returns ``True`` when the outcome is corpus-eligible, including a
+        duplicate that was excluded from the training corpus and recorded in the
+        bounded audit trail. Returns ``False`` for an ineligible outcome.
+        """
         if not outcome.trainable or outcome.submission is None or outcome.trace_id is None:
             return False
         s = outcome.submission
         steps_json = json.dumps([st.as_dict() for st in s.steps], separators=(",", ":"))
         try:
             with self._connection:
-                self._connection.execute(
+                inserted = self._connection.execute(
                     "INSERT OR IGNORE INTO cybergym_corpus"
                     "(trace_id, task_id, level, source_epoch, miner_hotkey, model_id,"
                     " poc_sha256, licence, model_seal, work_units, steps_json)"
@@ -404,10 +430,107 @@ class CyberGymCorpusStore:
                     (outcome.trace_id, outcome.task_id, outcome.level, outcome.source_epoch,
                      outcome.miner_hotkey, s.model_id, outcome.poc_sha256, s.licence,
                      str(s.model_seal), str(outcome.work_units), steps_json),
-                )
+                ).rowcount
+                if not inserted:
+                    self._record_duplicate(
+                        source_epoch=outcome.source_epoch, task_id=outcome.task_id,
+                        poc_sha256=outcome.poc_sha256, trace_id=outcome.trace_id,
+                        miner_hotkey=outcome.miner_hotkey, model_id=s.model_id,
+                        model_seal=str(s.model_seal),
+                    )
         except self._sqlite.DatabaseError as exc:
             raise ProtocolError("failed to record corpus row") from exc
         return True
+
+    def _migrate_canonical_solve_identity(self) -> None:
+        """Rebuild legacy trace-identity databases under the canonical key.
+
+        Older databases used ``trace_id`` as their only identity.  Retain the
+        lexicographically first historical trace as the canonical training row and
+        move later variants to the bounded audit tables. The rebuild also lets the
+        same trace occur in separate source epochs, which the old global trace
+        primary key incorrectly rejected. The migration is transactional, so an
+        interrupted startup leaves the old database unchanged.
+        """
+        try:
+            with self._connection:
+                columns = self._connection.execute("PRAGMA table_info(cybergym_corpus)").fetchall()
+                primary_key = [
+                    row["name"] for row in sorted(columns, key=lambda row: int(row["pk"]))
+                    if row["pk"]
+                ]
+                if primary_key == ["source_epoch", "task_id", "poc_sha256"]:
+                    return
+                if primary_key != ["trace_id"]:
+                    raise ProtocolError("unsupported cybergym corpus schema")
+                self._connection.execute(
+                    "CREATE TABLE cybergym_corpus_canonical ("
+                    "  trace_id TEXT NOT NULL,"
+                    "  task_id TEXT NOT NULL, level INTEGER NOT NULL, source_epoch INTEGER NOT NULL,"
+                    "  miner_hotkey TEXT NOT NULL, model_id TEXT NOT NULL,"
+                    "  poc_sha256 TEXT NOT NULL, licence TEXT NOT NULL, model_seal TEXT NOT NULL,"
+                    "  work_units TEXT NOT NULL, steps_json TEXT NOT NULL,"
+                    "  PRIMARY KEY (source_epoch, task_id, poc_sha256))"
+                )
+                rows = self._connection.execute(
+                    "SELECT * FROM cybergym_corpus "
+                    "ORDER BY source_epoch, task_id, poc_sha256, trace_id"
+                ).fetchall()
+                for row in rows:
+                    inserted = self._connection.execute(
+                        "INSERT OR IGNORE INTO cybergym_corpus_canonical "
+                        "SELECT trace_id, task_id, level, source_epoch, miner_hotkey, model_id, "
+                        "poc_sha256, licence, model_seal, work_units, steps_json "
+                        "FROM cybergym_corpus WHERE trace_id=?",
+                        (row["trace_id"],),
+                    ).rowcount
+                    if not inserted:
+                        self._record_duplicate(
+                            source_epoch=int(row["source_epoch"]), task_id=str(row["task_id"]),
+                            poc_sha256=str(row["poc_sha256"]), trace_id=str(row["trace_id"]),
+                            miner_hotkey=str(row["miner_hotkey"]), model_id=str(row["model_id"]),
+                            model_seal=str(row["model_seal"]),
+                        )
+                self._connection.execute("DROP TABLE cybergym_corpus")
+                self._connection.execute(
+                    "ALTER TABLE cybergym_corpus_canonical RENAME TO cybergym_corpus"
+                )
+        except self._sqlite.DatabaseError as exc:
+            raise ProtocolError("failed to migrate canonical corpus identity") from exc
+
+    def _record_duplicate(
+        self, *, source_epoch: int, task_id: str, poc_sha256: str, trace_id: str,
+        miner_hotkey: str, model_id: str, model_seal: str,
+    ) -> None:
+        """Count an excluded duplicate and retain at most a few trace identities."""
+        self._connection.execute(
+            "INSERT INTO cybergym_corpus_dedup_audit"
+            "(source_epoch, task_id, poc_sha256, excluded_duplicates, recorded_variants)"
+            " VALUES (?,?,?,?,0)"
+            " ON CONFLICT(source_epoch, task_id, poc_sha256) DO UPDATE SET"
+            " excluded_duplicates=excluded_duplicates+1",
+            (int(source_epoch), str(task_id), str(poc_sha256), 1),
+        )
+        audit = self._connection.execute(
+            "SELECT recorded_variants FROM cybergym_corpus_dedup_audit "
+            "WHERE source_epoch=? AND task_id=? AND poc_sha256=?",
+            (int(source_epoch), str(task_id), str(poc_sha256)),
+        ).fetchone()
+        if audit is None or int(audit["recorded_variants"]) >= self.MAX_DUPLICATE_AUDIT_VARIANTS:
+            return
+        added = self._connection.execute(
+            "INSERT OR IGNORE INTO cybergym_corpus_duplicate_variants"
+            "(source_epoch, task_id, poc_sha256, trace_id, miner_hotkey, model_id, model_seal)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (int(source_epoch), str(task_id), str(poc_sha256), str(trace_id),
+             str(miner_hotkey), str(model_id), str(model_seal)),
+        ).rowcount
+        if added:
+            self._connection.execute(
+                "UPDATE cybergym_corpus_dedup_audit SET recorded_variants=recorded_variants+1 "
+                "WHERE source_epoch=? AND task_id=? AND poc_sha256=?",
+                (int(source_epoch), str(task_id), str(poc_sha256)),
+            )
 
     def rows(self, *, source_epoch: int | None = None) -> list[dict[str, Any]]:
         if source_epoch is None:
@@ -425,6 +548,27 @@ class CyberGymCorpusStore:
 
     def size(self) -> int:
         return self._connection.execute("SELECT COUNT(*) FROM cybergym_corpus").fetchone()[0]
+
+    def audit(self, *, source_epoch: int | None = None) -> dict[str, int]:
+        """Return canonical corpus and excluded-duplicate counts for status/export."""
+        where = "" if source_epoch is None else " WHERE source_epoch=?"
+        params = () if source_epoch is None else (int(source_epoch),)
+        canonical = self._connection.execute(
+            "SELECT COUNT(*) FROM cybergym_corpus" + where, params
+        ).fetchone()[0]
+        duplicates = self._connection.execute(
+            "SELECT COALESCE(SUM(excluded_duplicates), 0) FROM cybergym_corpus_dedup_audit" + where,
+            params,
+        ).fetchone()[0]
+        variants = self._connection.execute(
+            "SELECT COALESCE(SUM(recorded_variants), 0) FROM cybergym_corpus_dedup_audit" + where,
+            params,
+        ).fetchone()[0]
+        return {
+            "canonical_solves": int(canonical),
+            "excluded_duplicates": int(duplicates),
+            "recorded_duplicate_variants": int(variants),
+        }
 
     def close(self) -> None:
         self._connection.close()

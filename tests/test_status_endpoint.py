@@ -215,7 +215,13 @@ def test_the_corpus_grows_only_with_verified_trainable_solves(tmp_path):
     only on a genuinely corpus-eligible solve, and be visible before scoring."""
     svc = _service(tmp_path)
     before = st.build_status(svc)["corpus"]
-    assert before == {"available": True, "total_rows": 0, "this_epoch_rows": 0}
+    assert before == {
+        "available": True,
+        "total_rows": 0,
+        "this_epoch_rows": 0,
+        "excluded_duplicates": 0,
+        "this_epoch_excluded_duplicates": 0,
+    }
 
     _solve(svc)  # solved + trainable trace -> corpus-eligible, before any scoring pass
 
