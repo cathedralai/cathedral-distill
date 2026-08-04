@@ -89,8 +89,12 @@ class TestAdmitPoolBridge:
         def run(argv, **kwargs):
             import subprocess
             poc = b"real" if "cat" in argv else b""
-            rc = 0 if ("cat" in argv or "manifest" not in argv) else 1  # not public
-            return subprocess.CompletedProcess(argv, rc, stdout=poc, stderr=b"")
+            rc = 0 if ("cat" in argv or "manifest" not in argv) else 1
+            # "not public" must be the registry's answer, not a bare failure: a
+            # non-zero exit with no recognised not-found message is a probe
+            # error, which refuses admission outright (issue #78).
+            stderr = b"manifest unknown" if rc else b""
+            return subprocess.CompletedProcess(argv, rc, stdout=poc, stderr=stderr)
 
         refused = []
         out = ca.admit_pool(tasks, _run=run, _backend=backend,
