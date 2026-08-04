@@ -19,6 +19,10 @@ Required environment:
     32-byte Ed25519 seed as 64 hex characters.
 ``CYBERGYM_CORPUS_DB``, ``CYBERGYM_SCORE_DB``, ``CYBERGYM_SOLVE_DB``
     Persistent SQLite paths for the E2E lifecycle.
+``CYBERGYM_E2E_AS_OF``
+    A timezone-aware, stable ISO-8601 epoch timestamp.  It is pinned in the
+    durable manifest, so it must be reused for a restart and for the separate
+    close command.
 
 The process binds only ``127.0.0.1`` / ``::1`` and is meant to be reached over
 an SSH tunnel.  A production replacement must supply a real transport identity
@@ -69,6 +73,20 @@ def _e2e_enabled() -> None:
         )
 
 
+def _as_of_from_environment() -> datetime:
+    """Read a restart-stable E2E draw timestamp from the protected environment."""
+    raw = _required("CYBERGYM_E2E_AS_OF")
+    try:
+        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise SystemExit(
+            "CYBERGYM_E2E_AS_OF must be a timezone-aware ISO-8601 timestamp"
+        ) from None
+    if value.tzinfo is None:
+        raise SystemExit("CYBERGYM_E2E_AS_OF must include a timezone")
+    return value.astimezone(UTC)
+
+
 def build_service(
     *,
     fresh_seed: bytes,
@@ -77,6 +95,7 @@ def build_service(
     score_db: str,
     solve_db: str,
     validator_hotkey: str,
+    as_of: datetime,
 ) -> CyberGymService:
     """Construct the durable fresh E2E verifier; importable for integration tests."""
     holdout, backend = fresh_holdout(fresh_seed)
@@ -101,7 +120,7 @@ def build_service(
         signing_key_id="cybergym-fresh-e2e-1",
         batch_size=1,
         cutoff=None,
-        as_of=datetime.now(UTC),
+        as_of=as_of,
         # The explicit environment acknowledgement in ``main`` confines this to
         # loopback E2E.  Production keeps these defaults and must pass both real
         # policies, so this helper cannot accidentally be wired as an authority.
@@ -110,24 +129,34 @@ def build_service(
     )
 
 
-def main() -> None:
+def build_service_from_environment() -> CyberGymService:
+    """Build the fresh E2E service from its protected, restart-stable config.
+
+    The loopback server and the one-shot epoch closer call this same function so
+    they cannot accidentally reconstruct the durable epoch with different inputs.
+    """
     _e2e_enabled()
-    host = os.environ.get("CYBERGYM_HOST", "127.0.0.1").strip()
-    if host not in _LOOPBACK_HOSTS:
-        raise SystemExit("fresh E2E verifier may bind only a loopback host")
     try:
         fresh_seed = _hex_seed("CYBERGYM_FRESH_SEED")
     except FreshTaskError as exc:  # defensive: constructor also validates later
         raise SystemExit(f"CYBERGYM_FRESH_SEED is invalid: {exc}") from None
     signing_seed = _hex_seed("CYBERGYM_SIGNING_SEED", exact_bytes=32)
-    service = build_service(
+    return build_service(
         fresh_seed=fresh_seed,
         private_key=Ed25519PrivateKey.from_private_bytes(signing_seed),
         corpus_db=_required("CYBERGYM_CORPUS_DB"),
         score_db=_required("CYBERGYM_SCORE_DB"),
         solve_db=_required("CYBERGYM_SOLVE_DB"),
         validator_hotkey=os.environ.get("CYBERGYM_VALIDATOR_HOTKEY", "cathedral-fresh-e2e"),
+        as_of=_as_of_from_environment(),
     )
+
+
+def main() -> None:
+    host = os.environ.get("CYBERGYM_HOST", "127.0.0.1").strip()
+    if host not in _LOOPBACK_HOSTS:
+        raise SystemExit("fresh E2E verifier may bind only a loopback host")
+    service = build_service_from_environment()
     port = int(os.environ.get("PORT", "8667"))
     server = make_threaded_server(
         service,
