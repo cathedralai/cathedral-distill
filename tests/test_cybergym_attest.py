@@ -7,6 +7,7 @@ measurement, replayed/rebound report_data, stale — earns exactly zero, while t
 raw `solved` (the crash happened) stays true. The hardware-free path (no policy)
 is unchanged.
 """
+
 from __future__ import annotations
 
 import base64
@@ -17,7 +18,11 @@ from decimal import Decimal
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from cathedral_distill.attestation import ATTESTATION_SCHEMA, AttestationPolicy, sign_attestation
+from cathedral_distill.attestation import (
+    ATTESTATION_SCHEMA,
+    AttestationPolicy,
+    sign_attestation,
+)
 from cathedral_distill.cybergym_attest import (
     CyberGymAttestError,
     submission_report_data,
@@ -32,10 +37,12 @@ from cathedral_distill.cybergym_protocol import (
 )
 from cathedral_distill.cybergym_synthetic import SyntheticTaskSource, generate_bug
 
-MEASURE = "tdx-mrtd:" + "ab" * 24            # a pinned known-good enclave measurement
+MEASURE = "tdx-mrtd:" + "ab" * 24  # a pinned known-good enclave measurement
 ROOT_SEED = bytes(range(32))
 ROOT_ID = "intel-dcap-root-1"
-ROOT_PUB = Ed25519PrivateKey.from_private_bytes(ROOT_SEED).public_key().public_bytes_raw()
+ROOT_PUB = (
+    Ed25519PrivateKey.from_private_bytes(ROOT_SEED).public_key().public_bytes_raw()
+)
 ISSUED = "2026-07-29T12:00:00Z"
 NOW = datetime(2026, 7, 29, 12, 0, 0, tzinfo=UTC)
 MINER = "5AttestedMiner"
@@ -46,12 +53,24 @@ POLICY = AttestationPolicy(
 )
 
 
-def _make_token(*, report_data, tee="intel_tdx", measurement=MEASURE, issued_at=ISSUED,
-                key_id=ROOT_ID, seed=ROOT_SEED, gpu_measurement=None):
+def _make_token(
+    *,
+    report_data,
+    tee="intel_tdx",
+    measurement=MEASURE,
+    issued_at=ISSUED,
+    key_id=ROOT_ID,
+    seed=ROOT_SEED,
+    gpu_measurement=None,
+):
     unsigned = {
-        "schema": ATTESTATION_SCHEMA, "tee": tee, "measurement": measurement,
-        "gpu_measurement": gpu_measurement, "report_data": report_data,
-        "issued_at": issued_at, "signing_key_id": key_id,
+        "schema": ATTESTATION_SCHEMA,
+        "tee": tee,
+        "measurement": measurement,
+        "gpu_measurement": gpu_measurement,
+        "report_data": report_data,
+        "issued_at": issued_at,
+        "signing_key_id": key_id,
     }
     return sign_attestation(unsigned, seed)
 
@@ -69,26 +88,43 @@ def _floor_trace(task_id, poc_sha256):
     )
     steps = [
         {"step": 1, "action": "read_file", "thought": long},
-        {"step": 2, "action": "read_file",
-         "thought": "I re-read the length parse at synth.c:2 and the buffer declaration at synth.c:3 "
-                    "carefully to fix the exact overflowing length I need, confirming the buffer is a "
-                    "fixed-size stack array and the length is read straight from attacker bytes with no bound"},
-        {"step": 3, "action": "reason",
-         "thought": "the differential at synth.c:4 is crash-on-vulnerable and clean-on-patched, so my "
-                    "trigger must reproduce the magic exactly and then carry a length strictly greater than "
-                    "the buffer size, which the vulnerable build copies without checking while the patched "
-                    "build rejects it before the copy executes"},
-        {"step": 4, "action": "write_poc",
-         "thought": "I construct the input as magic bytes then a big-endian length just past the buffer "
-                    "size then that many filler payload bytes, so the memcpy at synth.c:4 writes beyond the "
-                    "buffer and corrupts adjacent stack memory on the vulnerable build only"},
-        {"step": 5, "action": "verify",
-         "thought": "I confirm the crafted input crashes the vulnerable build under the address sanitizer "
-                    "and the patched build exits cleanly at synth.c:4, matching the solved condition exactly"},
+        {
+            "step": 2,
+            "action": "read_file",
+            "thought": "I re-read the length parse at synth.c:2 and the buffer declaration at synth.c:3 "
+            "carefully to fix the exact overflowing length I need, confirming the buffer is a "
+            "fixed-size stack array and the length is read straight from attacker bytes with no bound",
+        },
+        {
+            "step": 3,
+            "action": "reason",
+            "thought": "the differential at synth.c:4 is crash-on-vulnerable and clean-on-patched, so my "
+            "trigger must reproduce the magic exactly and then carry a length strictly greater than "
+            "the buffer size, which the vulnerable build copies without checking while the patched "
+            "build rejects it before the copy executes",
+        },
+        {
+            "step": 4,
+            "action": "write_poc",
+            "thought": "I construct the input as magic bytes then a big-endian length just past the buffer "
+            "size then that many filler payload bytes, so the memcpy at synth.c:4 writes beyond the "
+            "buffer and corrupts adjacent stack memory on the vulnerable build only",
+        },
+        {
+            "step": 5,
+            "action": "verify",
+            "thought": "I confirm the crafted input crashes the vulnerable build under the address sanitizer "
+            "and the patched build exits cleanly at synth.c:4, matching the solved condition exactly",
+        },
     ]
-    return {"task_id": task_id, "poc_sha256": poc_sha256, "model_id": "cybergym/enclave",
-            "steps": steps, "licence": "cathedral-corpus-v1",
-            "model_seal": "sha256:" + hashlib.sha256(b"seal").hexdigest()}
+    return {
+        "task_id": task_id,
+        "poc_sha256": poc_sha256,
+        "model_id": "cybergym/enclave",
+        "steps": steps,
+        "licence": "cathedral-corpus-v1",
+        "model_seal": "sha256:" + hashlib.sha256(b"seal").hexdigest(),
+    }
 
 
 def _fixture(nonce="ance10ab", *, size=1):
@@ -97,11 +133,23 @@ def _fixture(nonce="ance10ab", *, size=1):
     batch = source.draw(size=size, nonce=nonce)
     task = batch.tasks[0]
     bug = generate_bug(nonce, 0, level=int(task.level))
-    dt = DispatchedTask(task_id=task.task_id, level=int(task.level),
-                        binary_digest=task.binary_digest, context={})
-    msg = DispatchMessage(network="finney", netuid=39, source_epoch=11,
-                          batch_id=batch.batch_id, nonce=nonce, miner_hotkey=MINER,
-                          valid_from_block=1, valid_until_block=999, tasks=(dt,))
+    dt = DispatchedTask(
+        task_id=task.task_id,
+        level=int(task.level),
+        binary_digest=task.binary_digest,
+        context={},
+    )
+    msg = DispatchMessage(
+        network="finney",
+        netuid=39,
+        source_epoch=11,
+        batch_id=batch.batch_id,
+        nonce=nonce,
+        miner_hotkey=MINER,
+        valid_from_block=1,
+        valid_until_block=999,
+        tasks=(dt,),
+    )
     return source, msg, task.task_id, bug.trigger
 
 
@@ -112,36 +160,52 @@ def _trace_id_of(task_id, digest):
 def _envelope(batch_id, task_id, poc, *, attestation=None, miner=MINER):
     digest = "sha256:" + hashlib.sha256(poc).hexdigest()
     return SubmissionEnvelope(
-        batch_id=batch_id, task_id=task_id, miner_hotkey=miner,
-        poc_base64=base64.b64encode(poc).decode(), trace=_floor_trace(task_id, digest),
+        batch_id=batch_id,
+        task_id=task_id,
+        miner_hotkey=miner,
+        poc_base64=base64.b64encode(poc).decode(),
+        trace=_floor_trace(task_id, digest),
         attestation=attestation,
     )
 
 
 def _attested_envelope(msg, task_id, poc, **over):
     digest = "sha256:" + hashlib.sha256(poc).hexdigest()
-    rd = submission_report_data(batch_id=msg.batch_id, task_id=task_id, poc_sha256=digest,
-                                trace_id=_trace_id_of(task_id, digest), miner_hotkey=MINER)
+    rd = submission_report_data(
+        batch_id=msg.batch_id,
+        task_id=task_id,
+        poc_sha256=digest,
+        trace_id=_trace_id_of(task_id, digest),
+        miner_hotkey=MINER,
+    )
     token = _make_token(report_data=rd, **over)
-    return _envelope(msg.batch_id, task_id, poc, attestation=base64.b64encode(token).decode())
+    return _envelope(
+        msg.batch_id, task_id, poc, attestation=base64.b64encode(token).decode()
+    )
 
 
 # --------------------------------------------------------------------------- #
 # report_data binding
 # --------------------------------------------------------------------------- #
 def test_report_data_is_deterministic_and_binds_every_field():
-    base = dict(batch_id="b", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m")
+    base = dict(
+        batch_id="b", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m"
+    )
     rd = submission_report_data(**base)
-    assert rd == submission_report_data(**base)          # deterministic
+    assert rd == submission_report_data(**base)  # deterministic
     assert len(rd) == 64 and all(c in "0123456789abcdef" for c in rd)
     for field in base:
         changed = dict(base, **{field: base[field] + "x"})
-        assert submission_report_data(**changed) != rd    # each field is bound (incl. trace_id)
+        assert (
+            submission_report_data(**changed) != rd
+        )  # each field is bound (incl. trace_id)
 
 
 def test_report_data_requires_all_fields():
     with pytest.raises(CyberGymAttestError):
-        submission_report_data(batch_id="", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m")
+        submission_report_data(
+            batch_id="", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -150,7 +214,9 @@ def test_report_data_requires_all_fields():
 def test_attested_solve_is_creditable_and_trainable():
     source, msg, task_id, poc = _fixture()
     env = _attested_envelope(msg, task_id, poc)
-    out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
+    out = process_submission(
+        env, msg, source.backend, attestation_policy=POLICY, now=NOW
+    )
     assert out.solved and out.attested and out.creditable
     assert out.work_units > 0
     assert out.trainable and out.reason == "solved_trainable"
@@ -160,95 +226,148 @@ def test_no_policy_keeps_hardware_free_behaviour():
     """Without an attestation policy, a solve earns with no attestation at all."""
     source, msg, task_id, poc = _fixture()
     env = _envelope(msg.batch_id, task_id, poc, attestation=None)
-    out = process_submission(env, msg, source.backend)   # no policy
+    out = process_submission(env, msg, source.backend)  # no policy
     assert out.solved and out.attested and out.creditable and out.work_units > 0
 
 
 # --------------------------------------------------------------------------- #
-# every attestation failure mode: solved stays true, but earns zero
+# every attestation failure mode: verifier execution is skipped and earns zero
 # --------------------------------------------------------------------------- #
 def test_missing_attestation_earns_zero():
     source, msg, task_id, poc = _fixture()
     env = _envelope(msg.batch_id, task_id, poc, attestation=None)
-    out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and not out.creditable
+    calls = []
+
+    def backend(*args, **kwargs):
+        calls.append((args, kwargs))
+        return source.backend(*args, **kwargs)
+
+    out = process_submission(env, msg, backend, attestation_policy=POLICY, now=NOW)
+    assert not out.solved and not out.attested and not out.creditable
     assert out.work_units == Decimal(0) and not out.trainable
-    assert out.reason == "solved_unattested:missing_tdx_attestation"
+    assert out.reason == "unattested:missing_tdx_attestation"
+    assert calls == []
 
 
 def test_wrong_tee_earns_zero():
     source, msg, task_id, poc = _fixture()
     env = _attested_envelope(msg, task_id, poc, tee="amd_sev_snp")
-    out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    out = process_submission(
+        env, msg, source.backend, attestation_policy=POLICY, now=NOW
+    )
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
     assert "Intel TDX" in out.reason or "tdx_attestation_invalid" in out.reason
 
 
 def test_untrusted_signer_earns_zero():
     source, msg, task_id, poc = _fixture()
-    env = _attested_envelope(msg, task_id, poc, seed=bytes(range(1, 33)))  # not the trusted root
-    out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    env = _attested_envelope(
+        msg, task_id, poc, seed=bytes(range(1, 33))
+    )  # not the trusted root
+    out = process_submission(
+        env, msg, source.backend, attestation_policy=POLICY, now=NOW
+    )
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_unpinned_measurement_earns_zero():
     source, msg, task_id, poc = _fixture()
-    env = _attested_envelope(msg, task_id, poc, measurement="tdx-mrtd:deadbeef")  # not allow-listed
-    out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    env = _attested_envelope(
+        msg, task_id, poc, measurement="tdx-mrtd:deadbeef"
+    )  # not allow-listed
+    out = process_submission(
+        env, msg, source.backend, attestation_policy=POLICY, now=NOW
+    )
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_replayed_attestation_for_another_poc_earns_zero():
     """An attestation bound to a DIFFERENT PoC cannot be reused for this one."""
     source, msg, task_id, poc = _fixture()
-    other_poc = poc + b"X"                                  # different bytes -> different digest
+    other_poc = poc + b"X"  # different bytes -> different digest
     other_digest = "sha256:" + hashlib.sha256(other_poc).hexdigest()
     real_digest = "sha256:" + hashlib.sha256(poc).hexdigest()
-    rd = submission_report_data(batch_id=msg.batch_id, task_id=task_id, poc_sha256=other_digest,
-                                trace_id=_trace_id_of(task_id, real_digest), miner_hotkey=MINER)
-    token = _make_token(report_data=rd)                    # bound to other_poc
-    env = _envelope(msg.batch_id, task_id, poc, attestation=base64.b64encode(token).decode())
-    out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    rd = submission_report_data(
+        batch_id=msg.batch_id,
+        task_id=task_id,
+        poc_sha256=other_digest,
+        trace_id=_trace_id_of(task_id, real_digest),
+        miner_hotkey=MINER,
+    )
+    token = _make_token(report_data=rd)  # bound to other_poc
+    env = _envelope(
+        msg.batch_id, task_id, poc, attestation=base64.b64encode(token).decode()
+    )
+    out = process_submission(
+        env, msg, source.backend, attestation_policy=POLICY, now=NOW
+    )
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_attestation_from_another_miner_earns_zero():
     """A valid attestation from miner A cannot credit miner B's submission."""
     source, msg, task_id, poc = _fixture()
     digest = "sha256:" + hashlib.sha256(poc).hexdigest()
-    rd_other = submission_report_data(batch_id=msg.batch_id, task_id=task_id, poc_sha256=digest,
-                                      trace_id=_trace_id_of(task_id, digest), miner_hotkey="5SomeoneElse")
+    rd_other = submission_report_data(
+        batch_id=msg.batch_id,
+        task_id=task_id,
+        poc_sha256=digest,
+        trace_id=_trace_id_of(task_id, digest),
+        miner_hotkey="5SomeoneElse",
+    )
     token = _make_token(report_data=rd_other)
-    env = _envelope(msg.batch_id, task_id, poc, attestation=base64.b64encode(token).decode())
-    out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    env = _envelope(
+        msg.batch_id, task_id, poc, attestation=base64.b64encode(token).decode()
+    )
+    out = process_submission(
+        env, msg, source.backend, attestation_policy=POLICY, now=NOW
+    )
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_stale_attestation_earns_zero():
     source, msg, task_id, poc = _fixture()
-    env = _attested_envelope(msg, task_id, poc, issued_at="2026-07-20T00:00:00Z")  # >1 day old
-    out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    env = _attested_envelope(
+        msg, task_id, poc, issued_at="2026-07-20T00:00:00Z"
+    )  # >1 day old
+    out = process_submission(
+        env, msg, source.backend, attestation_policy=POLICY, now=NOW
+    )
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_garbage_attestation_is_soft_reject_not_crash():
     source, msg, task_id, poc = _fixture()
     env = _envelope(msg.batch_id, task_id, poc, attestation="!!!not base64!!!")
-    out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    out = process_submission(
+        env, msg, source.backend, attestation_policy=POLICY, now=NOW
+    )
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_swapped_trace_earns_zero():
     """An attestation bound to trace A cannot vouch for a swapped-in trace B — the
     enclave must commit to the exact trajectory that lands in the corpus."""
     source, msg, task_id, poc = _fixture()
-    env = _attested_envelope(msg, task_id, poc)          # attestation bound to the real floor trace
+    env = _attested_envelope(
+        msg, task_id, poc
+    )  # attestation bound to the real floor trace
     swapped = dict(env.trace)
-    swapped["model_id"] = "cybergym/outsourced-trace"    # -> different trace_id, still floor-clearing
-    env2 = SubmissionEnvelope(batch_id=env.batch_id, task_id=env.task_id, miner_hotkey=env.miner_hotkey,
-                              poc_base64=env.poc_base64, trace=swapped, attestation=env.attestation)
-    out = process_submission(env2, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    swapped["model_id"] = (
+        "cybergym/outsourced-trace"  # -> different trace_id, still floor-clearing
+    )
+    env2 = SubmissionEnvelope(
+        batch_id=env.batch_id,
+        task_id=env.task_id,
+        miner_hotkey=env.miner_hotkey,
+        poc_base64=env.poc_base64,
+        trace=swapped,
+        attestation=env.attestation,
+    )
+    out = process_submission(
+        env2, msg, source.backend, attestation_policy=POLICY, now=NOW
+    )
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_service_requires_attestation_policy_by_default(tmp_path):
@@ -259,31 +378,67 @@ def test_service_requires_attestation_policy_by_default(tmp_path):
     from cathedral_distill.cybergym_protocol import CyberGymCorpusStore, ProtocolError
     from cathedral_distill.cybergym_service import CyberGymService
     from cathedral_distill.cybergym_validator import ChainContext
-    chain = ChainContext(block=1, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
-                         source_epoch=11, valid_from_block=1, valid_until_block=999)
-    common = dict(backend=lambda *a: 0, corpus_store=CyberGymCorpusStore(":memory:"),
-                  score_store=CyberGymScoreStore(":memory:", durability_required=False),
-                  solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
-                  validator_hotkey="5V",
-                  private_key=Ed25519PrivateKey.from_private_bytes(bytes(range(32))),
-                  signing_key_id="cybergym-1", batch_size=1, cutoff=None, as_of=None,
-                  gates_required=False)
-    with pytest.raises(ProtocolError, match="attestation policy"):  # no policy -> refuse
-        CyberGymService(Holdout(pool=SyntheticTaskSource(), _context={}), chain, **common)
+
+    chain = ChainContext(
+        block=1,
+        block_hash="0x" + "cd" * 32,
+        network="finney",
+        netuid=39,
+        source_epoch=11,
+        valid_from_block=1,
+        valid_until_block=999,
+    )
+    common = dict(
+        backend=lambda *a: 0,
+        corpus_store=CyberGymCorpusStore(":memory:"),
+        score_store=CyberGymScoreStore(":memory:", durability_required=False),
+        solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
+        validator_hotkey="5V",
+        private_key=Ed25519PrivateKey.from_private_bytes(bytes(range(32))),
+        signing_key_id="cybergym-1",
+        batch_size=1,
+        cutoff=None,
+        as_of=None,
+        gates_required=False,
+    )
+    with pytest.raises(
+        ProtocolError, match="attestation policy"
+    ):  # no policy -> refuse
+        CyberGymService(
+            Holdout(pool=SyntheticTaskSource(), _context={}), chain, **common
+        )
 
 
 # --------------------------------------------------------------------------- #
 # direct verifier unit checks
 # --------------------------------------------------------------------------- #
 def test_verify_submission_attestation_accepts_and_rejects():
-    rd = submission_report_data(batch_id="b", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m")
+    rd = submission_report_data(
+        batch_id="b", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m"
+    )
     good = _make_token(report_data=rd)
-    doc = verify_submission_attestation(good, batch_id="b", task_id="t", poc_sha256="p",
-                                        trace_id="tr", miner_hotkey="m", policy=POLICY, now=NOW)
+    doc = verify_submission_attestation(
+        good,
+        batch_id="b",
+        task_id="t",
+        poc_sha256="p",
+        trace_id="tr",
+        miner_hotkey="m",
+        policy=POLICY,
+        now=NOW,
+    )
     assert doc["tee"] == "intel_tdx"
-    with pytest.raises(CyberGymAttestError):               # rebound trace -> mismatch
-        verify_submission_attestation(good, batch_id="b", task_id="t", poc_sha256="p",
-                                      trace_id="OTHER", miner_hotkey="m", policy=POLICY, now=NOW)
+    with pytest.raises(CyberGymAttestError):  # rebound trace -> mismatch
+        verify_submission_attestation(
+            good,
+            batch_id="b",
+            task_id="t",
+            poc_sha256="p",
+            trace_id="OTHER",
+            miner_hotkey="m",
+            policy=POLICY,
+            now=NOW,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -297,17 +452,31 @@ def test_service_only_attested_miner_earns_and_composes(tmp_path):
     from cathedral_distill.cybergym_validator import ChainContext
 
     source = SyntheticTaskSource()
-    chain = ChainContext(block=100, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
-                         source_epoch=11, valid_from_block=1, valid_until_block=999)
+    chain = ChainContext(
+        block=100,
+        block_hash="0x" + "cd" * 32,
+        network="finney",
+        netuid=39,
+        source_epoch=11,
+        valid_from_block=1,
+        valid_until_block=999,
+    )
     svc = CyberGymService(
-        Holdout(pool=source, _context={}), chain, backend=source.backend,
+        Holdout(pool=source, _context={}),
+        chain,
+        backend=source.backend,
         corpus_store=CyberGymCorpusStore(":memory:"),
         score_store=CyberGymScoreStore(":memory:", durability_required=False),
         solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
         validator_hotkey="5Validator",
         private_key=Ed25519PrivateKey.from_private_bytes(bytes(range(32))),
-        signing_key_id="cybergym-1", batch_size=2, cutoff=None, as_of=None,
-        attestation_policy=POLICY, attestation_now=NOW, gates_required=False,
+        signing_key_id="cybergym-1",
+        batch_size=2,
+        cutoff=None,
+        as_of=None,
+        attestation_policy=POLICY,
+        attestation_now=NOW,
+        gates_required=False,
         # this test scores synthetic tasks on purpose, to prove the ATTESTATION gate
         # decides the reward; synthetic tasks are non-rewarding by default
         credit_synthetic_tasks=True,
@@ -317,23 +486,33 @@ def test_service_only_attested_miner_earns_and_composes(tmp_path):
     def solve_all(miner, *, attest):
         msg = svc.dispatch_for(miner, commit)
         for t in msg.tasks:
-            poc = source._bugs[t.task_id].trigger          # the correct crashing input
+            poc = source._bugs[t.task_id].trigger  # the correct crashing input
             digest = "sha256:" + hashlib.sha256(poc).hexdigest()
             att = None
             if attest:
-                rd = submission_report_data(batch_id=msg.batch_id, task_id=t.task_id,
-                                            poc_sha256=digest, trace_id=_trace_id_of(t.task_id, digest),
-                                            miner_hotkey=miner)
+                rd = submission_report_data(
+                    batch_id=msg.batch_id,
+                    task_id=t.task_id,
+                    poc_sha256=digest,
+                    trace_id=_trace_id_of(t.task_id, digest),
+                    miner_hotkey=miner,
+                )
                 att = base64.b64encode(_make_token(report_data=rd)).decode()
-            env = SubmissionEnvelope(batch_id=msg.batch_id, task_id=t.task_id, miner_hotkey=miner,
-                                     poc_base64=base64.b64encode(poc).decode(),
-                                     trace=_floor_trace(t.task_id, digest), attestation=att)
+            env = SubmissionEnvelope(
+                batch_id=msg.batch_id,
+                task_id=t.task_id,
+                miner_hotkey=miner,
+                poc_base64=base64.b64encode(poc).decode(),
+                trace=_floor_trace(t.task_id, digest),
+                attestation=att,
+            )
             yield svc.submit(env)
 
     attested_out = list(solve_all("5Attested", attest=True))
     unattested_out = list(solve_all("5Unattested", attest=False))
-    # both genuinely crashed the target...
-    assert all(o.solved for o in attested_out + unattested_out)
+    # Invalid/missing evidence never reaches the differential verifier.
+    assert all(o.solved for o in attested_out)
+    assert not any(o.solved for o in unattested_out)
     # ...but only the attested miner is creditable
     assert all(o.creditable for o in attested_out)
     assert not any(o.creditable for o in unattested_out)
@@ -341,7 +520,7 @@ def test_service_only_attested_miner_earns_and_composes(tmp_path):
     svc.score_epoch(issued_at="2026-07-29T12:00:00.000000Z")
     scores = svc._scores.epoch_scores(11)
     assert scores.get("5Attested", Decimal(0)) > 0
-    assert "5Unattested" not in scores                     # never entered the reward pool
+    assert "5Unattested" not in scores  # never entered the reward pool
 
     lane = svc.compose_lane(allocation=Decimal("0.90"))
     holders = {c.miner_hotkey for c in lane.contributions}

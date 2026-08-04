@@ -28,6 +28,7 @@ a non-loopback bind unless authentication is required for every mutating route. 
 and `cathedral_distill.served_keys` for why the registry is verified before it is
 served.
 """
+
 from __future__ import annotations
 
 import ipaddress
@@ -121,7 +122,9 @@ def make_handler(
                 # Read-only public data, so any origin may read it. Deliberately
                 # not set on the mutating POST routes.
                 self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Cache-Control", f"public, max-age={int(STATUS_TTL_SECS)}")
+                self.send_header(
+                    "Cache-Control", f"public, max-age={int(STATUS_TTL_SECS)}"
+                )
             self.end_headers()
             self.wfile.write(body)
 
@@ -265,19 +268,19 @@ def make_handler(
                 except ValueError:
                     self._send(400, {"error": "request is not valid JSON"})
                     return
-                _caller_id, ok = self._caller(body)
+                caller, ok = self._caller(body)
                 if not ok:
                     return
-                result = service.handle_artifact(request)
+                result = service.handle_artifact(request, authenticated_caller=caller)
                 self._send(400 if "error" in result else 200, result)
             elif self.path == SUBMIT_PATH:
                 body = self._read_body()
                 if body is None:
                     return
-                _caller_id, ok = self._caller(body)
+                caller, ok = self._caller(body)
                 if not ok:
                     return
-                result = service.handle_submit(body)
+                result = service.handle_submit(body, authenticated_caller=caller)
                 self._send(200 if result.get("accepted") else 400, result)
             else:
                 self._send(404, {"error": "unknown route"})
@@ -285,10 +288,15 @@ def make_handler(
     return _Handler
 
 
-def make_server(service: CyberGymService, host: str = "127.0.0.1", port: int = 0, *,
-                key_registry: ServedKeyRegistry | None = None,
-                authenticator: Callable[[Mapping[str, str], bytes], str | None] | None = None,
-                require_authentication: bool = False) -> HTTPServer:
+def make_server(
+    service: CyberGymService,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    *,
+    key_registry: ServedKeyRegistry | None = None,
+    authenticator: Callable[[Mapping[str, str], bytes], str | None] | None = None,
+    require_authentication: bool = False,
+) -> HTTPServer:
     """Build (but do not start) a single-threaded HTTP server for the service.
 
     Single-threaded on purpose: it serialises requests so the SQLite corpus/score
@@ -337,8 +345,9 @@ class _LockingService:
         """The lock the status build must also hold; it reads the same stores."""
         return self._lock
 
-    def handle_dispatch(self, request: Any, *,
-                        authenticated_caller: str | None = None) -> dict[str, Any]:
+    def handle_dispatch(
+        self, request: Any, *, authenticated_caller: str | None = None
+    ) -> dict[str, Any]:
         """Forwards the transport-proven identity.
 
         This wrapper previously did not ACCEPT `authenticated_caller`, so on the
@@ -348,23 +357,36 @@ class _LockingService:
         """
         with self._lock:
             return self._service.handle_dispatch(
-                request, authenticated_caller=authenticated_caller)
+                request, authenticated_caller=authenticated_caller
+            )
 
-    def handle_artifact(self, request: Any) -> dict[str, Any]:
+    def handle_artifact(
+        self, request: Any, *, authenticated_caller: str | None = None
+    ) -> dict[str, Any]:
         with self._lock:
-            return self._service.handle_artifact(request)
+            return self._service.handle_artifact(
+                request, authenticated_caller=authenticated_caller
+            )
 
-    def handle_submit(self, body: Any) -> dict[str, Any]:
+    def handle_submit(
+        self, body: Any, *, authenticated_caller: str | None = None
+    ) -> dict[str, Any]:
         with self._lock:
-            return self._service.handle_submit(body)
+            return self._service.handle_submit(
+                body, authenticated_caller=authenticated_caller
+            )
 
 
-def make_threaded_server(service: CyberGymService, host: str = "127.0.0.1", port: int = 0, *,
-                         healthz: Mapping[str, Any] | None = None,
-                         key_registry: ServedKeyRegistry | None = None,
-                         authenticator: Callable[[Mapping[str, str], bytes], str | None] | None = None,
-                         require_authentication: bool = False,
-                         ) -> ThreadingHTTPServer:
+def make_threaded_server(
+    service: CyberGymService,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    *,
+    healthz: Mapping[str, Any] | None = None,
+    key_registry: ServedKeyRegistry | None = None,
+    authenticator: Callable[[Mapping[str, str], bytes], str | None] | None = None,
+    require_authentication: bool = False,
+) -> ThreadingHTTPServer:
     """A production `ThreadingHTTPServer` for a real deployment.
 
     Unlike `make_server`, connections are accepted and threaded so a slow Docker
@@ -386,7 +408,9 @@ def make_threaded_server(service: CyberGymService, host: str = "127.0.0.1", port
     base = make_handler(
         locking,
         status_cache=StatusCache.for_service(
-            service, ttl_secs=STATUS_TTL_SECS, lock=locking.lock,
+            service,
+            ttl_secs=STATUS_TTL_SECS,
+            lock=locking.lock,
             key_registry=key_registry,
         ),
         # No lock: the registry is a file read behind its own lock, and it touches
@@ -411,5 +435,13 @@ def make_threaded_server(service: CyberGymService, host: str = "127.0.0.1", port
     return server
 
 
-__all__ = ["make_handler", "make_server", "make_threaded_server",
-           "DISPATCH_PATH", "ARTIFACT_PATH", "SUBMIT_PATH", "STATUS_PATH", "KEYS_PATH"]
+__all__ = [
+    "make_handler",
+    "make_server",
+    "make_threaded_server",
+    "DISPATCH_PATH",
+    "ARTIFACT_PATH",
+    "SUBMIT_PATH",
+    "STATUS_PATH",
+    "KEYS_PATH",
+]
