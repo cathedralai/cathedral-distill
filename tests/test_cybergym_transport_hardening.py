@@ -25,15 +25,19 @@ class _StubService:
 
     def __init__(self):
         self.dispatch_calls = []
+        self.artifact_calls = []
+        self.submit_calls = []
 
     def handle_dispatch(self, request, *, authenticated_caller=None):
         self.dispatch_calls.append(authenticated_caller)
         return {"ok": True, "caller": authenticated_caller}
 
-    def handle_artifact(self, request):
+    def handle_artifact(self, request, *, authenticated_caller=None):
+        self.artifact_calls.append(authenticated_caller)
         return {"ok": True}
 
-    def handle_submit(self, body):
+    def handle_submit(self, body, *, authenticated_caller=None):
+        self.submit_calls.append(authenticated_caller)
         return {"accepted": True}
 
 
@@ -87,6 +91,19 @@ def test_authenticated_caller_reaches_the_service():
         server.shutdown()
 
 
+def test_authenticated_caller_reaches_all_mutating_service_handlers():
+    """Artifact and submit must not silently discard the proven caller."""
+    svc, server = _server(authenticator=lambda headers, body: "5RealMiner")
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        assert _post(base, chttp.ARTIFACT_PATH, b'{"task_id":"arvo:1","batch_id":"b"}')[0] == 200
+        assert _post(base, chttp.SUBMIT_PATH, b'{}')[0] == 200
+        assert svc.artifact_calls == ["5RealMiner"]
+        assert svc.submit_calls == ["5RealMiner"]
+    finally:
+        server.shutdown()
+
+
 def test_without_an_authenticator_the_caller_is_none_and_routes_still_work():
     """Back-compat: the default deployment is unchanged."""
     svc, server = _server()
@@ -118,13 +135,14 @@ def test_an_authenticator_that_raises_is_treated_as_unauthenticated():
     def boom(headers, body):
         raise RuntimeError("verifier exploded")
 
-    svc, server = _server(authenticator=boom, require_authentication=True)
-    try:
-        base = f"http://127.0.0.1:{server.server_address[1]}"
-        assert _post(base, chttp.DISPATCH_PATH)[0] == 401
-        assert svc.dispatch_calls == []
-    finally:
-        server.shutdown()
+    for authenticator in (boom, lambda headers, body: ""):
+        svc, server = _server(authenticator=authenticator, require_authentication=True)
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            assert _post(base, chttp.DISPATCH_PATH)[0] == 401
+            assert svc.dispatch_calls == []
+        finally:
+            server.shutdown()
 
 
 def test_a_body_shorter_than_content_length_is_rejected_not_hung():

@@ -4,7 +4,7 @@ Three POST routes over the stdlib `http.server` — the whole wire surface of th
 CyberGym lane — plus one anonymous GET for dashboards:
 
     POST /cybergym/dispatch   {miner_hotkey, model_commitment}  -> DispatchMessage
-    POST /cybergym/artifact   {task_id}                          -> {task_id, program}
+    POST /cybergym/artifact   {task_id, batch_id?}                -> {task_id, program}
     POST /cybergym/submit     <SubmissionEnvelope JSON>         -> verdict
     GET  /v1/status                                              -> live status
     GET  /v1/keys                                                -> signed key registry
@@ -236,6 +236,8 @@ def make_handler(
                     identity = authenticator(self.headers, body)
                 except Exception:  # an authenticator must never 500 the route
                     identity = None
+            if not isinstance(identity, str) or not identity:
+                identity = None
             if require_authentication and identity is None:
                 self._send(401, {"error": "authentication required"})
                 return None, False
@@ -265,19 +267,19 @@ def make_handler(
                 except ValueError:
                     self._send(400, {"error": "request is not valid JSON"})
                     return
-                _caller_id, ok = self._caller(body)
+                caller, ok = self._caller(body)
                 if not ok:
                     return
-                result = service.handle_artifact(request)
+                result = service.handle_artifact(request, authenticated_caller=caller)
                 self._send(400 if "error" in result else 200, result)
             elif self.path == SUBMIT_PATH:
                 body = self._read_body()
                 if body is None:
                     return
-                _caller_id, ok = self._caller(body)
+                caller, ok = self._caller(body)
                 if not ok:
                     return
-                result = service.handle_submit(body)
+                result = service.handle_submit(body, authenticated_caller=caller)
                 self._send(200 if result.get("accepted") else 400, result)
             else:
                 self._send(404, {"error": "unknown route"})
@@ -350,13 +352,17 @@ class _LockingService:
             return self._service.handle_dispatch(
                 request, authenticated_caller=authenticated_caller)
 
-    def handle_artifact(self, request: Any) -> dict[str, Any]:
+    def handle_artifact(self, request: Any, *,
+                        authenticated_caller: str | None = None) -> dict[str, Any]:
         with self._lock:
-            return self._service.handle_artifact(request)
+            return self._service.handle_artifact(
+                request, authenticated_caller=authenticated_caller)
 
-    def handle_submit(self, body: Any) -> dict[str, Any]:
+    def handle_submit(self, body: Any, *,
+                      authenticated_caller: str | None = None) -> dict[str, Any]:
         with self._lock:
-            return self._service.handle_submit(body)
+            return self._service.handle_submit(
+                body, authenticated_caller=authenticated_caller)
 
 
 def make_threaded_server(service: CyberGymService, host: str = "127.0.0.1", port: int = 0, *,

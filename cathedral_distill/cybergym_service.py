@@ -443,13 +443,44 @@ class CyberGymService:
         """
         return self._credit_synthetic_tasks or not is_synthetic_task(task_id)
 
-    def submit(self, envelope: SubmissionEnvelope) -> SubmissionOutcome:
+    def _authorize_caller_for_batch(self, *, authenticated_caller: str | None,
+                                    batch_id: str, task_id: str,
+                                    claimed_miner_hotkey: str | None = None) -> None:
+        """Bind an authenticated transport caller to one sealed batch and task.
+
+        Legacy loopback development has no transport identity, so ``None`` keeps
+        the existing batch ownership checks.  Once a transport proves a caller,
+        however, it must not be able to use another miner's batch or submit under
+        another hotkey.  This executes before Docker verification: authorization
+        failures consume no verifier capacity.
+        """
+        if authenticated_caller is None:
+            return
+        if claimed_miner_hotkey is not None and claimed_miner_hotkey != authenticated_caller:
+            raise ProtocolError("authenticated caller does not match submission miner_hotkey")
+        owner = self._by_batch.get(batch_id)
+        if owner != authenticated_caller:
+            raise ProtocolError("authenticated caller does not own this batch")
+        state = self._miners.get(authenticated_caller)
+        if state is None or state.dispatch is None or state.dispatch.batch_id != batch_id:
+            raise ProtocolError("authenticated caller has no active sealed batch")
+        if state.dispatch.task(task_id) is None:
+            raise ProtocolError("task is not in the authenticated caller's batch")
+
+    def submit(self, envelope: SubmissionEnvelope, *,
+               authenticated_caller: str | None = None) -> SubmissionOutcome:
         """Verify one submission against the batch we dispatched, and corpus it.
 
         The returned `work_units` is what the epoch will actually pay for this task:
         a solve of a non-rewardable task reports zero here as well as at emission, so
         the wire and the reward agree.
         """
+        self._authorize_caller_for_batch(
+            authenticated_caller=authenticated_caller,
+            batch_id=envelope.batch_id,
+            task_id=envelope.task_id,
+            claimed_miner_hotkey=envelope.miner_hotkey,
+        )
         miner_hotkey = self._by_batch.get(envelope.batch_id)
         if miner_hotkey is None:
             raise ProtocolError("submission references an unknown or expired batch")
@@ -493,7 +524,8 @@ class CyberGymService:
         return outcome
 
     # -- artifact (validator -> miner): the vulnerable program to analyse --- #
-    def artifact_for(self, task_id: str) -> str:
+    def artifact_for(self, task_id: str, *, batch_id: str | None = None,
+                     authenticated_caller: str | None = None) -> str:
         """Return the vulnerable program a miner must analyse for a dispatched task.
 
         This is the 'binary'/'repo' a CyberGym miner needs — over the wire a miner
@@ -505,7 +537,15 @@ class CyberGymService:
         corpus task it is fetched out of band by `binary_digest` (not inline), so
         this raises directing the miner there.
         """
-        if task_id not in self._dispatched:
+        if authenticated_caller is not None:
+            if not batch_id:
+                raise ProtocolError("authenticated artifact request requires batch_id")
+            self._authorize_caller_for_batch(
+                authenticated_caller=authenticated_caller,
+                batch_id=batch_id,
+                task_id=task_id,
+            )
+        elif task_id not in self._dispatched:
             raise ProtocolError("no such dispatched task")
         provider = getattr(self.holdout.pool, "artifact", None)
         program = provider(task_id) if provider is not None else None
@@ -516,15 +556,28 @@ class CyberGymService:
         return str(program)
 
     # -- transport-agnostic handlers --------------------------------------- #
-    def handle_artifact(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        """{task_id} -> {task_id, program} (or {error}). Never raises."""
+    def handle_artifact(self, request: Mapping[str, Any], *,
+                        authenticated_caller: str | None = None) -> dict[str, Any]:
+        """``{task_id, batch_id?}`` -> ``{task_id, program}`` (or ``{error}``).
+
+        An authenticated caller must supply its sealed ``batch_id``. The optional
+        field preserves the loopback development contract, which has no caller
+        identity to bind.
+        """
         if not isinstance(request, Mapping):
             return {"error": "artifact request must be an object"}
         task_id = request.get("task_id")
         if not isinstance(task_id, str) or not task_id:
             return {"error": "task_id is required"}
+        batch_id = request.get("batch_id")
+        if batch_id is not None and (not isinstance(batch_id, str) or not batch_id):
+            return {"error": "batch_id must be a non-empty string when provided"}
         try:
-            return {"task_id": task_id, "program": self.artifact_for(task_id)}
+            return {
+                "task_id": task_id,
+                "program": self.artifact_for(
+                    task_id, batch_id=batch_id, authenticated_caller=authenticated_caller),
+            }
         except (ProtocolError, ValueError) as exc:
             return {"error": str(exc)}
 
@@ -553,11 +606,12 @@ class CyberGymService:
         except (ProtocolError, ValueError) as exc:
             return {"error": str(exc)}
 
-    def handle_submit(self, body: bytes | str) -> dict[str, Any]:
+    def handle_submit(self, body: bytes | str, *,
+                      authenticated_caller: str | None = None) -> dict[str, Any]:
         """A POSTed SubmissionEnvelope -> a verdict dict (never raises)."""
         try:
             envelope = SubmissionEnvelope.from_json(body)
-            outcome = self.submit(envelope)
+            outcome = self.submit(envelope, authenticated_caller=authenticated_caller)
         except (ProtocolError, ValueError) as exc:
             return {"accepted": False, "error": str(exc)}
         return {

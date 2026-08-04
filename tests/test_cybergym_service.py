@@ -169,6 +169,22 @@ def test_submit_with_foreign_hotkey_is_refused(tmp_path):
         svc.submit(_envelope(d, "arvo:1", b"exploit", miner="5Attacker"))
 
 
+def test_authenticated_submit_rejects_a_foreign_caller_before_backend(tmp_path):
+    svc = _service(tmp_path)
+    d = svc.dispatch_for("5Miner", MODEL, authenticated_caller="5Miner")
+
+    def should_not_run(*_args):
+        raise AssertionError("unauthorized submission reached the verifier backend")
+
+    svc._backend = should_not_run
+    verdict = svc.handle_submit(
+        json.dumps(_envelope(d, "arvo:1", b"exploit").to_dict()).encode(),
+        authenticated_caller="5Attacker",
+    )
+    assert verdict["accepted"] is False
+    assert "does not match" in verdict["error"] or "does not own" in verdict["error"]
+
+
 def test_handle_submit_never_raises(tmp_path):
     svc = _service(tmp_path)
     result = svc.handle_submit(b"{not json")
