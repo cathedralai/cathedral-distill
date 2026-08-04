@@ -7,6 +7,7 @@ attestation to exactly one `(task_id, poc, trace)` and fails closed on a wrong T
 an unverified quote, a replay/lift to another submission, an unsealed worker, and a
 stale receipt — the properties that make an attested solve un-forgeable.
 """
+
 from __future__ import annotations
 
 import base64
@@ -20,6 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cathedral_distill.cybergym_cathedral_attest import (  # noqa: E402
+    artifacts_sha256,
     commitment_sha256,
     tee_kind,
     verify_boot_attestation,
@@ -32,28 +34,58 @@ TRACE_ID = "sha256:" + "cd" * 32
 NOW = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
 
 
-def _receipt(*, task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID, kind="tdx-1.5",
-             intel_verified=True, report_data_match=True, reuse="forbidden",
-             egress="none", hardware="tdx_cpu", exit_code=0, status="ready",
-             started="2026-07-30T11:59:00Z", artifact_sha=None):
+def _receipt(
+    *,
+    task_id=TASK,
+    poc_sha256=POC_SHA,
+    trace_id=TRACE_ID,
+    kind="tdx-1.5",
+    intel_verified=True,
+    report_data_match=True,
+    reuse="forbidden",
+    egress="none",
+    hardware="tdx_cpu",
+    exit_code=0,
+    status="ready",
+    started="2026-07-30T11:59:00Z",
+    artifact_sha=None,
+):
     """A well-formed receipt whose result.txt artifact commits to (task,poc,trace)."""
-    sha = artifact_sha if artifact_sha is not None else commitment_sha256(
-        task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id)
+    sha = (
+        artifact_sha
+        if artifact_sha is not None
+        else commitment_sha256(
+            task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id
+        )
+    )
+    artifacts = [{"path": "result.txt", "sha256": sha, "size_bytes": 209}]
     return {
         "receipt_id": "352e0bb4-2f92-4d18-b468-f65a93a46d77",
-        "receipt_status": status, "exit_code": exit_code, "started_at": started,
-        "files_sha256": "72" * 16, "artifacts_sha256": "58" * 16, "policy_sha256": "02" * 16,
+        "receipt_status": status,
+        "exit_code": exit_code,
+        "started_at": started,
+        "files_sha256": "72" * 16,
+        "artifacts_sha256": artifacts_sha256(artifacts),
+        "policy_sha256": "02" * 16,
         "task_policy": {"reuse": reuse, "egress": egress, "hardware_class": hardware},
-        "verification": {"intel_verified": intel_verified, "report_data_match": report_data_match},
-        "artifacts": [{"path": "result.txt", "sha256": sha, "size_bytes": 209}],
-        "tee_attestation": {"kind": kind, "quote_b64": "BAACAIEA…",
-                            "bound_digest": "sha256:57cd", "result_sha256": "3a39"},
+        "verification": {
+            "intel_verified": intel_verified,
+            "report_data_match": report_data_match,
+        },
+        "artifacts": artifacts,
+        "tee_attestation": {
+            "kind": kind,
+            "quote_b64": "BAACAIEA…",
+            "bound_digest": "sha256:57cd",
+            "result_sha256": "3a39",
+        },
     }
 
 
 def _ok(receipt):
-    return verify_cathedral_attestation(receipt, task_id=TASK, poc_sha256=POC_SHA,
-                                        trace_id=TRACE_ID, now=NOW)
+    return verify_cathedral_attestation(
+        receipt, task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID, now=NOW
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -62,7 +94,9 @@ def _ok(receipt):
 def test_a_genuine_sealed_tdx_receipt_binds_the_submission():
     r = _ok(_receipt())
     assert r.attested and r.tee == "intel_tdx" and r.reason == "attested_intel_tdx"
-    assert r.artifact_sha256 == commitment_sha256(task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID)
+    assert r.artifact_sha256 == commitment_sha256(
+        task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID
+    )
 
 
 def test_tee_kind_maps_tdx_and_refuses_sev():
@@ -84,9 +118,9 @@ def test_unverified_quote_is_refused():
 
 
 def test_unsealed_worker_is_refused():
-    assert not _ok(_receipt(reuse="allowed")).attested       # replayable worker
-    assert not _ok(_receipt(egress="allow:*")).attested      # can phone home
-    assert not _ok(_receipt(hardware="cpu")).attested        # not a TEE
+    assert not _ok(_receipt(reuse="allowed")).attested  # replayable worker
+    assert not _ok(_receipt(egress="allow:*")).attested  # can phone home
+    assert not _ok(_receipt(hardware="cpu")).attested  # not a TEE
     assert not _ok(_receipt(exit_code=1)).attested
     assert not _ok(_receipt(status="pending")).attested
 
@@ -97,17 +131,20 @@ def test_unsealed_worker_is_refused():
 def test_attestation_cannot_be_replayed_for_another_task():
     # a receipt attesting task arvo:1065 can't credit an arvo:368 submission
     other = _receipt(task_id="arvo:1065")
-    r = verify_cathedral_attestation(other, task_id="arvo:368", poc_sha256=POC_SHA,
-                                     trace_id=TRACE_ID, now=NOW)
+    r = verify_cathedral_attestation(
+        other, task_id="arvo:368", poc_sha256=POC_SHA, trace_id=TRACE_ID, now=NOW
+    )
     assert not r.attested and "does not bind" in r.reason
 
 
 def test_attestation_cannot_be_paired_with_a_different_poc_or_trace():
     r = _receipt()
     assert not verify_cathedral_attestation(
-        r, task_id=TASK, poc_sha256="sha256:" + "99" * 32, trace_id=TRACE_ID, now=NOW).attested
+        r, task_id=TASK, poc_sha256="sha256:" + "99" * 32, trace_id=TRACE_ID, now=NOW
+    ).attested
     assert not verify_cathedral_attestation(
-        r, task_id=TASK, poc_sha256=POC_SHA, trace_id="sha256:" + "99" * 32, now=NOW).attested
+        r, task_id=TASK, poc_sha256=POC_SHA, trace_id="sha256:" + "99" * 32, now=NOW
+    ).attested
 
 
 def test_missing_result_artifact_is_refused():
@@ -124,8 +161,10 @@ def test_stale_attestation_is_refused():
 def test_a_naive_timestamp_does_not_crash_and_is_still_freshness_checked():
     # regression: a tz-less started_at must not raise (the "never raises" contract)
     # — it is read as UTC and judged by the same window, fresh or stale.
-    assert _ok(_receipt(started="2026-07-30T11:59:00")).attested        # naive, ~1 min old
-    assert not _ok(_receipt(started="2026-07-01T00:00:00")).attested    # naive, a month old
+    assert _ok(_receipt(started="2026-07-30T11:59:00")).attested  # naive, ~1 min old
+    assert not _ok(
+        _receipt(started="2026-07-01T00:00:00")
+    ).attested  # naive, a month old
 
 
 def test_a_missing_timestamp_fails_closed_not_open():
@@ -138,8 +177,9 @@ def test_a_missing_timestamp_fails_closed_not_open():
 
 
 def test_a_malformed_receipt_fails_closed_without_raising():
-    assert not verify_cathedral_attestation({}, task_id=TASK, poc_sha256=POC_SHA,
-                                            trace_id=TRACE_ID, now=NOW).attested
+    assert not verify_cathedral_attestation(
+        {}, task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID, now=NOW
+    ).attested
 
 
 # --------------------------------------------------------------------------- #
@@ -154,18 +194,75 @@ def test_trustless_mode_verifies_the_raw_quote_and_ignores_the_issuer_flag():
         return True
 
     # even with Cathedral's own flags false, a passing raw-quote verify credits it
-    r = verify_cathedral_attestation(_receipt(intel_verified=False, report_data_match=False),
-                                     task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID,
-                                     now=NOW, quote_verifier=verifier)
+    r = verify_cathedral_attestation(
+        _receipt(intel_verified=False, report_data_match=False),
+        task_id=TASK,
+        poc_sha256=POC_SHA,
+        trace_id=TRACE_ID,
+        now=NOW,
+        quote_verifier=verifier,
+    )
     assert r.attested and r.trustless and r.reason == "attested_intel_tdx_trustless"
     assert seen["quote"].startswith("BAAC") and len(seen["rd"]) == 64
 
 
 def test_trustless_mode_fails_closed_when_the_quote_is_rejected():
-    r = verify_cathedral_attestation(_receipt(), task_id=TASK, poc_sha256=POC_SHA,
-                                     trace_id=TRACE_ID, now=NOW,
-                                     quote_verifier=lambda q, rd: False)
+    r = verify_cathedral_attestation(
+        _receipt(),
+        task_id=TASK,
+        poc_sha256=POC_SHA,
+        trace_id=TRACE_ID,
+        now=NOW,
+        quote_verifier=lambda q, rd: False,
+    )
     assert not r.attested and "raw TDX quote" in r.reason
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda receipt: receipt["artifacts"].append(
+            {"path": "stdout.txt", "sha256": "ef" * 32, "size_bytes": 0}
+        ),
+        lambda receipt: receipt["artifacts"].__setitem__(
+            0, {"path": "result.txt", "sha256": "ef" * 32, "size_bytes": 209}
+        ),
+    ],
+)
+def test_trustless_mode_rejects_an_artifact_list_that_no_longer_matches_the_quote(
+    mutation,
+):
+    receipt = _receipt()
+    mutation(receipt)
+    result = verify_cathedral_attestation(
+        receipt,
+        task_id=TASK,
+        poc_sha256=POC_SHA,
+        trace_id=TRACE_ID,
+        now=NOW,
+        quote_verifier=lambda _quote, _report_data: True,
+    )
+    assert not result.attested
+    assert "artifacts_sha256" in result.reason
+
+
+def test_trustless_mode_rejects_reordered_artifacts():
+    receipt = _receipt()
+    receipt["artifacts"].append(
+        {"path": "stdout.txt", "sha256": "ef" * 32, "size_bytes": 0}
+    )
+    receipt["artifacts_sha256"] = artifacts_sha256(receipt["artifacts"])
+    receipt["artifacts"].reverse()
+    result = verify_cathedral_attestation(
+        receipt,
+        task_id=TASK,
+        poc_sha256=POC_SHA,
+        trace_id=TRACE_ID,
+        now=NOW,
+        quote_verifier=lambda _quote, _report_data: True,
+    )
+    assert not result.attested
+    assert "artifacts_sha256" in result.reason
 
 
 # --------------------------------------------------------------------------- #
@@ -174,18 +271,35 @@ def test_trustless_mode_fails_closed_when_the_quote_is_rejected():
 SSH_PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexampleexamplekey cathedral"
 
 
-def _boot_receipt(*, ssh_pubkey=SSH_PUB, kind="tdx-1.5", intel_verified=True,
-                  binding_verified=True, verified=True, status="ready", nonce="9c99da63",
-                  started="2026-07-30T11:59:00Z"):
+def _boot_receipt(
+    *,
+    ssh_pubkey=SSH_PUB,
+    kind="tdx-1.5",
+    intel_verified=True,
+    binding_verified=True,
+    verified=True,
+    status="ready",
+    nonce="9c99da63",
+    started="2026-07-30T11:59:00Z",
+):
     """A custom.v1 boot receipt whose report_data binds the ssh key, per the real recipe
     report_data[0:32] = sha256(nonce_hex || base64(ssh_pubkey))."""
     pub_b64 = base64.b64encode(ssh_pubkey.strip().encode()).decode()
     rd = hashlib.sha256((nonce + pub_b64).encode()).hexdigest()
-    return {"receipt_id": "74bb4a0b-9b61-4d10-bcfd-9a1d2e958b7d", "receipt_status": status,
-            "kind": kind, "intel_verified": intel_verified, "intel_status": "verified",
-            "binding_verified": binding_verified, "verified": verified,
-            "nonce": nonce, "pubkey_b64": pub_b64, "report_data": rd,
-            "quote_b64": "BAACAIEA…", "started_at": started}
+    return {
+        "receipt_id": "74bb4a0b-9b61-4d10-bcfd-9a1d2e958b7d",
+        "receipt_status": status,
+        "kind": kind,
+        "intel_verified": intel_verified,
+        "intel_status": "verified",
+        "binding_verified": binding_verified,
+        "verified": verified,
+        "nonce": nonce,
+        "pubkey_b64": pub_b64,
+        "report_data": rd,
+        "quote_b64": "BAACAIEA…",
+        "started_at": started,
+    }
 
 
 def _boot(receipt, *, key=SSH_PUB, now=NOW, **kw):
@@ -221,7 +335,7 @@ def test_boot_quote_bound_to_a_different_key_is_refused():
 
 
 def test_boot_quote_issuer_trust_still_requires_verified_flags():
-    assert _boot(_boot_receipt()).attested                       # verified flags true
+    assert _boot(_boot_receipt()).attested  # verified flags true
     assert not _boot(_boot_receipt(intel_verified=False, verified=False)).attested
     assert not _boot(_boot_receipt(binding_verified=False, verified=False)).attested
     assert not _boot(_boot_receipt(verified=False)).attested
@@ -261,8 +375,10 @@ def test_the_same_boot_quote_cannot_verify_indefinitely():
 
 def test_boot_quote_trustless_mode_checks_the_raw_quote():
     seen = {}
-    ok = _boot(_boot_receipt(intel_verified=False, verified=False),
-               quote_verifier=lambda q, rd: seen.setdefault("q", q) or True)
+    ok = _boot(
+        _boot_receipt(intel_verified=False, verified=False),
+        quote_verifier=lambda q, rd: seen.setdefault("q", q) or True,
+    )
     assert ok.attested and seen["q"].startswith("BAAC")
     bad = _boot(_boot_receipt(), quote_verifier=lambda q, rd: False)
     assert not bad.attested and "raw boot quote" in bad.reason

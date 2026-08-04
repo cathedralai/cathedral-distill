@@ -33,6 +33,7 @@ a `quote_verifier` to additionally verify the raw `quote_b64` against Intel DCAP
 collateral (**trustless**) — that raw-quote parse is the standing INFRA seam; the
 binding logic here is independent of it, and fails closed.
 """
+
 from __future__ import annotations
 
 import base64
@@ -55,14 +56,54 @@ QuoteVerifier = Callable[[str, str], bool]
 def commitment_bytes(*, task_id: str, poc_sha256: str, trace_id: str) -> bytes:
     """The exact `result.txt` the enclave writes — a canonical commitment the
     validator can reproduce byte-for-byte from the submission."""
-    body = {"schema": COMMITMENT_SCHEMA, "task_id": task_id,
-            "poc_sha256": poc_sha256, "trace_id": trace_id}
+    body = {
+        "schema": COMMITMENT_SCHEMA,
+        "task_id": task_id,
+        "poc_sha256": poc_sha256,
+        "trace_id": trace_id,
+    }
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def commitment_sha256(*, task_id: str, poc_sha256: str, trace_id: str) -> str:
-    return hashlib.sha256(commitment_bytes(
-        task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id)).hexdigest()
+    return hashlib.sha256(
+        commitment_bytes(task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id)
+    ).hexdigest()
+
+
+def artifacts_sha256(artifacts: Any) -> str:
+    """Digest the exact ordered attest.v1 artifact list.
+
+    The quote binds this scalar, so it must be derived from the submitted list
+    rather than trusted as a second mutable claim.  Order is deliberate: a
+    reordered list is a different receipt payload and fails verification.
+    """
+    if not isinstance(artifacts, list) or not artifacts:
+        raise ValueError("artifacts must be a non-empty list")
+    canonical = []
+    paths: set[str] = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            raise ValueError("artifact must be an object")
+        path = artifact.get("path")
+        sha256 = artifact.get("sha256")
+        size = artifact.get("size_bytes")
+        if (
+            not isinstance(path, str)
+            or not path
+            or not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(char not in "0123456789abcdef" for char in sha256.lower())
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 0
+            or path in paths
+        ):
+            raise ValueError("artifact list is malformed")
+        paths.add(path)
+        canonical.append({"path": path, "sha256": sha256.lower(), "size_bytes": size})
+    text = json.dumps(canonical, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(text.encode("ascii")).hexdigest()
 
 
 def tee_kind(receipt: Mapping[str, Any]) -> str:
@@ -70,7 +111,9 @@ def tee_kind(receipt: Mapping[str, Any]) -> str:
     tee name. An Intel TDX quote → 'intel_tdx'; anything else is refused. Reads the
     top-level `kind` (custom.v1 boot receipt) or the nested `tee_attestation.kind`
     (attest.v1 result receipt)."""
-    kind = str(receipt.get("kind") or receipt.get("tee_attestation", {}).get("kind", "")).lower()
+    kind = str(
+        receipt.get("kind") or receipt.get("tee_attestation", {}).get("kind", "")
+    ).lower()
     if kind.startswith("tdx"):
         return REQUIRED_TEE
     if kind.startswith("sev"):
@@ -85,7 +128,7 @@ class CathedralAttestation:
     reason: str
     receipt_id: str = ""
     artifact_sha256: str = ""
-    trustless: bool = False   # True iff the raw quote was independently verified
+    trustless: bool = False  # True iff the raw quote was independently verified
 
 
 def _iso(value: Any) -> datetime | None:
@@ -99,8 +142,13 @@ def _iso(value: Any) -> datetime | None:
 
 
 def verify_cathedral_attestation(
-    receipt: Mapping[str, Any], *, task_id: str, poc_sha256: str, trace_id: str,
-    now: datetime | None = None, max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
+    receipt: Mapping[str, Any],
+    *,
+    task_id: str,
+    poc_sha256: str,
+    trace_id: str,
+    now: datetime | None = None,
+    max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
     quote_verifier: QuoteVerifier | None = None,
 ) -> CathedralAttestation:
     """Verify a Cathedral worker receipt attests THIS submission ran in real Intel TDX.
@@ -125,7 +173,9 @@ def verify_cathedral_attestation(
 
     policy = receipt.get("task_policy", {})
     if str(policy.get("hardware_class")) != REQUIRED_HARDWARE:
-        return no(f"hardware_class={policy.get('hardware_class')!r} (need {REQUIRED_HARDWARE})")
+        return no(
+            f"hardware_class={policy.get('hardware_class')!r} (need {REQUIRED_HARDWARE})"
+        )
     if str(policy.get("reuse")) != "forbidden":
         return no("worker is not single-use (reuse must be forbidden)")
     if str(policy.get("egress")) != "none":
@@ -143,31 +193,53 @@ def verify_cathedral_attestation(
     if age < -300:
         return no("attestation is from the future")
 
+    # In trustless mode the report_data binds `artifacts_sha256`. Recompute that
+    # scalar from the submitted list *before* extracting result.txt, so no
+    # mutable artifact can affect any later admission decision without also
+    # matching the independently verified quote.
+    actual_artifacts_sha: str | None = None
+    if quote_verifier is not None:
+        try:
+            actual_artifacts_sha = artifacts_sha256(receipt.get("artifacts"))
+        except ValueError as exc:
+            return no(f"artifact list is invalid: {exc}")
+        if str(receipt.get("artifacts_sha256", "")) != actual_artifacts_sha:
+            return no("artifacts_sha256 does not match the submitted artifact list")
+
     # --- the submission binding: the attested result.txt IS the commitment ---
-    expect = commitment_sha256(task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id)
-    artifact = next((a for a in receipt.get("artifacts", [])
-                     if str(a.get("path")) == RESULT_ARTIFACT), None)
+    expect = commitment_sha256(
+        task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id
+    )
+    artifact = next(
+        (
+            a
+            for a in receipt.get("artifacts", [])
+            if str(a.get("path")) == RESULT_ARTIFACT
+        ),
+        None,
+    )
     if artifact is None:
         return no(f"no {RESULT_ARTIFACT} artifact in the attested output")
     got = str(artifact.get("sha256", ""))
     if got != expect:
-        return no("attested commitment does not bind this task/poc/trace "
-                  f"(artifact {got[:16]}… != expected {expect[:16]}…)")
+        return no(
+            "attested commitment does not bind this task/poc/trace "
+            f"(artifact {got[:16]}… != expected {expect[:16]}…)"
+        )
 
     # --- the quote itself: trusted-issuer by default, trustless if a verifier is given ---
-    # SECURITY (trustless seam): report_data[32:64] binds the `artifacts_sha256`
-    # SCALAR, while the commitment above is matched against the `artifacts[]` LIST.
-    # The adapter does not yet recompute the scalar from the list, so before the
-    # trustless DCAP path is wired in production the list→scalar binding MUST be
-    # verified with Cathedral's canonical `artifacts_sha256` recipe — otherwise a
-    # genuine quote can be re-paired with a swapped result.txt. Trusted-issuer
-    # (default) is unaffected: Cathedral validates the full binding server-side.
     verification = receipt.get("verification", {})
     trustless = False
     if quote_verifier is not None:
         quote_b64 = str(receipt.get("tee_attestation", {}).get("quote_b64", ""))
-        expected_rd = _expected_report_data_hex(receipt)
-        if not quote_b64 or expected_rd is None or not quote_verifier(quote_b64, expected_rd):
+        expected_rd = _expected_report_data_hex(
+            receipt, artifacts_sha256=actual_artifacts_sha
+        )
+        if (
+            not quote_b64
+            or expected_rd is None
+            or not quote_verifier(quote_b64, expected_rd)
+        ):
             return no("raw TDX quote failed independent verification")
         trustless = True
     else:
@@ -176,19 +248,24 @@ def verify_cathedral_attestation(
         if verification.get("report_data_match") is not True:
             return no("Cathedral report_data_match is not true")
 
-    return CathedralAttestation(True, REQUIRED_TEE,
-                                "attested_intel_tdx" + ("_trustless" if trustless else ""),
-                                rid, got, trustless)
+    return CathedralAttestation(
+        True,
+        REQUIRED_TEE,
+        "attested_intel_tdx" + ("_trustless" if trustless else ""),
+        rid,
+        got,
+        trustless,
+    )
 
 
 @dataclass(frozen=True)
 class BootAttestation:
-    attested: bool                 # a genuine Intel-TDX worker booted
+    attested: bool  # a genuine Intel-TDX worker booted
     tee: str
     reason: str
     receipt_id: str = ""
-    key_bound: bool = False        # the quote binds the *expected* (miner's) SSH key
-    result_bound: bool = False     # ALWAYS False: a boot quote never binds the PoC/trace
+    key_bound: bool = False  # the quote binds the *expected* (miner's) SSH key
+    result_bound: bool = False  # ALWAYS False: a boot quote never binds the PoC/trace
 
     @property
     def miner_attested(self) -> bool:
@@ -199,8 +276,11 @@ class BootAttestation:
 
 
 def verify_boot_attestation(
-    receipt: Mapping[str, Any], *, expected_ssh_pubkey: str | None,
-    now: datetime | None = None, max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
+    receipt: Mapping[str, Any],
+    *,
+    expected_ssh_pubkey: str | None,
+    now: datetime | None = None,
+    max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
     quote_verifier: QuoteVerifier | None = None,
 ) -> BootAttestation:
     """Verify a Cathedral `custom.v1` **boot** quote: a sealed Intel-TDX worker that
@@ -246,8 +326,10 @@ def verify_boot_attestation(
     # be produced by anyone with any TDX worker, so an absent key is a refusal,
     # never an attested-but-unbound result a caller could misread as credit.
     if not isinstance(expected_ssh_pubkey, str) or not expected_ssh_pubkey.strip():
-        return no("no expected ssh pubkey: an unbound boot quote proves only that "
-                  "some TDX worker booted and must never credit a miner")
+        return no(
+            "no expected ssh pubkey: an unbound boot quote proves only that "
+            "some TDX worker booted and must never credit a miner"
+        )
 
     # Freshness, the same bounds as `verify_cathedral_attestation` (fail closed: a
     # missing or unparseable timestamp refuses, else an old-but-genuine receipt
@@ -277,18 +359,24 @@ def verify_boot_attestation(
         if not q or not quote_verifier(q, str(receipt.get("report_data", ""))):
             return no("raw boot quote failed independent verification")
     else:
-        if receipt.get("intel_verified") is not True and str(receipt.get("intel_status")) != "verified":
+        if (
+            receipt.get("intel_verified") is not True
+            and str(receipt.get("intel_status")) != "verified"
+        ):
             return no("Cathedral did not report intel_verified")
         if receipt.get("binding_verified") is not True:
             return no("customer key binding not verified")
         if receipt.get("verified") is not True:
             return no("boot quote not verified (intel chain and/or binding failed)")
 
-    return BootAttestation(True, REQUIRED_TEE, "attested_intel_tdx_boot_key_bound",
-                           rid, True)
+    return BootAttestation(
+        True, REQUIRED_TEE, "attested_intel_tdx_boot_key_bound", rid, True
+    )
 
 
-def _expected_report_data_hex(receipt: Mapping[str, Any]) -> str | None:
+def _expected_report_data_hex(
+    receipt: Mapping[str, Any], *, artifacts_sha256: str | None = None
+) -> str | None:
     """Recompute report_data[32:64] from the receipt fields per Cathedral's
     binding_recipe, for a trustless quote check. Returns None if a needed field is
     absent (fail closed)."""
@@ -297,17 +385,32 @@ def _expected_report_data_hex(receipt: Mapping[str, Any]) -> str | None:
     result_sha = t.get("result_sha256") or receipt.get("result_sha256")
     files_sha = receipt.get("files_sha256", "")
     policy_sha = receipt.get("policy_sha256", "")
-    artifacts_sha = receipt.get("artifacts_sha256", "")
+    artifacts_sha = (
+        artifacts_sha256
+        if artifacts_sha256 is not None
+        else receipt.get("artifacts_sha256", "")
+    )
     egress_sha = receipt.get("egress_log_sha256", "")
     if not bound or not result_sha:
         return None
-    material = "".join(str(x) for x in (bound, result_sha, egress_sha, files_sha, policy_sha, artifacts_sha))
+    material = "".join(
+        str(x)
+        for x in (bound, result_sha, egress_sha, files_sha, policy_sha, artifacts_sha)
+    )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 __all__ = [
-    "COMMITMENT_SCHEMA", "REQUIRED_TEE", "REQUIRED_HARDWARE", "RESULT_ARTIFACT",
-    "commitment_bytes", "commitment_sha256", "tee_kind",
-    "CathedralAttestation", "verify_cathedral_attestation",
-    "BootAttestation", "verify_boot_attestation",
+    "COMMITMENT_SCHEMA",
+    "REQUIRED_TEE",
+    "REQUIRED_HARDWARE",
+    "RESULT_ARTIFACT",
+    "commitment_bytes",
+    "commitment_sha256",
+    "artifacts_sha256",
+    "tee_kind",
+    "CathedralAttestation",
+    "verify_cathedral_attestation",
+    "BootAttestation",
+    "verify_boot_attestation",
 ]
