@@ -22,6 +22,7 @@ from decimal import Decimal
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral_distill import compute_receipt as _compute
+from cathedral_distill import compute_work_evidence as _compute_work_evidence
 from cathedral_distill import cybergym as _cybergym
 from cathedral_distill import cybergym_batch as _cybergym_batch
 from cathedral_distill import cybergym_receipt as _cybergym_receipt
@@ -35,6 +36,14 @@ _SCORE_Q = Decimal("0.000000000001")
 
 def digest(seed: str) -> str:
     return "sha256:" + hashlib.sha256(seed.encode()).hexdigest()
+
+
+class _ComputeReceiptFixture(dict):
+    """A normal receipt mapping paired with its explicit test transport sidecar."""
+
+    def __init__(self, receipt: dict, work_evidence: dict[str, str]) -> None:
+        super().__init__(receipt)
+        self.work_evidence = work_evidence
 
 
 class IntegrationFixtures:
@@ -110,12 +119,89 @@ class IntegrationFixtures:
             "platform": platform,
         }
 
+    @staticmethod
+    def _work_artifacts(subject: str, variation: str) -> tuple[str, bytes, bytes]:
+        """Build bounded, canonical customer SAT artifacts worth exactly 20 units.
+
+        ``variation`` makes fixture receipts distinct without teaching tests that
+        arbitrary signer-selected unit counts are valid.  The result's raw units
+        remain a deliberately absurd miner claim to prove the replayer ignores it.
+        """
+        seed = int.from_bytes(
+            hashlib.sha256(f"{subject}\0{variation}".encode()).digest()[:8], "big"
+        ) & ((1 << 63) - 1)
+        instance = {"n_vars": 3, "clauses": [[1, 2], [-1, 3], [-2, 3]]}
+        challenge_id = hashlib.sha256(
+            json.dumps(
+                {"n_vars": instance["n_vars"], "clauses": instance["clauses"], "seed": seed},
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        work_item = json.dumps(
+            {
+                "schema": "cathedral_sat_manifest_v1",
+                "challenge_id": challenge_id,
+                "seed": seed,
+                "instance": instance,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        result = json.dumps(
+            {
+                "assigned_hotkey": subject,
+                "assignment": [1, 2, 3],
+                "challenge_id": challenge_id,
+                "satisfiable": True,
+                "work_units": 1e300,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        return challenge_id, work_item, result
+
+    def _compute_receipt_with_evidence(
+        self, subject: str, variation: str, platform: dict, cpu_tee: str
+    ) -> _ComputeReceiptFixture:
+        challenge_id, work_item, result = self._work_artifacts(subject, variation)
+        body = self._compute_body(subject, "20", platform, cpu_tee)
+        body["work"] = {
+            "challenge_id": challenge_id,
+            "manifest_digest": "sha256:" + hashlib.sha256(work_item).hexdigest(),
+            "result_digest": "sha256:" + hashlib.sha256(result).hexdigest(),
+            "status": "passed",
+            "work_units": "20",
+        }
+        receipt = _compute.build_receipt(body, self.key, signing_key_id="compute-1")
+        return _ComputeReceiptFixture(
+            receipt,
+            _compute_work_evidence.build_work_evidence(receipt, work_item, result),
+        )
+
+    @staticmethod
+    def attach_compute_work_evidence(
+        receipt: dict, source: _ComputeReceiptFixture
+    ) -> _ComputeReceiptFixture:
+        """Attach the same digest-bound artifacts to a re-signed fixture receipt.
+
+        Tests that alter non-work claims (for example a TCB advisory) re-sign a
+        receipt over the same immutable work.  The evidence remains valid only
+        after rebinding its explicit transport receipt id to that new receipt.
+        """
+        evidence = dict(source.work_evidence)
+        evidence["receipt_id"] = receipt["receipt_id"]
+        return _ComputeReceiptFixture(receipt, evidence)
+
     def cpu_receipt(self, subject: str = "5CpuMiner", work_units: str = "30",
                     cpu_tee: str = _compute.CPU_TEE_TDX) -> dict:
         platform = {"class": _compute.PLATFORM_CPU, "cpu_tee": cpu_tee}
-        return _compute.build_receipt(
-            self._compute_body(subject, work_units, platform, cpu_tee),
-            self.key, signing_key_id="compute-1")
+        return self._compute_receipt_with_evidence(
+            subject, str(work_units), platform, cpu_tee
+        )
 
     def gpu_receipt(self, subject: str = "5GpuMiner", work_units: str = "20",
                     bound: str | None = None, cc_mode: str = "on",
@@ -125,9 +211,9 @@ class IntegrationFixtures:
             "cc_mode": cc_mode, "vbios_measurement": digest("vbios"),
             "attestation_report_digest": digest("gpu-report"),
             "bound_measurement": bound or self.measurement_for(cpu_tee)}}
-        return _compute.build_receipt(
-            self._compute_body(subject, work_units, platform, cpu_tee),
-            self.key, signing_key_id="compute-1")
+        return self._compute_receipt_with_evidence(
+            subject, str(work_units), platform, cpu_tee
+        )
 
     # -- Distill (cathedral_distill_receipt_v1) ------------------------------ #
     def distill_receipt(self, subject: str = "5DistillMiner",

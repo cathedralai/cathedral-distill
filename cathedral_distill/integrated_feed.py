@@ -45,6 +45,7 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
 from cathedral_distill import compute_receipt as _compute
+from cathedral_distill import compute_work_evidence as _compute_work_evidence
 from cathedral_distill import cybergym_receipt as _cybergym
 from cathedral_distill import distill_receipt as _distill
 from cathedral_distill import lane_feed as _lane_feed
@@ -107,6 +108,16 @@ class LaneSubmission:
     kind: str
     receipt: Mapping[str, Any]
     lane: str
+    # Required for a positive Compute contribution.  The signed receipt binds
+    # its artifact digests, while this versioned sidecar supplies the exact
+    # bytes required to replay the unit derivation.
+    work_evidence: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.work_evidence is None:
+            attached = getattr(self.receipt, "work_evidence", None)
+            if isinstance(attached, Mapping):
+                object.__setattr__(self, "work_evidence", attached)
 
 
 def _resolve_ledger(consumption_ledger: Any, *, entry: str) -> Any:
@@ -149,12 +160,15 @@ def verify_lane_receipt(
     allowed_measurements: frozenset[str] | set[str] | None = None,
     allowed_tcb_statuses: frozenset[str] | set[str] | None = None,
     allowed_advisories: frozenset[str] | set[str] | None = None,
+    work_evidence: Mapping[str, Any] | None = None,
 ) -> ReceiptDecision:
     """Verify one lane receipt and return its PASS / FAIL / NOT_PROVEN decision.
 
     A verifier that proves the receipt wrong -> `FAIL`. Evidence that cannot be
     checked at all (a GPU receipt with no attestation verifier configured) ->
-    `NOT_PROVEN`, never a silent pass. Only `PASS` contributes weight.
+    `NOT_PROVEN`, never a silent pass. A Compute receipt also needs its
+    ``cathedral_compute_work_evidence_v1`` sidecar; the signed number alone is
+    never creditable. Only `PASS` contributes weight.
 
     `consumption_ledger` is required: a `ConsumptionLedger`, or the typed
     `NO_REPLAY_LEDGER` opt-out. This is the entry the external validator calls per
@@ -189,6 +203,10 @@ def verify_lane_receipt(
     # Resolved before any receipt data is read: a missing replay decision is a
     # caller error that must surface immediately, not a per-receipt FAIL.
     ledger = _resolve_ledger(consumption_ledger, entry="verify_lane_receipt")
+    if work_evidence is None:
+        attached = getattr(receipt, "work_evidence", None)
+        if isinstance(attached, Mapping):
+            work_evidence = attached
     receipt_id = _raw(receipt, "receipt_id")
     try:
         if kind in (KIND_COMPUTE_CPU, KIND_COMPUTE_GPU):
@@ -214,6 +232,7 @@ def verify_lane_receipt(
                 raise _compute.ComputeReceiptError(
                     f"receipt platform is not {expected}"
                 )
+            _compute_work_evidence.verify_work_evidence(doc, work_evidence)
             contribution = _compute.lane_contribution(doc)
         elif kind == KIND_DISTILL:
             if now_iso is None:
@@ -241,6 +260,7 @@ def verify_lane_receipt(
             contribution = _cybergym.lane_contribution(doc)
     except (
         _compute.ComputeReceiptError,
+        _compute_work_evidence.ComputeWorkEvidenceError,
         _distill.DistillReceiptError,
         _cybergym.CyberGymReceiptError,
     ) as exc:
@@ -376,6 +396,7 @@ def verify_lane_receipts(
                 allowed_measurements=allowed_measurements,
                 allowed_tcb_statuses=allowed_tcb_statuses,
                 allowed_advisories=allowed_advisories,
+                work_evidence=submission.work_evidence,
             )
         except Exception as exc:  # noqa: BLE001 - including IntegratedFeedError
             decisions.append(

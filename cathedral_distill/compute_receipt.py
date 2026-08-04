@@ -236,6 +236,8 @@ def verify_receipt(
     caller-supplied key), signature, policy gating, replay/epoch binding,
     lifecycle, freshness, the CPU-TEE quote, and — for a GPU receipt — the
     composite GPU attestation (CC mode, binding to this quote, injected verifier).
+    This is the signed-receipt parser; the crediting lane additionally requires
+    replayable SAT work evidence before it emits a positive contribution.
 
     `cpu_quote_verifier` is the independent raw TDX/SEV-SNP quote check, mirroring
     `gpu_attestation_verifier`. It is OPTIONAL: absent, the receipt is admitted on
