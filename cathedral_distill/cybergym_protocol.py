@@ -17,6 +17,7 @@ messages are plain JSON-serialisable dataclasses. A real deployment is a thin HT
 a POSTed `SubmissionEnvelope` into `process_submission`. The ~130 GB CyberGym
 binaries plug in behind the same backend the hardware-free tests inject.
 """
+
 from __future__ import annotations
 
 import base64
@@ -69,6 +70,7 @@ class ProtocolError(ValueError):
 # 1. Dispatch — validator → miner
 # --------------------------------------------------------------------------- #
 
+
 @dataclass(frozen=True)
 class DispatchedTask:
     task_id: str
@@ -77,8 +79,12 @@ class DispatchedTask:
     context: Mapping[str, str]  # only the level-appropriate fields, revealed
 
     def to_dict(self) -> dict[str, Any]:
-        return {"task_id": self.task_id, "level": self.level,
-                "binary_digest": self.binary_digest, "context": dict(self.context)}
+        return {
+            "task_id": self.task_id,
+            "level": self.level,
+            "binary_digest": self.binary_digest,
+            "context": dict(self.context),
+        }
 
 
 @dataclass(frozen=True)
@@ -104,9 +110,11 @@ class DispatchMessage:
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema": DISPATCH_SCHEMA,
-            "network": self.network, "netuid": self.netuid,
+            "network": self.network,
+            "netuid": self.netuid,
             "source_epoch": self.source_epoch,
-            "batch_id": self.batch_id, "nonce": self.nonce,
+            "batch_id": self.batch_id,
+            "nonce": self.nonce,
             "miner_hotkey": self.miner_hotkey,
             "valid_from_block": self.valid_from_block,
             "valid_until_block": self.valid_until_block,
@@ -140,9 +148,13 @@ def dispatch(
     never in any public dataset) both satisfy it identically.
     """
     nonce = derive_batch_nonce(
-        block=chain.block, block_hash=chain.block_hash, network=chain.network,
-        netuid=chain.netuid, source_epoch=chain.source_epoch,
-        miner_hotkey=miner_hotkey, model_commitment=model_commitment,
+        block=chain.block,
+        block_hash=chain.block_hash,
+        network=chain.network,
+        netuid=chain.netuid,
+        source_epoch=chain.source_epoch,
+        miner_hotkey=miner_hotkey,
+        model_commitment=model_commitment,
     )
     batch = pool.draw(size=batch_size, nonce=nonce, as_of=as_of, cutoff=cutoff)
     tasks: list[DispatchedTask] = []
@@ -150,12 +162,23 @@ def dispatch(
         allowed = LEVEL_CONTEXT_FIELDS.get(int(task.level), ())
         full = dict(context_provider(task.task_id)) if context_provider else {}
         revealed = {k: str(full[k]) for k in allowed if k in full}
-        tasks.append(DispatchedTask(task_id=task.task_id, level=int(task.level),
-                                    binary_digest=task.binary_digest, context=revealed))
+        tasks.append(
+            DispatchedTask(
+                task_id=task.task_id,
+                level=int(task.level),
+                binary_digest=task.binary_digest,
+                context=revealed,
+            )
+        )
     return DispatchMessage(
-        network=chain.network, netuid=chain.netuid, source_epoch=chain.source_epoch,
-        batch_id=batch.batch_id, nonce=nonce, miner_hotkey=miner_hotkey,
-        valid_from_block=chain.valid_from_block, valid_until_block=chain.valid_until_block,
+        network=chain.network,
+        netuid=chain.netuid,
+        source_epoch=chain.source_epoch,
+        batch_id=batch.batch_id,
+        nonce=nonce,
+        miner_hotkey=miner_hotkey,
+        valid_from_block=chain.valid_from_block,
+        valid_until_block=chain.valid_until_block,
         tasks=tuple(tasks),
     )
 
@@ -163,6 +186,7 @@ def dispatch(
 # --------------------------------------------------------------------------- #
 # 2. Submission — miner → validator
 # --------------------------------------------------------------------------- #
+
 
 @dataclass(frozen=True)
 class SubmissionEnvelope:
@@ -184,9 +208,12 @@ class SubmissionEnvelope:
 
     def to_dict(self) -> dict[str, Any]:
         doc: dict[str, Any] = {
-            "schema": ENVELOPE_SCHEMA, "batch_id": self.batch_id,
-            "task_id": self.task_id, "miner_hotkey": self.miner_hotkey,
-            "poc_base64": self.poc_base64, "trace": dict(self.trace),
+            "schema": ENVELOPE_SCHEMA,
+            "batch_id": self.batch_id,
+            "task_id": self.task_id,
+            "miner_hotkey": self.miner_hotkey,
+            "poc_base64": self.poc_base64,
+            "trace": dict(self.trace),
         }
         if self.attestation is not None:
             doc["attestation"] = self.attestation
@@ -208,21 +235,33 @@ class SubmissionEnvelope:
         attestation = doc.get("attestation")
         if attestation is not None and not isinstance(attestation, str):
             raise ProtocolError("submission attestation must be a base64 string")
-        return cls(batch_id=str(doc["batch_id"]), task_id=str(doc["task_id"]),
-                   miner_hotkey=str(doc["miner_hotkey"]), poc_base64=str(doc["poc_base64"]),
-                   trace=doc["trace"], attestation=attestation)
+        return cls(
+            batch_id=str(doc["batch_id"]),
+            task_id=str(doc["task_id"]),
+            miner_hotkey=str(doc["miner_hotkey"]),
+            poc_base64=str(doc["poc_base64"]),
+            trace=doc["trace"],
+            attestation=attestation,
+        )
 
 
 def _trace_from_dict(doc: Mapping[str, Any]) -> TraceSubmission:
     try:
         steps = tuple(
-            TraceStep(step=int(s["step"]), thought=str(s["thought"]),
-                      action=str(s["action"]), output=str(s.get("output", "")))
+            TraceStep(
+                step=int(s["step"]),
+                thought=str(s["thought"]),
+                action=str(s["action"]),
+                output=str(s.get("output", "")),
+            )
             for s in doc["steps"]
         )
         return TraceSubmission(
-            task_id=str(doc["task_id"]), poc_sha256=str(doc["poc_sha256"]),
-            model_id=str(doc["model_id"]), steps=steps, licence=str(doc["licence"]),
+            task_id=str(doc["task_id"]),
+            poc_sha256=str(doc["poc_sha256"]),
+            model_id=str(doc["model_id"]),
+            steps=steps,
+            licence=str(doc["licence"]),
             model_seal=doc.get("model_seal"),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -232,6 +271,7 @@ def _trace_from_dict(doc: Mapping[str, Any]) -> TraceSubmission:
 # --------------------------------------------------------------------------- #
 # 3. Verify + gate + score — the validator's intake pipeline
 # --------------------------------------------------------------------------- #
+
 
 @dataclass(frozen=True)
 class SubmissionOutcome:
@@ -252,12 +292,14 @@ class SubmissionOutcome:
     solved: bool
     trainable: bool
     reason: str
-    work_units: Decimal            # level-weighted, validator-derived (0 unless creditable)
-    bonus: float                   # trace + seal bonus, gated on quality
+    work_units: Decimal  # level-weighted, validator-derived (0 unless creditable)
+    bonus: float  # trace + seal bonus, gated on quality
     poc_sha256: str
     trace_id: str | None
     submission: TraceSubmission | None = field(default=None, repr=False)
-    attested: bool = True          # Intel-TDX attestation verified + bound (vacuously true if no policy)
+    attested: bool = (
+        True  # Intel-TDX attestation verified + bound (vacuously true if no policy)
+    )
 
     @property
     def creditable(self) -> bool:
@@ -312,13 +354,9 @@ def process_submission(
     if submission.poc_sha256 != digest:
         raise ProtocolError("trace poc_sha256 does not match the submitted PoC bytes")
 
-    task = Task(task_id=dt.task_id, level=Level(dt.level), binary_digest=dt.binary_digest)
-    result = verify_poc(task, poc_bytes, backend)
-    poc_sub = PoCSubmission(task_id=task.task_id, poc_sha256=digest, result=result)
-
-    solved = result.solved
-
-    # Intel-TDX attestation: the CyberGym miner MUST run in an attested TDX enclave.
+    # Intel-TDX attestation is checked before the differential container run.
+    # Invalid evidence is not merely uncreditable: executing it first lets an
+    # authenticated client monopolize verifier capacity with throwaway PoCs.
     attested = True
     attest_reason = ""
     if attestation_policy is not None:
@@ -328,13 +366,40 @@ def process_submission(
             try:
                 token = base64.b64decode(envelope.attestation, validate=True)
                 verify_submission_attestation(
-                    token, batch_id=envelope.batch_id, task_id=envelope.task_id,
-                    poc_sha256=digest, trace_id=submission.trace_id(),
+                    token,
+                    batch_id=envelope.batch_id,
+                    task_id=envelope.task_id,
+                    poc_sha256=digest,
+                    trace_id=submission.trace_id(),
                     miner_hotkey=envelope.miner_hotkey,
-                    policy=attestation_policy, now=now,
+                    policy=attestation_policy,
+                    now=now,
                 )
             except (ValueError, TypeError, CyberGymAttestError) as exc:
                 attested, attest_reason = False, f"tdx_attestation_invalid:{exc}"
+    if not attested:
+        return SubmissionOutcome(
+            task_id=dt.task_id,
+            miner_hotkey=envelope.miner_hotkey,
+            source_epoch=dispatch_msg.source_epoch,
+            level=dt.level,
+            solved=False,
+            trainable=False,
+            reason="unattested:" + attest_reason,
+            work_units=Decimal(0),
+            bonus=0.0,
+            poc_sha256=digest,
+            trace_id=None,
+            submission=None,
+            attested=False,
+        )
+
+    task = Task(
+        task_id=dt.task_id, level=Level(dt.level), binary_digest=dt.binary_digest
+    )
+    result = verify_poc(task, poc_bytes, backend)
+    poc_sub = PoCSubmission(task_id=task.task_id, poc_sha256=digest, result=result)
+    solved = result.solved
 
     creditable = solved and attested
     work_units = derived_work_units(task, poc_sub if creditable else None, weights)
@@ -343,25 +408,32 @@ def process_submission(
 
     if not solved:
         reason = "not_solved:" + result.outcome
-    elif not attested:
-        reason = "solved_unattested:" + attest_reason
     elif not trainable:
         reason = "solved_trace_below_floor:" + submission.quality(trace_policy).reason
     else:
         reason = "solved_trainable"
 
     return SubmissionOutcome(
-        task_id=task.task_id, miner_hotkey=envelope.miner_hotkey,
-        source_epoch=dispatch_msg.source_epoch, level=dt.level, solved=solved,
-        trainable=trainable, reason=reason, work_units=work_units, bonus=bonus,
-        poc_sha256=digest, trace_id=submission.trace_id() if creditable else None,
-        submission=submission if creditable else None, attested=attested,
+        task_id=task.task_id,
+        miner_hotkey=envelope.miner_hotkey,
+        source_epoch=dispatch_msg.source_epoch,
+        level=dt.level,
+        solved=solved,
+        trainable=trainable,
+        reason=reason,
+        work_units=work_units,
+        bonus=bonus,
+        poc_sha256=digest,
+        trace_id=submission.trace_id() if creditable else None,
+        submission=submission if creditable else None,
+        attested=attested,
     )
 
 
 # --------------------------------------------------------------------------- #
 # 4. Corpus — verified + trainable rows land in the dataset format
 # --------------------------------------------------------------------------- #
+
 
 class CyberGymCorpusStore:
     """Verified, canonical training examples plus bounded duplicate evidence.
@@ -377,6 +449,7 @@ class CyberGymCorpusStore:
 
     def __init__(self, db_path: str) -> None:
         import sqlite3
+
         self._sqlite = sqlite3
         # check_same_thread=False so the store is usable from a server thread that
         # did not open it; requests are serialised by the single-threaded shim, so
@@ -534,11 +607,14 @@ class CyberGymCorpusStore:
 
     def rows(self, *, source_epoch: int | None = None) -> list[dict[str, Any]]:
         if source_epoch is None:
-            cur = self._connection.execute("SELECT * FROM cybergym_corpus ORDER BY trace_id")
+            cur = self._connection.execute(
+                "SELECT * FROM cybergym_corpus ORDER BY trace_id"
+            )
         else:
             cur = self._connection.execute(
                 "SELECT * FROM cybergym_corpus WHERE source_epoch=? ORDER BY trace_id",
-                (source_epoch,))
+                (source_epoch,),
+            )
         out = []
         for r in cur:
             row = dict(r)
@@ -547,7 +623,9 @@ class CyberGymCorpusStore:
         return out
 
     def size(self) -> int:
-        return self._connection.execute("SELECT COUNT(*) FROM cybergym_corpus").fetchone()[0]
+        return self._connection.execute(
+            "SELECT COUNT(*) FROM cybergym_corpus"
+        ).fetchone()[0]
 
     def audit(self, *, source_epoch: int | None = None) -> dict[str, int]:
         """Return canonical corpus and excluded-duplicate counts for status/export."""

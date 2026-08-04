@@ -15,6 +15,7 @@ persists them to the `cybergym_scores` table, and composes the lane contribution
 any wire binding is a thin wrapper — `cybergym_http` is the stdlib one. The crash
 backend is injected, so the whole service runs end-to-end with no CyberGym binaries.
 """
+
 from __future__ import annotations
 
 import base64
@@ -123,6 +124,7 @@ class CyberGymService:
                     "hardware-free dev/test path (which credits UNATTESTED solves)."
                 )
             import warnings
+
             warnings.warn(
                 "CyberGymService running WITHOUT Intel-TDX attestation enforcement "
                 "(attestation_required=False): every solved PoC is credited with no "
@@ -145,6 +147,7 @@ class CyberGymService:
                     "silent forced burn)."
                 )
             import warnings
+
             warnings.warn(
                 "CyberGymService running WITHOUT a durable solve store "
                 "(solve_durability_required=False): accepted solves live in memory "
@@ -188,10 +191,10 @@ class CyberGymService:
         self._credit_synthetic_tasks = credit_synthetic_tasks
         self._miners: dict[str, _MinerState] = {}
         self._by_batch: dict[str, str] = {}  # batch_id -> miner_hotkey
-        self._dispatched: set[str] = set()   # task_ids actually served this epoch
+        self._dispatched: set[str] = set()  # task_ids actually served this epoch
         self._results: list[MinerResult] = []
         self._scored_miners: set[str] = set()  # miners this process actually scored
-        self._scoring_pass_ran = False         # whether score_epoch ran in this process
+        self._scoring_pass_ran = False  # whether score_epoch ran in this process
         # miner_hotkey -> why its durable solves cannot be scored this epoch
         self._unscorable: dict[str, str] = {}
         self._pin_epoch_manifest()
@@ -208,6 +211,7 @@ class CyberGymService:
         different anchor drew a different batch and signed a different receipt, and
         nothing noticed. This manifest is what makes "the same epoch" checkable.
         """
+
         def stamp(value: object) -> object:
             return value.isoformat() if hasattr(value, "isoformat") else value
 
@@ -231,7 +235,9 @@ class CyberGymService:
                     self._private_key.public_key().public_bytes_raw()
                 ).hexdigest()
             ),
-            "level_weights": {str(int(level)): str(w) for level, w in self._weights.items()},
+            "level_weights": {
+                str(int(level)): str(w) for level, w in self._weights.items()
+            },
             "credit_synthetic_tasks": bool(self._credit_synthetic_tasks),
             "gates_required": bool(self._gates_required),
             "gate_policy": emission_gate_policy_manifest(self._gate_policy),
@@ -291,7 +297,8 @@ class CyberGymService:
         if lost and self._scoring_pass_ran:
             # A scoring pass already ran, so the epoch's recorded state is stale.
             self._scores.mark_epoch(
-                self.chain.source_epoch, state=EPOCH_CLOSED,
+                self.chain.source_epoch,
+                state=EPOCH_CLOSED,
                 detail=(
                     f"operator acknowledged {len(lost)} unscorable solve set(s) "
                     f"({', '.join(sorted(lost))}): {reason}"
@@ -317,8 +324,13 @@ class CyberGymService:
             self._miners[miner_hotkey] = _MinerState(commitment, None, dict(pocs))
 
     # -- dispatch (validator -> miner) ------------------------------------- #
-    def dispatch_for(self, miner_hotkey: str, model_commitment: str, *,
-                     authenticated_caller: str | None = None) -> DispatchMessage:
+    def dispatch_for(
+        self,
+        miner_hotkey: str,
+        model_commitment: str,
+        *,
+        authenticated_caller: str | None = None,
+    ) -> DispatchMessage:
         """Draw and serve this miner's sealed batch, remembering it for `submit`.
 
         `authenticated_caller` is the identity the TRANSPORT proved made this call
@@ -332,7 +344,8 @@ class CyberGymService:
         if authenticated_caller is not None and authenticated_caller != miner_hotkey:
             raise ProtocolError(
                 f"authenticated caller {authenticated_caller!r} may not dispatch for "
-                f"{miner_hotkey!r}")
+                f"{miner_hotkey!r}"
+            )
         previous = self._miners.get(miner_hotkey)
         # A commitment change abandons the previous batch. When accepted solves would
         # be dropped, require the caller to be the miner — otherwise this is a
@@ -366,11 +379,16 @@ class CyberGymService:
                 f"model_commitment for {miner_hotkey!r} is pinned for source_epoch "
                 f"{self.chain.source_epoch} to {previous.model_commitment}; a "
                 f"different commitment ({model_commitment}) would re-draw the sealed "
-                "batch, so it is refused for the rest of the epoch")
+                "batch, so it is refused for the rest of the epoch"
+            )
         message = dispatch(
-            self.holdout.pool, self.chain,
-            miner_hotkey=miner_hotkey, model_commitment=model_commitment,
-            cutoff=self._cutoff, as_of=self._as_of, batch_size=self._batch_size,
+            self.holdout.pool,
+            self.chain,
+            miner_hotkey=miner_hotkey,
+            model_commitment=model_commitment,
+            cutoff=self._cutoff,
+            as_of=self._as_of,
+            batch_size=self._batch_size,
             context_provider=self.holdout.context_provider,
         )
         # A repeat dispatch must not silently erase accepted solves. Same committed
@@ -416,7 +434,9 @@ class CyberGymService:
         """
         return self._credit_synthetic_tasks or not is_synthetic_task(task_id)
 
-    def submit(self, envelope: SubmissionEnvelope) -> SubmissionOutcome:
+    def submit(
+        self, envelope: SubmissionEnvelope, *, authenticated_caller: str | None = None
+    ) -> SubmissionOutcome:
         """Verify one submission against the batch we dispatched, and corpus it.
 
         The returned `work_units` is what the epoch will actually pay for this task:
@@ -428,18 +448,25 @@ class CyberGymService:
             raise ProtocolError("submission references an unknown or expired batch")
         if envelope.miner_hotkey != miner_hotkey:
             raise ProtocolError("submission hotkey does not own this batch")
+        if authenticated_caller is not None and authenticated_caller != miner_hotkey:
+            raise ProtocolError("authenticated caller does not own this batch")
         state = self._miners[miner_hotkey]
         outcome = process_submission(
-            envelope, state.dispatch, self._backend,
-            trace_policy=self._trace_policy, weights=self._weights,
-            attestation_policy=self._attestation_policy, now=self._attestation_now,
+            envelope,
+            state.dispatch,
+            self._backend,
+            trace_policy=self._trace_policy,
+            weights=self._weights,
+            attestation_policy=self._attestation_policy,
+            now=self._attestation_now,
         )
         if outcome.work_units > 0 and not self.rewardable_task(envelope.task_id):
             # Make the wire agree with the emission decision. run_epoch excludes this
             # task from the scored submissions, so promising units here would be a
             # promise the epoch does not keep.
             outcome = replace(
-                outcome, work_units=Decimal(0),
+                outcome,
+                work_units=Decimal(0),
                 reason=f"{outcome.reason}|non_rewardable_source:synthetic",
             )
         self._corpus.record(outcome)
@@ -449,7 +476,10 @@ class CyberGymService:
             # unverifiable-attestation) solve earns nothing even though it crashed.
             try:
                 poc = base64.b64decode(envelope.poc_base64, validate=True)
-            except (ValueError, TypeError) as exc:  # pragma: no cover - process_submission already checked
+            except (
+                ValueError,
+                TypeError,
+            ) as exc:  # pragma: no cover - process_submission already checked
                 raise ProtocolError("PoC is not valid base64") from exc
             state.pocs[envelope.task_id] = poc
             # A fresh accepted solve makes this miner scoreable again, so any earlier
@@ -459,9 +489,11 @@ class CyberGymService:
             # it has to survive a restart between now and epoch close.
             if self._solves is not None:
                 self._solves.record(
-                    epoch=self.chain.source_epoch, miner_hotkey=miner_hotkey,
+                    epoch=self.chain.source_epoch,
+                    miner_hotkey=miner_hotkey,
                     model_commitment=state.model_commitment,
-                    task_id=envelope.task_id, poc=poc,
+                    task_id=envelope.task_id,
+                    poc=poc,
                 )
         return outcome
 
@@ -489,20 +521,36 @@ class CyberGymService:
         return str(program)
 
     # -- transport-agnostic handlers --------------------------------------- #
-    def handle_artifact(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        """{task_id} -> {task_id, program} (or {error}). Never raises."""
+    def handle_artifact(
+        self, request: Mapping[str, Any], *, authenticated_caller: str | None = None
+    ) -> dict[str, Any]:
+        """Caller-bound ``{batch_id, task_id}`` -> artifact (or error)."""
         if not isinstance(request, Mapping):
             return {"error": "artifact request must be an object"}
         task_id = request.get("task_id")
+        batch_id = request.get("batch_id")
         if not isinstance(task_id, str) or not task_id:
             return {"error": "task_id is required"}
+        if not isinstance(batch_id, str) or not batch_id:
+            return {"error": "batch_id is required"}
         try:
+            miner_hotkey = self._by_batch.get(batch_id)
+            if miner_hotkey is None:
+                raise ProtocolError("artifact references an unknown or expired batch")
+            if (
+                authenticated_caller is not None
+                and authenticated_caller != miner_hotkey
+            ):
+                raise ProtocolError("authenticated caller does not own this batch")
+            if self._miners[miner_hotkey].dispatch.task(task_id) is None:
+                raise ProtocolError("artifact task is not in this batch")
             return {"task_id": task_id, "program": self.artifact_for(task_id)}
         except (ProtocolError, ValueError) as exc:
             return {"error": str(exc)}
 
-    def handle_dispatch(self, request: Mapping[str, Any], *,
-                        authenticated_caller: str | None = None) -> dict[str, Any]:
+    def handle_dispatch(
+        self, request: Mapping[str, Any], *, authenticated_caller: str | None = None
+    ) -> dict[str, Any]:
         """{miner_hotkey, model_commitment} -> DispatchMessage dict (or {error}).
 
         `authenticated_caller` is supplied by the TRANSPORT (an axon's verified
@@ -522,15 +570,18 @@ class CyberGymService:
             return {"error": "model_commitment is required"}
         try:
             return self.dispatch_for(
-                miner, commitment, authenticated_caller=authenticated_caller).to_dict()
+                miner, commitment, authenticated_caller=authenticated_caller
+            ).to_dict()
         except (ProtocolError, ValueError) as exc:
             return {"error": str(exc)}
 
-    def handle_submit(self, body: bytes | str) -> dict[str, Any]:
+    def handle_submit(
+        self, body: bytes | str, *, authenticated_caller: str | None = None
+    ) -> dict[str, Any]:
         """A POSTed SubmissionEnvelope -> a verdict dict (never raises)."""
         try:
             envelope = SubmissionEnvelope.from_json(body)
-            outcome = self.submit(envelope)
+            outcome = self.submit(envelope, authenticated_caller=authenticated_caller)
         except (ProtocolError, ValueError) as exc:
             return {"accepted": False, "error": str(exc)}
         return {
@@ -562,18 +613,32 @@ class CyberGymService:
         # Only miners with at least one verified solve are scored — a miner that
         # solved nothing has no rewardable units and no receipt to persist.
         miners = [
-            MinerCommit(miner_hotkey=hk, model_commitment=st.model_commitment, pocs=dict(st.pocs))
-            for hk, st in self._miners.items() if st.pocs
+            MinerCommit(
+                miner_hotkey=hk,
+                model_commitment=st.model_commitment,
+                pocs=dict(st.pocs),
+            )
+            for hk, st in self._miners.items()
+            if st.pocs
         ]
         if self._solves is not None:
             issued_at = self._solves.pin_issued_at(self.chain.source_epoch, issued_at)
         self._results = run_epoch(
-            miners, self.holdout.pool, self.chain,
-            validator_hotkey=self._validator_hotkey, private_key=self._private_key,
-            signing_key_id=self._signing_key_id, backend=self._backend,
-            score_store=self._scores, cutoff=self._cutoff, as_of=self._as_of,
-            issued_at=issued_at, batch_size=self._batch_size, level_weights=self._weights,
-            gate_policy=self._gate_policy, gates_required=self._gates_required,
+            miners,
+            self.holdout.pool,
+            self.chain,
+            validator_hotkey=self._validator_hotkey,
+            private_key=self._private_key,
+            signing_key_id=self._signing_key_id,
+            backend=self._backend,
+            score_store=self._scores,
+            cutoff=self._cutoff,
+            as_of=self._as_of,
+            issued_at=issued_at,
+            batch_size=self._batch_size,
+            level_weights=self._weights,
+            gate_policy=self._gate_policy,
+            gates_required=self._gates_required,
             credit_synthetic_tasks=self._credit_synthetic_tasks,
         )
         self._scored_miners.update(m.miner_hotkey for m in miners)
@@ -584,7 +649,8 @@ class CyberGymService:
         lost = self.lost_durable_solvers()
         if lost:
             self._scores.mark_epoch(
-                self.chain.source_epoch, state=EPOCH_INCOMPLETE,
+                self.chain.source_epoch,
+                state=EPOCH_INCOMPLETE,
                 detail=(
                     f"{len(lost)} miner(s) with durable solves could not be scored: "
                     f"{', '.join(sorted(lost))}"
@@ -593,7 +659,8 @@ class CyberGymService:
             )
         else:
             self._scores.mark_epoch(
-                self.chain.source_epoch, state=EPOCH_CLOSED,
+                self.chain.source_epoch,
+                state=EPOCH_CLOSED,
                 detail="scored with every durable solve accounted for",
                 scored_miners=len(miners),
             )
@@ -613,7 +680,9 @@ class CyberGymService:
         composition permanently with two RPCs.
         """
         epoch = self.chain.source_epoch
-        durable_solvers = {row["miner_hotkey"] for row in self._corpus.rows(source_epoch=epoch)}
+        durable_solvers = {
+            row["miner_hotkey"] for row in self._corpus.rows(source_epoch=epoch)
+        }
         if self._solves is not None:
             durable_solvers |= set(self._solves.commits(epoch))
         recoverable = {hk for hk, st in self._miners.items() if st.pocs}
@@ -627,11 +696,14 @@ class CyberGymService:
     def pending_solvers(self) -> set[str]:
         """Miners holding accepted solves that this run has not scored yet."""
         return {
-            hk for hk, st in self._miners.items()
+            hk
+            for hk, st in self._miners.items()
             if st.pocs and hk not in self._scored_miners
         }
 
-    def compose_lane(self, *, allocation: Decimal, lane_id: str = CYBERGYM_LANE) -> Lane:
+    def compose_lane(
+        self, *, allocation: Decimal, lane_id: str = CYBERGYM_LANE
+    ) -> Lane:
         """Build this epoch's lane from the persisted verified scores.
 
         Refuses rather than publishing an under-credited vector. Two ways the lane
@@ -662,7 +734,10 @@ class CyberGymService:
                 f"({', '.join(sorted(pending))}). Call score_epoch first."
             )
         return compose_scores_lane(
-            self._scores, self.chain.source_epoch, allocation=allocation, lane_id=lane_id
+            self._scores,
+            self.chain.source_epoch,
+            allocation=allocation,
+            lane_id=lane_id,
         )
 
 
@@ -745,7 +820,9 @@ def compose_scores_lane(
     """
     score_store.require_closed_epoch(epoch)
     contributions = [
-        LaneContribution(row["miner_hotkey"], row["receipt_id"], Decimal(row["earned_units"]))
+        LaneContribution(
+            row["miner_hotkey"], row["receipt_id"], Decimal(row["earned_units"])
+        )
         for row in score_store.contributions(epoch)
         if Decimal(row["earned_units"]) > 0
     ]
@@ -797,6 +874,9 @@ def lane_allocation_for(resolved, lane_id: str = CYBERGYM_LANE) -> Decimal:
 
 
 __all__ = [
-    "CyberGymService", "compose_scores_lane", "compose_results_lane",
-    "lane_allocation_for", "CYBERGYM_LANE",
+    "CyberGymService",
+    "compose_scores_lane",
+    "compose_results_lane",
+    "lane_allocation_for",
+    "CYBERGYM_LANE",
 ]
