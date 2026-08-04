@@ -55,8 +55,12 @@ REPRO_SUBSET: dict[str, dict] = {
                    "sanitizer_trace": "AddressSanitizer: heap-use-after-free src/cff/cffparse.c:440 in cff_parse_num"},
     "arvo:1065":  {"level": 2, "project": "oss-fuzz", "description": "a memory-safety vulnerability",
                    "sanitizer_trace": "AddressSanitizer"},
-    "arvo:3938":  {"level": 2, "project": "oss-fuzz", "description": "a memory-safety vulnerability",
-                   "sanitizer_trace": "AddressSanitizer"},
+    # arvo:3938 removed from the served set: its `-vul` build ships a ZERO-byte
+    # reference reproducer and crashes on any input, so the differential is
+    # satisfied by garbage (`NOT-A-REAL-CRASH-INPUT` earned work_units=2 live). It
+    # cannot discriminate, so it has no place even as a canary. `corpus_admission`
+    # refuses it dynamically too; this removes it at the source so the live server
+    # stops dispatching it without waiting on the admission pass.
     "arvo:10400": {"level": 2, "project": "oss-fuzz", "description": "a memory-safety vulnerability",
                    "sanitizer_trace": "AddressSanitizer"},
     "arvo:24993": {"level": 2, "project": "oss-fuzz", "description": "a memory-safety vulnerability",
@@ -95,7 +99,7 @@ def _image_and_command(task_id: str, mode: str) -> tuple[str, list[str]]:
 #       or "SEGV" in output or "runtime error:" in output
 #
 # which silently missed MemorySanitizer -- MSan reports WARNING, not ERROR, and
-# never says AddressSanitizer. Measured against the shipped REPRO_SUBSET, 1 of 6
+# never says AddressSanitizer. Measured against the shipped REPRO_SUBSET, 1 of 5
 # tasks (arvo:1065, `file` softmagic.c use-of-uninitialized-value) is MSan-built:
 # a miner submitting the genuinely correct PoC for it was told solved=False and
 # earned nothing, with the real stack trace sitting in the captured output.

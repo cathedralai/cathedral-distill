@@ -189,10 +189,39 @@ def scoreable(task_ids: Sequence[str], **kwargs) -> list[str]:
     return [t for t in task_ids if admit(t, **kwargs).scoreable]
 
 
+def admit_pool(tasks, *, docker: str = "docker",
+               _run: Runner = subprocess.run,
+               _backend: Backend = docker_reproduce_backend,
+               controls: Sequence[bytes] = CONTROL_INPUTS,
+               on_refused=None):
+    """Run the admission gate over `PooledTask`s and stamp `admitted` on each.
+
+    This is the ingest-time bridge between the Docker-running gate and the
+    Docker-free draw: it runs `admit` once per task here, so `draw_batch` never
+    has to. Returns new `PooledTask`s (the type is frozen) with `admitted` set to
+    the gate's verdict; everything else is preserved.
+
+    `on_refused(task_id, admission)` is called for each refused task, so an
+    operator ingesting a corpus sees WHY a task will never be scored rather than
+    it silently vanishing from the holdout. Pass `log`/`print` or collect them.
+    """
+    import dataclasses
+
+    admitted = []
+    for task in tasks:
+        verdict = admit(task.task_id, docker=docker, _run=_run,
+                        _backend=_backend, controls=controls)
+        if not verdict.scoreable and on_refused is not None:
+            on_refused(task.task_id, verdict)
+        admitted.append(dataclasses.replace(task, admitted=verdict.scoreable))
+    return admitted
+
+
 __all__ = [
     "CONTROL_INPUTS",
     "Admission",
     "admit",
+    "admit_pool",
     "answer_is_public",
     "reference_poc",
     "scoreable",

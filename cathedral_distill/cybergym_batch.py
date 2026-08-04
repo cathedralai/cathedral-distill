@@ -102,12 +102,24 @@ def derive_batch_nonce(
 
 @dataclass(frozen=True)
 class PooledTask:
-    """A task in the pool, tagged with when its vulnerability was disclosed."""
+    """A task in the pool, tagged with when its vulnerability was disclosed.
+
+    `admitted` records whether the task passed corpus admission
+    (`corpus_admission.admit`): it discriminates, it is solvable, and its answer
+    is not publicly readable. It is decided ONCE, at ingest, where running the
+    differential in Docker is acceptable — never in the draw, which must stay
+    deterministic and side-effect-free. A scored batch draws only from admitted
+    tasks; an un-admitted task is the shape that paid for garbage (`arvo:3938`)
+    or shipped its own answer in a public image. Defaults True so a pool built
+    from an already-vetted manifest needs no change, but the ingest path should
+    set it explicitly from the gate.
+    """
 
     task_id: str
     level: Level
     binary_digest: str
     disclosed_at: datetime
+    admitted: bool = True
 
     def to_task(self) -> Task:
         return Task(task_id=self.task_id, level=self.level,
@@ -156,8 +168,16 @@ class TaskPool:
         """
         if cutoff > as_of:
             raise BatchError("cutoff cannot be after the epoch time")
+        # `admitted` AND the disclosure window, because they close different holes.
+        # Disclosure proves the miner could not have TRAINED on the task; admission
+        # proves the task can actually pay -- that it discriminates, is solvable, and
+        # its answer is not readable straight out of a public image. A task can be
+        # fresh (post-cutoff) and still be `arvo:3938`, so both gates apply to a
+        # SCORED draw. The public/canary source deliberately does not filter on
+        # admission: those tasks are never scored.
         return sorted(
-            (t for t in self._tasks if cutoff < t.disclosed_at <= as_of),
+            (t for t in self._tasks
+             if t.admitted and cutoff < t.disclosed_at <= as_of),
             key=lambda t: t.task_id,
         )
 
@@ -228,10 +248,23 @@ def draw_batch(
 
     eligible = pool.private_holdout(as_of=as_of, cutoff=cutoff)
     if len(eligible) < size:
-        raise BatchError(
-            f"only {len(eligible)} private tasks available; need {size}. "
-            "The holdout is exhausted — ingest fresh disclosures before drawing."
+        # Distinguish "no admitted tasks" from "not enough tasks": a holdout that is
+        # non-empty but wholly un-admitted is the exact state that would otherwise
+        # score nothing while looking merely quiet. Say so, rather than reporting an
+        # exhausted holdout when the real problem is that every task was refused at
+        # admission (degenerate, or its answer is public).
+        admitted = sum(1 for t in pool._tasks if t.admitted)
+        detail = (
+            "no task in the pool passed corpus admission — every candidate either "
+            "does not discriminate or ships its answer in a public image; a scored "
+            "batch cannot be drawn until an admitted (private, un-leakable) task is "
+            "ingested"
+            if admitted == 0 else
+            f"only {len(eligible)} admitted private tasks available; need {size}. "
+            "The holdout is exhausted — ingest fresh disclosures (whose images are "
+            "not publicly pullable) before drawing."
         )
+        raise BatchError(detail)
     return _select_ranked(eligible, size, nonce)
 
 

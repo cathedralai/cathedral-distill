@@ -210,7 +210,7 @@ tested:
 | Network transport, reference HTTP service (a Bittensor axon can swap in over the same handlers) | **built (HTTP)**, development aid only ([`cybergym_http.py`](cathedral_distill/cybergym_http.py), [`cybergym_repro_server.py`](cathedral_distill/cybergym_repro_server.py)) |
 | Durable validator handoff | **built, not reward-active.** A durably closed score epoch can be frozen into the canonical report, HMAC-authenticated, and posted to `cathedral-validator`'s score intake. The validator independently binds it to admitted receipts; this does not alter the live allocation or call `set_weights` ([`cybergym_score_report.py`](cathedral_distill/cybergym_score_report.py), [`docs/CYBERGYM_TRACK.md`](docs/CYBERGYM_TRACK.md)) |
 | Reward wiring | **not live.** `cathedral-validator` is the sole canonical authority. The older bridge in `cathedral` remains disabled. Choose and sign the full allocation contract, integrate only through the canonical writer, then pass the reward proof gates above |
-| Full corpus at scale, the ~130 GB+ ARVO/OSS-Fuzz image set | infra; the shipped reference slice is 6 static ARVO tasks for development, not a reward holdout |
+| Full corpus at scale, the ~130 GB+ ARVO/OSS-Fuzz image set | infra; the shipped reference slice is 5 static ARVO tasks for development, not a reward holdout |
 
 ## Modules
 
@@ -262,7 +262,7 @@ pip install -e '.[dev]'
 pytest
 ```
 
-The suite collects 818 tests, all hardware-free: the verifier backend is
+The suite collects 825 tests, all hardware-free: the verifier backend is
 injected, so the full mechanism is exercised without the CyberGym binary corpus.
 How many of them *run* depends on the machine, which is why no passing total is
 claimed here. `tests/test_cybergym_hw.py` skips without `CYBERGYM_RUN_HW=1` and
