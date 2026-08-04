@@ -28,6 +28,7 @@ CYBERGYM_SIGNING_SEED="$(< /srv/cathedral-fresh-e2e/signing.seed)" \
 CYBERGYM_CORPUS_DB=/srv/cathedral-fresh-e2e/corpus.sqlite \
 CYBERGYM_SCORE_DB=/srv/cathedral-fresh-e2e/scores.sqlite \
 CYBERGYM_SOLVE_DB=/srv/cathedral-fresh-e2e/solves.sqlite \
+CYBERGYM_E2E_AS_OF=2026-08-04T12:00:00+00:00 \
 CYBERGYM_HOST=127.0.0.1 PORT=8667 \
   cathedral-cybergym-fresh-e2e-server
 ```
@@ -43,6 +44,35 @@ curl http://127.0.0.1:8667/healthz
 advertise a reusable static task list: tasks are created from the current
 finalized epoch nonce at dispatch time.  Repeating a dispatch for a pinned model
 commitment returns the same batch; a new epoch returns a different task set.
+
+## Close and export the E2E epoch
+
+Keep `CYBERGYM_E2E_AS_OF` unchanged for the lifetime of the source epoch.  It is
+part of the durable epoch manifest; a different value, seed, chain anchor, or
+signing key is a deliberate restart refusal.  After the submission window, run
+the close command with the same protected environment used by the server:
+
+```bash
+CYBERGYM_E2E_ALLOW_UNATTESTED=1 \
+CYBERGYM_FRESH_SEED="$(< /srv/cathedral-fresh-e2e/fresh.seed)" \
+CYBERGYM_SIGNING_SEED="$(< /srv/cathedral-fresh-e2e/signing.seed)" \
+CYBERGYM_CORPUS_DB=/srv/cathedral-fresh-e2e/corpus.sqlite \
+CYBERGYM_SCORE_DB=/srv/cathedral-fresh-e2e/scores.sqlite \
+CYBERGYM_SOLVE_DB=/srv/cathedral-fresh-e2e/solves.sqlite \
+CYBERGYM_E2E_AS_OF=2026-08-04T12:00:00+00:00 \
+  cathedral-cybergym-fresh-e2e-close --issued-at 2026-08-04T13:00:00Z
+
+cathedral-cybergym export-scores \
+  --score-db /srv/cathedral-fresh-e2e/scores.sqlite \
+  --epoch 21 --network finney --netuid 39 \
+  --producer-hotkey cathedral-fresh-e2e \
+  --out /srv/cathedral-fresh-e2e/epoch-21.json
+```
+
+The close command restores accepted PoCs from `CYBERGYM_SOLVE_DB`, re-derives
+the sealed task batch, and writes only a durably closed score epoch.  The
+existing exporter then freezes a canonical report.  Neither command publishes
+weights or turns this non-reward E2E verifier into a production authority.
 
 ## Required E2E evidence
 

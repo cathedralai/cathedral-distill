@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -27,6 +28,7 @@ from cathedral_distill.cybergym_fresh import (
     is_fresh_task,
 )
 from cathedral_distill.cybergym_fresh_server import build_service as build_fresh_e2e_service
+from cathedral_distill.cybergym_fresh_close import main as close_fresh_e2e
 from cathedral_distill.cybergym_validator import ChainContext
 from cathedral_distill.cybergym_verifier import poc_digest
 
@@ -171,6 +173,7 @@ def test_loopback_e2e_server_uses_the_fresh_source_and_durable_state(tmp_path):
         score_db=str(tmp_path / "scores.sqlite"),
         solve_db=str(tmp_path / "solves.sqlite"),
         validator_hotkey="5FreshE2E",
+        as_of=NOW,
     )
 
     source_manifest = service.epoch_manifest()["task_source"]
@@ -189,6 +192,7 @@ def test_restart_with_a_different_fresh_seed_is_refused(tmp_path):
         fresh_seed=SEED,
         private_key=KEY,
         validator_hotkey="5FreshE2E",
+        as_of=NOW,
         **paths,
     )
     with pytest.raises(ProtocolError, match="task_source"):
@@ -196,5 +200,69 @@ def test_restart_with_a_different_fresh_seed_is_refused(tmp_path):
             fresh_seed=b"x" * 32,
             private_key=KEY,
             validator_hotkey="5FreshE2E",
+            as_of=NOW,
             **paths,
         )
+
+
+def test_restart_with_a_different_fresh_as_of_is_refused(tmp_path):
+    paths = {
+        "corpus_db": str(tmp_path / "corpus.sqlite"),
+        "score_db": str(tmp_path / "scores.sqlite"),
+        "solve_db": str(tmp_path / "solves.sqlite"),
+    }
+    build_fresh_e2e_service(
+        fresh_seed=SEED,
+        private_key=KEY,
+        validator_hotkey="5FreshE2E",
+        as_of=NOW,
+        **paths,
+    )
+    with pytest.raises(ProtocolError, match="as_of"):
+        build_fresh_e2e_service(
+            fresh_seed=SEED,
+            private_key=KEY,
+            validator_hotkey="5FreshE2E",
+            as_of=NOW.replace(minute=NOW.minute + 1),
+            **paths,
+        )
+
+
+def test_fresh_close_command_restores_solves_and_closes_epoch(tmp_path, monkeypatch, capsys):
+    paths = {
+        "corpus_db": str(tmp_path / "corpus.sqlite"),
+        "score_db": str(tmp_path / "scores.sqlite"),
+        "solve_db": str(tmp_path / "solves.sqlite"),
+    }
+    service = build_fresh_e2e_service(
+        fresh_seed=SEED,
+        private_key=KEY,
+        validator_hotkey="5FreshE2E",
+        as_of=NOW,
+        **paths,
+    )
+    dispatch = service.dispatch_for("5FreshMiner", MODEL, authenticated_caller="5FreshMiner")
+    task = dispatch.tasks[0]
+    challenge = service.holdout.pool._challenges[task.task_id]
+    service.submit(
+        SubmissionEnvelope(
+            batch_id=dispatch.batch_id,
+            task_id=task.task_id,
+            miner_hotkey="5FreshMiner",
+            poc_base64=base64.b64encode(challenge.reference_poc).decode(),
+            trace=_trace(task.task_id, challenge.reference_poc),
+        ),
+        authenticated_caller="5FreshMiner",
+    )
+    monkeypatch.setenv("CYBERGYM_E2E_ALLOW_UNATTESTED", "1")
+    monkeypatch.setenv("CYBERGYM_FRESH_SEED", SEED.hex())
+    monkeypatch.setenv("CYBERGYM_SIGNING_SEED", bytes(range(32, 64)).hex())
+    monkeypatch.setenv("CYBERGYM_E2E_AS_OF", NOW.isoformat())
+    monkeypatch.setenv("CYBERGYM_VALIDATOR_HOTKEY", "5FreshE2E")
+    for name, path in paths.items():
+        monkeypatch.setenv("CYBERGYM_" + name.upper(), path)
+
+    assert close_fresh_e2e(["--issued-at", "2026-08-04T12:00:00.000000Z"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "closed"
+    assert payload["scores"] == {"5FreshMiner": "8"}
