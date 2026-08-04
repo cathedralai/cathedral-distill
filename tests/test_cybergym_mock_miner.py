@@ -79,3 +79,13 @@ def test_noncreditable_capable_attempt_and_grinder_redraw_fail_closed():
     assert not report.passed
     assert any("not creditable" in failure for failure in report.failures)
     assert any("re-drew" in failure for failure in report.failures)
+
+
+def test_cli_accepts_the_registered_hotkeys_existing_commitment():
+    commitment = "sha256:" + "e2" * 32
+    args = HARNESS._parse_args([
+        "--hotkey", "5RegisteredMiner", "--model-commitment", commitment,
+    ])
+
+    assert args.hotkeys == ["5RegisteredMiner"]
+    assert args.model_commitment == commitment

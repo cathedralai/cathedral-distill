@@ -29,12 +29,11 @@ import ipaddress
 import json
 import subprocess
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8666"
@@ -335,6 +334,10 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
                         help="registered capable-miner hotkey; repeat once per capable dispatch")
     parser.add_argument("--cheater-hotkey", default="5CheatingMiner")
     parser.add_argument("--grinder-hotkey", default="5GrindingMiner")
+    parser.add_argument(
+        "--model-commitment", default=DEFAULT_COMMITMENT,
+        help="existing sealed commitment for a registered capable hotkey",
+    )
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--docker", default="docker")
     args = parser.parse_args(argv)
@@ -358,7 +361,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     capable_runs = tuple(
         run_miner(
             args.base_url, f"capable-{number}", hotkey, cheat=False,
-            commitment=DEFAULT_COMMITMENT, timeout=args.timeout, docker=args.docker,
+            commitment=args.model_commitment, timeout=args.timeout, docker=args.docker,
         )
         for number, hotkey in enumerate(args.hotkeys, start=1)
     )
