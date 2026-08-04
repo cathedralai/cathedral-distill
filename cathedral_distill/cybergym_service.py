@@ -374,10 +374,11 @@ class CyberGymService:
             # of 60 tasks went from earning NOTHING honestly to full marks after
             # 1771 accepted re-dispatches -- same capability, 0 -> 100% (#34).
             #
-            # Attestation does not constrain this: submission_report_data binds
-            # batch_id/task_id/poc/trace/hotkey, not the commitment, so the grind
-            # survives attestation_required=True with a real measurement and root.
-            # Nor does transport auth (#33): the attack authenticates as itself.
+            # The v2 attestation report_data also binds this commitment, but that
+            # only proves the enclave used whichever commitment was dispatched.
+            # It does not remove the miner's choice among commitments, so the
+            # service must pin the first one for the epoch. Nor does transport
+            # authentication help: the grinding miner authenticates as itself.
             #
             # The unpredictability argument -- derive_batch_nonce binds a finalized
             # block hash that postdates the commitment -- is true of any SINGLE

@@ -47,7 +47,7 @@ from cathedral_distill.trace_submission import (
     submission_bonus,
 )
 
-DISPATCH_SCHEMA = "cathedral_cybergym_dispatch_v1"
+DISPATCH_SCHEMA = "cathedral_cybergym_dispatch_v2"
 ENVELOPE_SCHEMA = "cathedral_cybergym_submission_envelope_v1"
 MAX_POC_BYTES = 1024 * 1024
 
@@ -91,6 +91,7 @@ class DispatchMessage:
     batch_id: str
     nonce: str
     miner_hotkey: str
+    model_commitment: str
     valid_from_block: int
     valid_until_block: int
     tasks: tuple[DispatchedTask, ...]
@@ -108,6 +109,7 @@ class DispatchMessage:
             "source_epoch": self.source_epoch,
             "batch_id": self.batch_id, "nonce": self.nonce,
             "miner_hotkey": self.miner_hotkey,
+            "model_commitment": self.model_commitment,
             "valid_from_block": self.valid_from_block,
             "valid_until_block": self.valid_until_block,
             "tasks": [t.to_dict() for t in self.tasks],
@@ -150,12 +152,24 @@ def dispatch(
         allowed = LEVEL_CONTEXT_FIELDS.get(int(task.level), ())
         full = dict(context_provider(task.task_id)) if context_provider else {}
         revealed = {k: str(full[k]) for k in allowed if k in full}
-        tasks.append(DispatchedTask(task_id=task.task_id, level=int(task.level),
-                                    binary_digest=task.binary_digest, context=revealed))
+        tasks.append(
+            DispatchedTask(
+                task_id=task.task_id,
+                level=int(task.level),
+                binary_digest=task.binary_digest,
+                context=revealed,
+            )
+    )
     return DispatchMessage(
-        network=chain.network, netuid=chain.netuid, source_epoch=chain.source_epoch,
-        batch_id=batch.batch_id, nonce=nonce, miner_hotkey=miner_hotkey,
-        valid_from_block=chain.valid_from_block, valid_until_block=chain.valid_until_block,
+        network=chain.network,
+        netuid=chain.netuid,
+        source_epoch=chain.source_epoch,
+        batch_id=batch.batch_id,
+        nonce=nonce,
+        miner_hotkey=miner_hotkey,
+        model_commitment=model_commitment,
+        valid_from_block=chain.valid_from_block,
+        valid_until_block=chain.valid_until_block,
         tasks=tuple(tasks),
     )
 
@@ -331,7 +345,9 @@ def process_submission(
                     token, batch_id=envelope.batch_id, task_id=envelope.task_id,
                     poc_sha256=digest, trace_id=submission.trace_id(),
                     miner_hotkey=envelope.miner_hotkey,
-                    policy=attestation_policy, now=now,
+                    model_commitment=dispatch_msg.model_commitment,
+                    policy=attestation_policy,
+                    now=now,
                 )
             except (ValueError, TypeError, CyberGymAttestError) as exc:
                 attested, attest_reason = False, f"tdx_attestation_invalid:{exc}"

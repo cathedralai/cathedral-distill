@@ -104,6 +104,7 @@ def test_agent_trace_verifies_through_the_validator_pipeline():
                         binary_digest=task.binary_digest, context={})
     msg = DispatchMessage(network="finney", netuid=39, source_epoch=11,
                           batch_id="b", nonce=NONCE, miner_hotkey=MINER,
+                          model_commitment="sha256:" + hashlib.sha256(b"agent-model").hexdigest(),
                           valid_from_block=1, valid_until_block=999, tasks=(dt,))
     env = SubmissionEnvelope(batch_id="b", task_id=task.task_id, miner_hotkey=MINER,
                              poc_base64=base64.b64encode(res.poc).decode(), trace=res.trace)
