@@ -29,6 +29,10 @@ from cathedral_distill.cybergym_attest import (
     submission_report_data,
     verify_submission_attestation,
 )
+from cathedral_distill.cybergym_cathedral_attest import (
+    artifacts_sha256,
+    commitment_sha256,
+)
 from cathedral_distill.cybergym_protocol import (
     DispatchedTask,
     DispatchMessage,
@@ -228,6 +232,93 @@ def test_attested_solve_is_creditable_and_trainable():
     assert out.trainable and out.reason == "solved_trainable"
 
 
+def _production_receipt(msg, task_id, poc_sha256, trace_id):
+    artifact = {
+        "path": "result.txt",
+        "sha256": commitment_sha256(
+            source_epoch=msg.source_epoch,
+            batch_id=msg.batch_id,
+            task_id=task_id,
+            poc_sha256=poc_sha256,
+            trace_id=trace_id,
+            miner_hotkey=msg.miner_hotkey,
+            model_commitment=msg.model_commitment,
+        ),
+        "size_bytes": 256,
+    }
+    artifacts = [artifact]
+    return {
+        "receipt_id": "tdx-receipt-1",
+        "receipt_status": "ready",
+        "exit_code": 0,
+        "started_at": "2026-07-29T11:59:00Z",
+        "files_sha256": "72" * 16,
+        "artifacts_sha256": artifacts_sha256(artifacts),
+        "policy_sha256": "02" * 16,
+        "task_policy": {
+            "reuse": "forbidden",
+            "egress": "none",
+            "hardware_class": "tdx_cpu",
+        },
+        "artifacts": artifacts,
+        "tee_attestation": {
+            "kind": "tdx-1.5",
+            "quote_b64": "production-quote",
+            "bound_digest": "sha256:57cd",
+            "result_sha256": "3a39",
+        },
+    }
+
+
+def test_production_quote_is_required_and_binds_the_model_result():
+    source, msg, task_id, poc = _fixture()
+    digest = "sha256:" + hashlib.sha256(poc).hexdigest()
+    trace = _floor_trace(task_id, digest)
+    del trace["model_seal"]  # only the quote-bound model commitment is accepted
+    trace_id = _trace_from_dict(trace).trace_id()
+    envelope = SubmissionEnvelope(
+        batch_id=msg.batch_id,
+        task_id=task_id,
+        miner_hotkey=MINER,
+        poc_base64=base64.b64encode(poc).decode(),
+        trace=trace,
+        production_attestation=_production_receipt(msg, task_id, digest, trace_id),
+    )
+    outcome = process_submission(
+        envelope,
+        msg,
+        source.backend,
+        production_quote_verifier=lambda _quote, _report_data: True,
+        production_attestation_required=True,
+        now=NOW,
+    )
+    assert outcome.creditable and outcome.trainable and outcome.bonus == 0.0
+
+    software_only = replace(envelope, production_attestation=None, attestation="fake")
+    rejected = process_submission(
+        software_only,
+        msg,
+        source.backend,
+        production_quote_verifier=lambda _quote, _report_data: True,
+        production_attestation_required=True,
+        now=NOW,
+    )
+    assert not rejected.creditable
+    assert "missing_production_tdx_attestation" in rejected.reason
+
+    deterministic_seal = dict(trace, model_seal="sha256:" + "11" * 32)
+    seal_rejected = process_submission(
+        replace(envelope, trace=deterministic_seal),
+        msg,
+        source.backend,
+        production_quote_verifier=lambda _quote, _report_data: True,
+        production_attestation_required=True,
+        now=NOW,
+    )
+    assert not seal_rejected.creditable
+    assert "development_model_seal_forbidden" in seal_rejected.reason
+
+
 def test_no_policy_keeps_hardware_free_behaviour():
     """Without an attestation policy, a solve earns with no attestation at all."""
     source, msg, task_id, poc = _fixture()
@@ -422,8 +513,8 @@ def test_service_requires_attestation_policy_by_default(tmp_path):
         gates_required=False,
     )
     with pytest.raises(
-        ProtocolError, match="attestation policy"
-    ):  # no policy -> refuse
+        ProtocolError, match="production Intel-TDX quote verifier"
+    ):  # no quote verifier -> refuse
         CyberGymService(
             Holdout(pool=SyntheticTaskSource(), _context={}), chain, **common
         )
@@ -498,6 +589,7 @@ def test_service_only_attested_miner_earns_and_composes(tmp_path):
         cutoff=None,
         as_of=None,
         attestation_policy=POLICY,
+        allow_software_attestation=True,
         attestation_now=NOW,
         gates_required=False,
         # this test scores synthetic tasks on purpose, to prove the ATTESTATION gate

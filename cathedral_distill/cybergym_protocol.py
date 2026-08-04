@@ -39,6 +39,10 @@ from cathedral_distill.cybergym_attest import (
     CyberGymAttestError,
     verify_submission_attestation,
 )
+from cathedral_distill.cybergym_cathedral_attest import (
+    QuoteVerifier,
+    verify_cathedral_attestation,
+)
 from cathedral_distill.cybergym_batch import TaskPool, derive_batch_nonce
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
 from cathedral_distill.trace_submission import (
@@ -231,6 +235,7 @@ class SubmissionEnvelope:
     poc_base64: str
     trace: Mapping[str, Any]  # a cathedral_trace_submission_v1 document
     attestation: str | None = None  # base64 cathedral_cc_attestation_v1 token
+    production_attestation: Mapping[str, Any] | None = None  # Cathedral attest.v1 receipt
 
     def to_dict(self) -> dict[str, Any]:
         doc: dict[str, Any] = {
@@ -243,6 +248,8 @@ class SubmissionEnvelope:
         }
         if self.attestation is not None:
             doc["attestation"] = self.attestation
+        if self.production_attestation is not None:
+            doc["production_attestation"] = dict(self.production_attestation)
         return doc
 
     @classmethod
@@ -261,6 +268,11 @@ class SubmissionEnvelope:
         attestation = doc.get("attestation")
         if attestation is not None and not isinstance(attestation, str):
             raise ProtocolError("submission attestation must be a base64 string")
+        production_attestation = doc.get("production_attestation")
+        if production_attestation is not None and not isinstance(
+            production_attestation, Mapping
+        ):
+            raise ProtocolError("production_attestation must be an object")
         return cls(
             batch_id=str(doc["batch_id"]),
             task_id=str(doc["task_id"]),
@@ -268,6 +280,7 @@ class SubmissionEnvelope:
             poc_base64=str(doc["poc_base64"]),
             trace=doc["trace"],
             attestation=attestation,
+            production_attestation=production_attestation,
         )
 
 
@@ -341,6 +354,8 @@ def process_submission(
     trace_policy: TraceQualityPolicy = TraceQualityPolicy(),
     weights: Mapping[Level, Decimal] = DEFAULT_LEVEL_WEIGHTS,
     attestation_policy: AttestationPolicy | None = None,
+    production_quote_verifier: QuoteVerifier | None = None,
+    production_attestation_required: bool = False,
     now: datetime | None = None,
 ) -> SubmissionOutcome:
     """Verify one submission against the batch it answers, and score it.
@@ -349,15 +364,11 @@ def process_submission(
     or a malformed trace is rejected. A well-formed submission is run through the
     differential crash test to set `solved`.
 
-    Intel-TDX attestation gate: when `attestation_policy` is provided (production),
-    the submission must carry a valid TDX attestation bound to (batch, task, PoC,
-    miner) — see `cybergym_attest`; a solve is *creditable* (earns level-weighted
-    units, is corpus-eligible) only when it is both solved AND attested. When no
-    policy is given (the hardware-free dev/test path), attestation is not required
-    and `attested` is vacuously true, preserving the prior behaviour exactly. A
-    missing or invalid attestation is never a hard protocol error — the submission
-    is simply not credited (`attested=False`), so one bad attestation cannot break
-    an epoch's intake.
+    Production uses a raw Intel-TDX quote through ``production_quote_verifier``.
+    The quote-bound result artifact commits to source epoch, batch, task, PoC,
+    trace, miner, and model commitment. The normalized Ed25519 token path remains
+    available only for explicit hardware-free tests. A missing or invalid
+    attestation is never a hard protocol error — it simply receives no credit.
     """
     if envelope.batch_id != dispatch_msg.batch_id:
         raise ProtocolError("submission batch_id does not match the dispatched batch")
@@ -385,7 +396,38 @@ def process_submission(
     # authenticated client monopolize verifier capacity with throwaway PoCs.
     attested = True
     attest_reason = ""
-    if attestation_policy is not None:
+    production_mode = (
+        production_quote_verifier is not None or production_attestation_required
+    )
+    if production_mode:
+        if production_quote_verifier is None:
+            attested, attest_reason = False, "production_quote_verifier_missing"
+        elif submission.model_seal is not None:
+            # A self-claimed hash is not evidence of model execution. In production
+            # the quote-bound model commitment is the only accepted model binding.
+            attested, attest_reason = False, "development_model_seal_forbidden"
+        elif envelope.production_attestation is None:
+            attested, attest_reason = False, "missing_production_tdx_attestation"
+        else:
+            try:
+                result_attestation = verify_cathedral_attestation(
+                    envelope.production_attestation,
+                    source_epoch=dispatch_msg.source_epoch,
+                    batch_id=envelope.batch_id,
+                    task_id=envelope.task_id,
+                    poc_sha256=digest,
+                    trace_id=submission.trace_id(),
+                    miner_hotkey=envelope.miner_hotkey,
+                    model_commitment=dispatch_msg.model_commitment,
+                    now=now,
+                    quote_verifier=production_quote_verifier,
+                )
+            except Exception as exc:  # malformed external receipt must not break intake
+                attested, attest_reason = False, f"production_tdx_attestation_invalid:{exc}"
+            else:
+                if not result_attestation.attested:
+                    attested, attest_reason = False, result_attestation.reason
+    elif attestation_policy is not None:
         if not envelope.attestation:
             attested, attest_reason = False, "missing_tdx_attestation"
         else:
@@ -430,8 +472,19 @@ def process_submission(
 
     creditable = solved and attested
     work_units = derived_work_units(task, poc_sub if creditable else None, weights)
-    trainable = bool(creditable and submission.is_trainable(trace_policy))
-    bonus = submission_bonus(submission, trace_policy) if creditable else 0.0
+    trainable = bool(
+        creditable
+        and (
+            submission.quality(trace_policy).passed
+            if production_mode
+            else submission.is_trainable(trace_policy)
+        )
+    )
+    bonus = (
+        0.0
+        if production_mode
+        else submission_bonus(submission, trace_policy) if creditable else 0.0
+    )
 
     if not solved:
         reason = "not_solved:" + result.outcome

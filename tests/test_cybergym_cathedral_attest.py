@@ -31,6 +31,10 @@ from cathedral_distill.cybergym_cathedral_attest import (  # noqa: E402
 TASK = "arvo:368"
 POC_SHA = "sha256:" + "ab" * 32
 TRACE_ID = "sha256:" + "cd" * 32
+EPOCH = 41
+BATCH = "cybergym:batch-41"
+MINER = "5AttestedMiner"
+MODEL = "sha256:" + "ef" * 32
 NOW = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
 
 
@@ -39,6 +43,10 @@ def _receipt(
     task_id=TASK,
     poc_sha256=POC_SHA,
     trace_id=TRACE_ID,
+    source_epoch=EPOCH,
+    batch_id=BATCH,
+    miner_hotkey=MINER,
+    model_commitment=MODEL,
     kind="tdx-1.5",
     intel_verified=True,
     report_data_match=True,
@@ -55,7 +63,13 @@ def _receipt(
         artifact_sha
         if artifact_sha is not None
         else commitment_sha256(
-            task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id
+            source_epoch=source_epoch,
+            batch_id=batch_id,
+            task_id=task_id,
+            poc_sha256=poc_sha256,
+            trace_id=trace_id,
+            miner_hotkey=miner_hotkey,
+            model_commitment=model_commitment,
         )
     )
     artifacts = [{"path": "result.txt", "sha256": sha, "size_bytes": 209}]
@@ -82,10 +96,23 @@ def _receipt(
     }
 
 
+def _verify(receipt, **binding):
+    expected = {
+        "source_epoch": EPOCH,
+        "batch_id": BATCH,
+        "task_id": TASK,
+        "poc_sha256": POC_SHA,
+        "trace_id": TRACE_ID,
+        "miner_hotkey": MINER,
+        "model_commitment": MODEL,
+        "now": NOW,
+    }
+    expected.update(binding)
+    return verify_cathedral_attestation(receipt, **expected)
+
+
 def _ok(receipt):
-    return verify_cathedral_attestation(
-        receipt, task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID, now=NOW
-    )
+    return _verify(receipt)
 
 
 # --------------------------------------------------------------------------- #
@@ -95,7 +122,13 @@ def test_a_genuine_sealed_tdx_receipt_binds_the_submission():
     r = _ok(_receipt())
     assert r.attested and r.tee == "intel_tdx" and r.reason == "attested_intel_tdx"
     assert r.artifact_sha256 == commitment_sha256(
-        task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID
+        source_epoch=EPOCH,
+        batch_id=BATCH,
+        task_id=TASK,
+        poc_sha256=POC_SHA,
+        trace_id=TRACE_ID,
+        miner_hotkey=MINER,
+        model_commitment=MODEL,
     )
 
 
@@ -131,20 +164,27 @@ def test_unsealed_worker_is_refused():
 def test_attestation_cannot_be_replayed_for_another_task():
     # a receipt attesting task arvo:1065 can't credit an arvo:368 submission
     other = _receipt(task_id="arvo:1065")
-    r = verify_cathedral_attestation(
-        other, task_id="arvo:368", poc_sha256=POC_SHA, trace_id=TRACE_ID, now=NOW
-    )
+    r = _verify(other, task_id="arvo:368")
     assert not r.attested and "does not bind" in r.reason
 
 
 def test_attestation_cannot_be_paired_with_a_different_poc_or_trace():
     r = _receipt()
-    assert not verify_cathedral_attestation(
-        r, task_id=TASK, poc_sha256="sha256:" + "99" * 32, trace_id=TRACE_ID, now=NOW
-    ).attested
-    assert not verify_cathedral_attestation(
-        r, task_id=TASK, poc_sha256=POC_SHA, trace_id="sha256:" + "99" * 32, now=NOW
-    ).attested
+    assert not _verify(r, poc_sha256="sha256:" + "99" * 32).attested
+    assert not _verify(r, trace_id="sha256:" + "99" * 32).attested
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        {"source_epoch": EPOCH + 1},
+        {"batch_id": BATCH + "-other"},
+        {"miner_hotkey": MINER + "Other"},
+        {"model_commitment": "sha256:" + "12" * 32},
+    ],
+)
+def test_attestation_cannot_be_reused_for_another_epoch_batch_miner_or_model(binding):
+    assert not _verify(_receipt(), **binding).attested
 
 
 def test_missing_result_artifact_is_refused():
@@ -177,9 +217,7 @@ def test_a_missing_timestamp_fails_closed_not_open():
 
 
 def test_a_malformed_receipt_fails_closed_without_raising():
-    assert not verify_cathedral_attestation(
-        {}, task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID, now=NOW
-    ).attested
+    assert not _verify({}).attested
 
 
 # --------------------------------------------------------------------------- #
@@ -194,12 +232,8 @@ def test_trustless_mode_verifies_the_raw_quote_and_ignores_the_issuer_flag():
         return True
 
     # even with Cathedral's own flags false, a passing raw-quote verify credits it
-    r = verify_cathedral_attestation(
+    r = _verify(
         _receipt(intel_verified=False, report_data_match=False),
-        task_id=TASK,
-        poc_sha256=POC_SHA,
-        trace_id=TRACE_ID,
-        now=NOW,
         quote_verifier=verifier,
     )
     assert r.attested and r.trustless and r.reason == "attested_intel_tdx_trustless"
@@ -207,14 +241,7 @@ def test_trustless_mode_verifies_the_raw_quote_and_ignores_the_issuer_flag():
 
 
 def test_trustless_mode_fails_closed_when_the_quote_is_rejected():
-    r = verify_cathedral_attestation(
-        _receipt(),
-        task_id=TASK,
-        poc_sha256=POC_SHA,
-        trace_id=TRACE_ID,
-        now=NOW,
-        quote_verifier=lambda q, rd: False,
-    )
+    r = _verify(_receipt(), quote_verifier=lambda q, rd: False)
     assert not r.attested and "raw TDX quote" in r.reason
 
 
@@ -234,12 +261,8 @@ def test_trustless_mode_rejects_an_artifact_list_that_no_longer_matches_the_quot
 ):
     receipt = _receipt()
     mutation(receipt)
-    result = verify_cathedral_attestation(
+    result = _verify(
         receipt,
-        task_id=TASK,
-        poc_sha256=POC_SHA,
-        trace_id=TRACE_ID,
-        now=NOW,
         quote_verifier=lambda _quote, _report_data: True,
     )
     assert not result.attested
@@ -253,12 +276,8 @@ def test_trustless_mode_rejects_reordered_artifacts():
     )
     receipt["artifacts_sha256"] = artifacts_sha256(receipt["artifacts"])
     receipt["artifacts"].reverse()
-    result = verify_cathedral_attestation(
+    result = _verify(
         receipt,
-        task_id=TASK,
-        poc_sha256=POC_SHA,
-        trace_id=TRACE_ID,
-        now=NOW,
         quote_verifier=lambda _quote, _report_data: True,
     )
     assert not result.attested

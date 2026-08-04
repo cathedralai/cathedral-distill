@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable, Mapping
 
-COMMITMENT_SCHEMA = "cathedral_cybergym_tdx_commitment_v1"
+COMMITMENT_SCHEMA = "cathedral_cybergym_tdx_commitment_v2"
 REQUIRED_TEE = "intel_tdx"
 REQUIRED_HARDWARE = "tdx_cpu"
 RESULT_ARTIFACT = "result.txt"
@@ -53,21 +53,34 @@ DEFAULT_MAX_AGE_SECONDS = 24 * 3600
 QuoteVerifier = Callable[[str, str], bool]
 
 
-def commitment_bytes(*, task_id: str, poc_sha256: str, trace_id: str) -> bytes:
+def commitment_bytes(
+    *,
+    source_epoch: int,
+    batch_id: str,
+    task_id: str,
+    poc_sha256: str,
+    trace_id: str,
+    miner_hotkey: str,
+    model_commitment: str,
+) -> bytes:
     """The exact `result.txt` the enclave writes — a canonical commitment the
     validator can reproduce byte-for-byte from the submission."""
     body = {
         "schema": COMMITMENT_SCHEMA,
+        "source_epoch": source_epoch,
+        "batch_id": batch_id,
         "task_id": task_id,
         "poc_sha256": poc_sha256,
         "trace_id": trace_id,
+        "miner_hotkey": miner_hotkey,
+        "model_commitment": model_commitment,
     }
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def commitment_sha256(*, task_id: str, poc_sha256: str, trace_id: str) -> str:
+def commitment_sha256(**kwargs: Any) -> str:
     return hashlib.sha256(
-        commitment_bytes(task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id)
+        commitment_bytes(**kwargs)
     ).hexdigest()
 
 
@@ -144,9 +157,13 @@ def _iso(value: Any) -> datetime | None:
 def verify_cathedral_attestation(
     receipt: Mapping[str, Any],
     *,
+    source_epoch: int,
+    batch_id: str,
     task_id: str,
     poc_sha256: str,
     trace_id: str,
+    miner_hotkey: str,
+    model_commitment: str,
     now: datetime | None = None,
     max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
     quote_verifier: QuoteVerifier | None = None,
@@ -208,7 +225,13 @@ def verify_cathedral_attestation(
 
     # --- the submission binding: the attested result.txt IS the commitment ---
     expect = commitment_sha256(
-        task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id
+        source_epoch=source_epoch,
+        batch_id=batch_id,
+        task_id=task_id,
+        poc_sha256=poc_sha256,
+        trace_id=trace_id,
+        miner_hotkey=miner_hotkey,
+        model_commitment=model_commitment,
     )
     artifact = next(
         (

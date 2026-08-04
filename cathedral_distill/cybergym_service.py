@@ -30,6 +30,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cathedral_distill.attestation import AttestationPolicy
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level
 from cathedral_distill.cybergym_batch import derive_common_batch_nonce
+from cathedral_distill.cybergym_cathedral_attest import QuoteVerifier
 from cathedral_distill.cybergym_holdout import Holdout
 from cathedral_distill.cybergym_protocol import (
     DispatchMessage,
@@ -108,6 +109,8 @@ class CyberGymService:
         level_weights: Mapping[Level, Decimal] = DEFAULT_LEVEL_WEIGHTS,
         trace_policy: TraceQualityPolicy = TraceQualityPolicy(),
         attestation_policy: AttestationPolicy | None = None,
+        production_quote_verifier: QuoteVerifier | None = None,
+        allow_software_attestation: bool = False,
         attestation_now: datetime | None = None,
         attestation_required: bool = True,
         gate_policy: EmissionGatePolicy | None = None,
@@ -115,17 +118,25 @@ class CyberGymService:
         credit_synthetic_tasks: bool = False,
         max_verification_attempts_per_task: int = 3,
     ) -> None:
-        # Fail closed: Intel-TDX attestation is a MANDATORY control for this track,
-        # so the running service refuses to start without an attestation policy
-        # unless the operator EXPLICITLY opts out (attestation_required=False) for
-        # the hardware-free dev/test path — and even then it says so loudly. A
-        # forgotten kwarg must never silently credit unattested solves.
-        if attestation_policy is None:
+        # A reward path needs an independently verified raw TDX quote. The
+        # normalized Ed25519 document is deterministic test evidence only, behind
+        # an explicit acknowledgement, so it cannot be mistaken for production.
+        if production_quote_verifier is not None and attestation_policy is not None:
+            raise ProtocolError(
+                "choose either production_quote_verifier or software attestation, not both"
+            )
+        if attestation_policy is not None and not allow_software_attestation:
+            raise ProtocolError(
+                "software-only attestation is test-only: configure "
+                "production_quote_verifier for rewards, or set "
+                "allow_software_attestation=True in a test"
+            )
+        if production_quote_verifier is None and attestation_policy is None:
             if attestation_required:
                 raise ProtocolError(
-                    "CyberGym requires an Intel-TDX attestation policy: pass "
-                    "attestation_policy=..., or attestation_required=False for the "
-                    "hardware-free dev/test path (which credits UNATTESTED solves)."
+                    "CyberGym requires a production Intel-TDX quote verifier: pass "
+                    "production_quote_verifier=..., or set attestation_required=False "
+                    "for the hardware-free dev/test path (which credits UNATTESTED solves)."
                 )
             import warnings
 
@@ -191,9 +202,9 @@ class CyberGymService:
         self._as_of = as_of
         self._weights = level_weights
         self._trace_policy = trace_policy
-        # When set, a submission must carry a valid Intel-TDX attestation bound to
-        # it (cybergym_attest) to be creditable; None keeps the hardware-free path.
+        # Software attestation is available only for explicit deterministic tests.
         self._attestation_policy = attestation_policy
+        self._production_quote_verifier = production_quote_verifier
         self._attestation_now = attestation_now
         if gate_policy is not None:
             try:
@@ -547,6 +558,10 @@ class CyberGymService:
             trace_policy=self._trace_policy,
             weights=self._weights,
             attestation_policy=self._attestation_policy,
+            production_quote_verifier=self._production_quote_verifier,
+            production_attestation_required=(
+                self._production_quote_verifier is not None
+            ),
             now=self._attestation_now,
         )
         if outcome.work_units > 0 and not self.rewardable_task(envelope.task_id):
