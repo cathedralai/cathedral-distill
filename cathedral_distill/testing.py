@@ -165,16 +165,22 @@ class IntegrationFixtures:
         return challenge_id, work_item, result
 
     def _compute_receipt_with_evidence(
-        self, subject: str, variation: str, platform: dict, cpu_tee: str
+        self,
+        subject: str,
+        variation: str,
+        platform: dict,
+        cpu_tee: str,
+        *,
+        claimed_work_units: str = "20",
     ) -> _ComputeReceiptFixture:
         challenge_id, work_item, result = self._work_artifacts(subject, variation)
-        body = self._compute_body(subject, "20", platform, cpu_tee)
+        body = self._compute_body(subject, claimed_work_units, platform, cpu_tee)
         body["work"] = {
             "challenge_id": challenge_id,
             "manifest_digest": "sha256:" + hashlib.sha256(work_item).hexdigest(),
             "result_digest": "sha256:" + hashlib.sha256(result).hexdigest(),
             "status": "passed",
-            "work_units": "20",
+            "work_units": claimed_work_units,
         }
         receipt = _compute.build_receipt(body, self.key, signing_key_id="compute-1")
         return _ComputeReceiptFixture(
@@ -201,6 +207,23 @@ class IntegrationFixtures:
         platform = {"class": _compute.PLATFORM_CPU, "cpu_tee": cpu_tee}
         return self._compute_receipt_with_evidence(
             subject, str(work_units), platform, cpu_tee
+        )
+
+    def cpu_receipt_with_claimed_work_units(
+        self,
+        subject: str,
+        claimed_work_units: str,
+        *,
+        cpu_tee: str = _compute.CPU_TEE_TDX,
+    ) -> _ComputeReceiptFixture:
+        """Build a signed but non-creditable claim for replay-gate tests."""
+        platform = {"class": _compute.PLATFORM_CPU, "cpu_tee": cpu_tee}
+        return self._compute_receipt_with_evidence(
+            subject,
+            f"claimed-units:{claimed_work_units}",
+            platform,
+            cpu_tee,
+            claimed_work_units=claimed_work_units,
         )
 
     def gpu_receipt(self, subject: str = "5GpuMiner", work_units: str = "20",

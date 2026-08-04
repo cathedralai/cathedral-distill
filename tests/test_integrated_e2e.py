@@ -26,11 +26,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cathedral_distill import compute_receipt as cr  # noqa: E402
 from cathedral_distill import distill_receipt as dr  # noqa: E402
 from cathedral_distill import integrated_feed as itf  # noqa: E402
 from cathedral_distill import signed_config as sc  # noqa: E402
 from cathedral_distill.receipt_keys import ReceiptKeyRegistry  # noqa: E402
+from cathedral_distill.testing import IntegrationFixtures  # noqa: E402
 
 # One deterministic key anchors receipts and configs by id (hardware-free path).
 KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
@@ -47,6 +47,7 @@ MEASUREMENT = "tdx-measurement-sha256:" + "ab" * 32
 LANE_CPU = "cathedral_confidential_tdx"
 LANE_GPU = "cathedral_confidential_gpu"
 LANE_DISTILL = "cathedral_distill"
+FIXTURES = IntegrationFixtures(source_epoch=SOURCE_EPOCH)
 
 
 def _dg(seed: str) -> str:
@@ -57,39 +58,17 @@ def _dg(seed: str) -> str:
 # Receipt builders (each a real signed receipt)
 # --------------------------------------------------------------------------- #
 
-def _compute_body(subject, work_units, platform):
-    return {
-        "schema": cr.RECEIPT_SCHEMA, "subject_hotkey": subject, "epoch_id": 7,
-        "source_epoch": SOURCE_EPOCH, "issued_at": "2026-07-25T12:00:00.000000Z",
-        "platform_pseudonym": "platform-" + _dg(subject),
-        "measurement": MEASUREMENT, "policy_registry_release": 1,
-        "policy_registry_digest": _dg("policy"), "policy_profile_ids": ["compute-v1"],
-        "tcb": {"status": "UpToDate", "version": 3, "svn": "0" * 32,
-                "advisory_ids": [], "debug_enabled": False, "collateral_current": True},
-        "channel": {"status": "passed", "binding_digest": _dg("chan")},
-        "work": {"challenge_id": "c-11", "manifest_digest": _dg("m"),
-                 "result_digest": _dg("r"), "status": "passed", "work_units": work_units},
-        "assurance": {"schema": cr.ASSURANCE_SCHEMA, "claims": {
-            "channel": {"status": "passed"}, "hardware": {"status": "passed"},
-            "software": {"status": "passed"}, "work": {"status": "passed"}}},
-        "lifecycle": {"state": "issued", "revocation_reference": None,
-                      "worker_evidence_expires_at": "2026-07-26T12:00:00.000000Z"},
-        "platform": platform,
-    }
-
-
 def cpu_receipt(subject="5CpuMiner", work_units="30"):
-    platform = {"class": cr.PLATFORM_CPU, "cpu_tee": cr.CPU_TEE_TDX}
-    return cr.build_receipt(_compute_body(subject, work_units, platform),
-                            KEY, signing_key_id="compute-1")
+    return FIXTURES.cpu_receipt(subject=subject, work_units=work_units)
 
 
 def gpu_receipt(subject="5GpuMiner", work_units="20", bound=MEASUREMENT):
-    platform = {"class": cr.PLATFORM_GPU, "cpu_tee": cr.CPU_TEE_TDX, "gpu": {
-        "cc_mode": "on", "vbios_measurement": _dg("vbios"),
-        "attestation_report_digest": _dg("gpu-report"), "bound_measurement": bound}}
-    return cr.build_receipt(_compute_body(subject, work_units, platform),
-                            KEY, signing_key_id="compute-1")
+    return FIXTURES.gpu_receipt(
+        subject=subject,
+        work_units=work_units,
+        bound=bound,
+        cpu_tee="intel_tdx",
+    )
 
 
 def distill_receipt(subject="5DistillMiner", passed=28, graded=32):
