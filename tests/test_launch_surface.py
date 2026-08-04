@@ -1,18 +1,11 @@
-"""What is on the launch path, and what a signed number can still do.
+"""What is on the launch path, and how Compute work is independently derived.
 
 Two jobs, both about keeping a future change deliberate rather than accidental.
 
-1. **Compute `work_units` are asserted, not derived**, pinned here as a
-   DOCUMENTING test, named after the gap it documents rather than a property it
-   proves. Distill derives units from `passed_items` and CyberGym derives them from
-   the level weights, both re-checkable by any validator. Compute validates its
-   `work_units` as a canonical decimal and passes it straight through, so whoever
-   holds the anchored signing key sets the number, and after normalization one
-   receipt with a 30-digit value takes essentially the whole lane. No quantity in
-   the receipt body (`challenge_id`, `manifest_digest`, `result_digest`, `status`)
-   lets a validator re-derive the work, so there is nothing to bound it against
-   without either a contract change or an invented economic cap. This test exists
-   so the behaviour cannot change silently while that decision is open.
+1. **Compute `work_units` are derived from replayed SAT artifacts.** A signed
+   receipt commits to the work-item and result bytes; the sidecar must supply
+   those bytes so the validator can derive the only creditable unit value. A
+   correctly signed inflated claim therefore fails rather than dominating a lane.
 
 2. **The launch path is exactly four receipt kinds**. Fuzz-harness generation
    (`harness_gen.py`) is standalone: no receipt family, no dispatch, no lane, and
@@ -23,17 +16,12 @@ Two jobs, both about keeping a future change deliberate rather than accidental.
 from __future__ import annotations
 
 import ast
-import json
 import sys
-from decimal import Decimal
 from pathlib import Path
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cathedral_distill import admission as adm  # noqa: E402
-from cathedral_distill import compute_receipt as cr  # noqa: E402
 from cathedral_distill import integrated_feed as itf  # noqa: E402
 from cathedral_distill import signed_config as sc  # noqa: E402
 from cathedral_distill.testing import IntegrationFixtures  # noqa: E402
@@ -55,58 +43,39 @@ def _verify(receipt, kind=itf.KIND_COMPUTE_CPU, lane=LANE_CPU):
 
 
 # --------------------------------------------------------------------------- #
-# 1. Compute work_units: what a signed number can do (DOCUMENTING)
+# 1. Compute work_units: replayed SAT artifacts define the creditable value
 # --------------------------------------------------------------------------- #
 
-def test_documents_that_a_signed_compute_work_units_value_captures_the_lane():
-    """DOCUMENTING a known gap, not asserting a desired property.
-
-    A 30-digit `work_units` verifies PASS and leaves an honest miner in the same
-    lane with a normalized weight of zero. Closing this needs an owner decision
-    (see the module docstring); until then this pins the behaviour.
-    """
-    from datetime import UTC, datetime
-
-    burn = sc.verify_burn_config(FX.burn_config(), FX.registry, network="finney", netuid=39,
-                                 now=datetime(2026, 7, 25, 12, 30, tzinfo=UTC))
-    allocation = sc.verify_allocation_config(
-        FX.allocation_config([
-            {"lane": LANE_CPU, "allocation": "0.50", "enabled": True},
-            {"lane": LANE_DISTILL, "allocation": "0.40", "enabled": True},
-        ]),
-        FX.registry, network="finney", netuid=39,
-        now=datetime(2026, 7, 25, 12, 30, tzinfo=UTC),
+def test_signed_compute_unit_inflation_fails_replayed_work_evidence():
+    honest = _verify(FX.cpu_receipt(subject="5Honest"))
+    whale = _verify(
+        FX.cpu_receipt_with_claimed_work_units("5Whale", "9" * 30)
     )
-    resolved = sc.resolve_allocation(burn, allocation)
-
-    honest = _verify(FX.cpu_receipt(subject="5Honest", work_units="30"))
-    whale = _verify(FX.cpu_receipt(subject="5Whale", work_units="9" * 30))
     assert honest.verdict == itf.PASS
-    assert whale.verdict == itf.PASS                       # nothing rejects the number
-    assert whale.work_units == Decimal("9" * 30)
-
-    composed = itf.compose_integrated(resolved, [honest, whale])
-    weights = {w["miner_hotkey"]: w["weight"] for w in composed["feed"]["weights"]}
-    assert weights["5Honest"] == pytest.approx(0.0, abs=1e-9)
-    assert weights["5Whale"] > 0.5
-    assert json.dumps(composed["audit"])
+    assert whale.verdict == itf.FAIL
+    assert "independently derived" in whale.detail
 
 
-def test_compute_work_units_grammar_is_the_only_bound_today():
-    """The decimal grammar caps the digit count, which is input sanity, not a
-    work bound: 31 integer digits are refused, and the reachable supremum is
-    999999999999999999999999999999.999999999999 (30 integer digits plus the 12
-    decimal places the grammar allows)."""
-    too_long = _verify(FX.cpu_receipt(subject="5Whale", work_units="1" + "0" * 30))
+def test_compute_work_units_must_be_canonical_and_match_the_replayed_sat_rule():
+    too_long = _verify(
+        FX.cpu_receipt_with_claimed_work_units("5Whale", "1" + "0" * 30)
+    )
     assert too_long.verdict == itf.FAIL
     assert "canonical decimal string" in too_long.detail
 
-    at_the_grammar_limit = _verify(FX.cpu_receipt(subject="5Whale", work_units="1" + "0" * 29))
-    assert at_the_grammar_limit.verdict == itf.PASS
+    at_the_grammar_limit = _verify(
+        FX.cpu_receipt_with_claimed_work_units("5Whale", "1" + "0" * 29)
+    )
+    assert at_the_grammar_limit.verdict == itf.FAIL
+    assert "independently derived" in at_the_grammar_limit.detail
 
-    supremum = _verify(FX.cpu_receipt(subject="5Whale", work_units="9" * 30 + "." + "9" * 12))
-    assert supremum.verdict == itf.PASS
-    assert supremum.work_units == Decimal("9" * 30 + "." + "9" * 12)
+    supremum = _verify(
+        FX.cpu_receipt_with_claimed_work_units(
+            "5Whale", "9" * 30 + "." + "9" * 12
+        )
+    )
+    assert supremum.verdict == itf.FAIL
+    assert "independently derived" in supremum.detail
 
 
 def test_the_other_two_lanes_do_derive_their_units():

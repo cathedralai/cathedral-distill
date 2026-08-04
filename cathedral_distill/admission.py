@@ -133,6 +133,7 @@ def verify_admission(
     allowed_measurements: frozenset[str] | set[str] | None = None,
     allowed_tcb_statuses: frozenset[str] | set[str] | None = None,
     allowed_advisories: frozenset[str] | set[str] | None = None,
+    work_evidence: Mapping[str, Any] | None = None,
 ) -> Admission:
     """Verify one receipt against all five inputs and return its admission decision.
 
@@ -175,6 +176,7 @@ def verify_admission(
         cpu_quote_verifier=cpu_quote_verifier, consumption_ledger=consumption_ledger,
         allowed_measurements=allowed_measurements,
         allowed_tcb_statuses=allowed_tcb_statuses, allowed_advisories=allowed_advisories,
+        work_evidence=work_evidence,
     )
     adm = Admission(
         kind=decision.kind, lane=decision.lane, receipt_id=decision.receipt_id,
