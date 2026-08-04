@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -46,6 +47,7 @@ ROOT_PUB = (
 ISSUED = "2026-07-29T12:00:00Z"
 NOW = datetime(2026, 7, 29, 12, 0, 0, tzinfo=UTC)
 MINER = "5AttestedMiner"
+MODEL = "sha256:" + hashlib.sha256(b"attested-model").hexdigest()
 
 POLICY = AttestationPolicy(
     trusted_roots={ROOT_ID: ROOT_PUB},
@@ -146,6 +148,7 @@ def _fixture(nonce="ance10ab", *, size=1):
         batch_id=batch.batch_id,
         nonce=nonce,
         miner_hotkey=MINER,
+        model_commitment=MODEL,
         valid_from_block=1,
         valid_until_block=999,
         tasks=(dt,),
@@ -177,6 +180,7 @@ def _attested_envelope(msg, task_id, poc, **over):
         poc_sha256=digest,
         trace_id=_trace_id_of(task_id, digest),
         miner_hotkey=MINER,
+        model_commitment=msg.model_commitment,
     )
     token = _make_token(report_data=rd, **over)
     return _envelope(
@@ -189,7 +193,8 @@ def _attested_envelope(msg, task_id, poc, **over):
 # --------------------------------------------------------------------------- #
 def test_report_data_is_deterministic_and_binds_every_field():
     base = dict(
-        batch_id="b", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m"
+        batch_id="b", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m",
+        model_commitment="sha256:model",
     )
     rd = submission_report_data(**base)
     assert rd == submission_report_data(**base)  # deterministic
@@ -204,7 +209,8 @@ def test_report_data_is_deterministic_and_binds_every_field():
 def test_report_data_requires_all_fields():
     with pytest.raises(CyberGymAttestError):
         submission_report_data(
-            batch_id="", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m"
+            batch_id="", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m",
+            model_commitment="sha256:model",
         )
 
 
@@ -293,6 +299,7 @@ def test_replayed_attestation_for_another_poc_earns_zero():
         poc_sha256=other_digest,
         trace_id=_trace_id_of(task_id, real_digest),
         miner_hotkey=MINER,
+        model_commitment=msg.model_commitment,
     )
     token = _make_token(report_data=rd)  # bound to other_poc
     env = _envelope(
@@ -314,6 +321,7 @@ def test_attestation_from_another_miner_earns_zero():
         poc_sha256=digest,
         trace_id=_trace_id_of(task_id, digest),
         miner_hotkey="5SomeoneElse",
+        model_commitment=msg.model_commitment,
     )
     token = _make_token(report_data=rd_other)
     env = _envelope(
@@ -370,6 +378,18 @@ def test_swapped_trace_earns_zero():
     assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
+def test_attestation_cannot_be_reused_for_a_different_model_commitment():
+    source, msg, task_id, poc = _fixture()
+    env = _attested_envelope(msg, task_id, poc)
+    changed = replace(
+        msg, model_commitment="sha256:" + hashlib.sha256(b"different-model").hexdigest()
+    )
+    out = process_submission(
+        env, changed, source.backend, attestation_policy=POLICY, now=NOW
+    )
+    assert out.solved and not out.attested and out.work_units == Decimal(0)
+
+
 def test_service_requires_attestation_policy_by_default(tmp_path):
     """Fail-closed: the stateful service refuses to start without a policy unless
     the operator explicitly opts out (a forgotten kwarg must not credit unattested)."""
@@ -414,7 +434,8 @@ def test_service_requires_attestation_policy_by_default(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_verify_submission_attestation_accepts_and_rejects():
     rd = submission_report_data(
-        batch_id="b", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m"
+        batch_id="b", task_id="t", poc_sha256="p", trace_id="tr", miner_hotkey="m",
+        model_commitment="sha256:model",
     )
     good = _make_token(report_data=rd)
     doc = verify_submission_attestation(
@@ -424,6 +445,7 @@ def test_verify_submission_attestation_accepts_and_rejects():
         poc_sha256="p",
         trace_id="tr",
         miner_hotkey="m",
+        model_commitment="sha256:model",
         policy=POLICY,
         now=NOW,
     )
@@ -436,6 +458,7 @@ def test_verify_submission_attestation_accepts_and_rejects():
             poc_sha256="p",
             trace_id="OTHER",
             miner_hotkey="m",
+            model_commitment="sha256:model",
             policy=POLICY,
             now=NOW,
         )
@@ -496,6 +519,7 @@ def test_service_only_attested_miner_earns_and_composes(tmp_path):
                     poc_sha256=digest,
                     trace_id=_trace_id_of(t.task_id, digest),
                     miner_hotkey=miner,
+                    model_commitment=msg.model_commitment,
                 )
                 att = base64.b64encode(_make_token(report_data=rd)).decode()
             env = SubmissionEnvelope(
