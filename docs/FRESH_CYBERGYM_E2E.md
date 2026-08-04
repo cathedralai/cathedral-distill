@@ -60,7 +60,7 @@ CYBERGYM_CORPUS_DB=/srv/cathedral-fresh-e2e/corpus.sqlite \
 CYBERGYM_SCORE_DB=/srv/cathedral-fresh-e2e/scores.sqlite \
 CYBERGYM_SOLVE_DB=/srv/cathedral-fresh-e2e/solves.sqlite \
 CYBERGYM_E2E_AS_OF=2026-08-04T12:00:00+00:00 \
-  cathedral-cybergym-fresh-e2e-close --issued-at 2026-08-04T13:00:00Z
+  cathedral-cybergym-fresh-e2e-close --issued-at 2026-08-04T13:00:00.000000Z
 
 cathedral-cybergym export-scores \
   --score-db /srv/cathedral-fresh-e2e/scores.sqlite \
@@ -73,6 +73,19 @@ The close command restores accepted PoCs from `CYBERGYM_SOLVE_DB`, re-derives
 the sealed task batch, and writes only a durably closed score epoch.  The
 existing exporter then freezes a canonical report.  Neither command publishes
 weights or turns this non-reward E2E verifier into a production authority.
+
+`--issued-at` must be a real UTC timestamp with exactly six fractional digits.
+The close command validates it before the durable first-write-wins pin.  If a
+pre-validation E2E build already pinned a malformed timestamp, it refuses a
+silent replacement.  After confirming the epoch is still open and has no score
+rows, recover it explicitly with an auditable repair:
+
+```bash
+cathedral-cybergym-fresh-e2e-close \
+  --issued-at 2026-08-04T13:00:00.000000Z \
+  --repair-invalid-issued-at \
+  --repair-reason 'pre-validation E2E timestamp pin'
+```
 
 ## Required E2E evidence
 

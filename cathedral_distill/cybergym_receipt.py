@@ -70,6 +70,23 @@ class CyberGymReceiptError(ValueError):
     """Raised when a receipt is malformed or fails verification. Fails closed."""
 
 
+def validate_issued_at(value: object) -> str:
+    """Return one real canonical receipt timestamp or raise before it is signed.
+
+    This is intentionally usable by the durable epoch store as well as receipt
+    validation.  An invalid timestamp must never become the first-write-wins
+    value for an epoch: a receipt could not verify with it, and a correct retry
+    would otherwise be blocked by the poisoned durable pin.
+    """
+    if not isinstance(value, str) or not _TS_RE.match(value):
+        raise CyberGymReceiptError("issued_at must be six-fraction-digit UTC")
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError:
+        raise CyberGymReceiptError("issued_at is not a real UTC timestamp") from None
+    return value
+
+
 # --------------------------------------------------------------------------- #
 # Canonical bytes — the shared receipt discipline
 # --------------------------------------------------------------------------- #
@@ -211,8 +228,7 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
         raise CyberGymReceiptError("unsupported cybergym receipt schema")
     if len(canonical_bytes({k: v for k, v in doc.items() if k != "signature"})) > MAX_RECEIPT_BYTES:
         raise CyberGymReceiptError("receipt exceeds 256 KiB")
-    if not _TS_RE.match(str(doc["issued_at"])):
-        raise CyberGymReceiptError("issued_at must be six-fraction-digit UTC")
+    validate_issued_at(doc["issued_at"])
     _nonneg_int(doc["source_epoch"], "source_epoch")
     first = _nonneg_int(doc["valid_from_block"], "valid_from_block")
     last = _nonneg_int(doc["valid_until_block"], "valid_until_block")
