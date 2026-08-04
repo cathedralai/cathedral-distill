@@ -36,6 +36,7 @@ without Docker or a registry.
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
@@ -43,6 +44,11 @@ from cathedral_distill.cybergym_repro import (
     DOCKER_TIMEOUT,
     _image_and_command,
     docker_reproduce_backend,
+)
+from cathedral_distill.cybergym_repro_manifest import (
+    PinnedReproTask,
+    PrivateReproManifest,
+    ReproManifestError,
 )
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -83,14 +89,14 @@ class Admission:
         }
 
 
-def reference_poc(task_id: str, *, docker: str = "docker",
-                  _run: Runner = subprocess.run) -> bytes | None:
-    """The reproducer baked into the `-vul` image, or None if it has none.
+def reference_poc_image(image: str, *, docker: str = "docker",
+                        _run: Runner = subprocess.run) -> bytes | None:
+    """The reproducer baked into one exact vulnerable image, or None if absent.
 
-    Read from the image rather than from a manifest on purpose: this is exactly
-    what a miner can do, so the value here is the value an adversary would get.
+    The caller supplies the image rather than a task id so a private manifest is
+    checked against its immutable image bytes instead of the mutable public-tag
+    fallback used by the legacy task-id helper.
     """
-    image, _ = _image_and_command(task_id, "vul")
     try:
         r = _run([docker, "run", "--rm", "--entrypoint", "cat", image, "/tmp/poc"],
                  capture_output=True, timeout=DOCKER_TIMEOUT)
@@ -99,6 +105,45 @@ def reference_poc(task_id: str, *, docker: str = "docker",
     if getattr(r, "returncode", 1) != 0:
         return None
     return r.stdout or b""
+
+
+def reference_poc(task_id: str, *, docker: str = "docker",
+                  _run: Runner = subprocess.run) -> bytes | None:
+    """The reproducer baked into the tag-derived `-vul` image, or None if absent.
+
+    This compatibility helper is for the standalone admission probe. A validator
+    must call :func:`admit_private_manifest`, which binds every check to the
+    digest-pinned image pair held in its private manifest.
+    """
+    image, _ = _image_and_command(task_id, "vul")
+    return reference_poc_image(image, docker=docker, _run=_run)
+
+
+def answer_is_public_image(image: str, *, poc: bytes | None = None,
+                           docker: str = "docker",
+                           _run: Runner = subprocess.run) -> bool:
+    """True only when an anonymous Docker client can resolve the image and read a PoC.
+
+    ``docker manifest inspect`` normally uses the validator host's credentials,
+    which cannot distinguish a public image from a private one the validator is
+    allowed to pull.  A fresh empty Docker config makes this an anonymous
+    registry lookup.  If either lookup or fixture extraction fails, admission
+    does not claim a public-answer leak; the separate discrimination and
+    solvability checks still fail closed on unverified work.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="cybergym-anon-docker-") as config:
+            r = _run(
+                [docker, "--config", config, "manifest", "inspect", image],
+                capture_output=True, timeout=120,
+            )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    if getattr(r, "returncode", 1) != 0:
+        return False
+    if poc is None:
+        poc = reference_poc_image(image, docker=docker, _run=_run)
+    return bool(poc)
 
 
 def answer_is_public(task_id: str, *, docker: str = "docker",
@@ -110,14 +155,58 @@ def answer_is_public(task_id: str, *, docker: str = "docker",
     leaks nothing, and an image with no baked reproducer has no answer to leak.
     """
     image, _ = _image_and_command(task_id, "vul")
-    try:
-        r = _run([docker, "manifest", "inspect", image], capture_output=True, timeout=120)
-    except (subprocess.SubprocessError, OSError):
-        return False
-    if getattr(r, "returncode", 1) != 0:
-        return False  # not resolvable anonymously -> not public
-    poc = reference_poc(task_id, docker=docker, _run=_run)
-    return bool(poc)
+    return answer_is_public_image(image, docker=docker, _run=_run)
+
+
+def _admit(task_id: str, *, reference: Callable[[], bytes | None],
+           public_answer: Callable[[bytes | None], bool], backend: Backend,
+           controls: Sequence[bytes]) -> Admission:
+    """Evaluate the three scoreability properties for one fixed task/image pair."""
+    reasons: list[str] = []
+
+    crashing_controls = [control for control in controls if backend(task_id, control, "vul") != 0]
+    discriminates = not crashing_controls
+    if not discriminates:
+        reasons.append(
+            f"the vulnerable build crashes on {len(crashing_controls)} of "
+            f"{len(controls)} control inputs, so the differential is satisfied by "
+            "input that demonstrates nothing"
+        )
+
+    poc = reference()
+    if not poc:
+        solvable = False
+        reasons.append(
+            "no reference reproducer is available, so the task cannot be shown to "
+            "be a real vulnerability"
+        )
+    else:
+        crashes_vul = backend(task_id, poc, "vul") != 0
+        spares_fix = backend(task_id, poc, "fix") == 0
+        solvable = crashes_vul and spares_fix
+        if not crashes_vul:
+            reasons.append("the reference reproducer does not crash the vulnerable build")
+        elif not spares_fix:
+            reasons.append(
+                "the reference reproducer also crashes the patched build, so it "
+                "does not identify the vulnerability the patch fixed"
+            )
+
+    public = public_answer(poc)
+    if public:
+        reasons.append(
+            "the vulnerable image is publicly pullable and carries the reference "
+            "reproducer, so any miner can read the answer without solving it"
+        )
+
+    return Admission(
+        task_id=task_id,
+        scoreable=discriminates and solvable and not public,
+        discriminates=discriminates,
+        solvable=solvable,
+        answer_is_public=public,
+        reasons=tuple(reasons),
+    )
 
 
 def admit(task_id: str, *, docker: str = "docker",
@@ -137,51 +226,60 @@ def admit(task_id: str, *, docker: str = "docker",
     3. **Is the answer public?** If a miner can pull the image and read the
        reproducer, the task is training data, not a test.
     """
-    reasons: list[str] = []
-
-    crashing_controls = [c for c in controls if _backend(task_id, c, "vul") != 0]
-    discriminates = not crashing_controls
-    if not discriminates:
-        reasons.append(
-            f"the vulnerable build crashes on {len(crashing_controls)} of "
-            f"{len(controls)} control inputs, so the differential is satisfied by "
-            "input that demonstrates nothing"
-        )
-
-    poc = reference_poc(task_id, docker=docker, _run=_run)
-    if not poc:
-        solvable = False
-        reasons.append(
-            "no reference reproducer is available, so the task cannot be shown to "
-            "be a real vulnerability"
-        )
-    else:
-        crashes_vul = _backend(task_id, poc, "vul") != 0
-        spares_fix = _backend(task_id, poc, "fix") == 0
-        solvable = crashes_vul and spares_fix
-        if not crashes_vul:
-            reasons.append("the reference reproducer does not crash the vulnerable build")
-        elif not spares_fix:
-            reasons.append(
-                "the reference reproducer also crashes the patched build, so it "
-                "does not identify the vulnerability the patch fixed"
-            )
-
-    public = answer_is_public(task_id, docker=docker, _run=_run)
-    if public:
-        reasons.append(
-            "the vulnerable image is publicly pullable and carries the reference "
-            "reproducer, so any miner can read the answer without solving it"
-        )
-
-    return Admission(
-        task_id=task_id,
-        scoreable=discriminates and solvable and not public,
-        discriminates=discriminates,
-        solvable=solvable,
-        answer_is_public=public,
-        reasons=tuple(reasons),
+    return _admit(
+        task_id,
+        reference=lambda: reference_poc(task_id, docker=docker, _run=_run),
+        public_answer=lambda poc: answer_is_public_image(
+            _image_and_command(task_id, "vul")[0], poc=poc, docker=docker, _run=_run),
+        backend=_backend,
+        controls=controls,
     )
+
+
+def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "docker",
+                           _run: Runner = subprocess.run,
+                           _backend: Backend = docker_reproduce_backend,
+                           controls: Sequence[bytes] = CONTROL_INPUTS) -> tuple[Admission, ...]:
+    """Run admission over the validator's exact, digest-pinned manifest images.
+
+    This is the production entrypoint.  Unlike :func:`admit`, its Docker
+    differential receives the same ``PrivateReproManifest`` that
+    ``ReproTaskSource`` will later dispatch, so a tag-derived probe cannot approve
+    different bytes from the ones the verifier scores.
+    """
+    if not isinstance(manifest, PrivateReproManifest):
+        raise ReproManifestError("manifest admission requires a PrivateReproManifest")
+
+    admissions: list[Admission] = []
+    for task in manifest.tasks:
+        def backend(task_id: str, poc: bytes, mode: str, *, _task: PinnedReproTask = task) -> int:
+            if task_id != _task.task_id:
+                raise ReproManifestError("admission backend received a task outside its manifest entry")
+            return _backend(
+                task_id, poc, mode, manifest=manifest, docker=docker, _run=_run)
+
+        admissions.append(_admit(
+            task.task_id,
+            reference=lambda task=task: reference_poc_image(
+                task.vulnerable_image, docker=docker, _run=_run),
+            public_answer=lambda poc, task=task: answer_is_public_image(
+                task.vulnerable_image, poc=poc, docker=docker, _run=_run),
+            backend=backend,
+            controls=controls,
+        ))
+    return tuple(admissions)
+
+
+def require_admitted_private_manifest(manifest: PrivateReproManifest, **kwargs) -> tuple[Admission, ...]:
+    """Return manifest admissions or refuse startup before any task is advertised."""
+    admissions = admit_private_manifest(manifest, **kwargs)
+    refused = [admission for admission in admissions if not admission.scoreable]
+    if refused:
+        detail = "; ".join(
+            f"{admission.task_id}: {', '.join(admission.reasons)}" for admission in refused
+        )
+        raise ReproManifestError(f"corpus admission refused manifest task(s): {detail}")
+    return admissions
 
 
 def scoreable(task_ids: Sequence[str], **kwargs) -> list[str]:
@@ -221,8 +319,12 @@ __all__ = [
     "CONTROL_INPUTS",
     "Admission",
     "admit",
+    "admit_private_manifest",
     "admit_pool",
     "answer_is_public",
+    "answer_is_public_image",
     "reference_poc",
+    "reference_poc_image",
+    "require_admitted_private_manifest",
     "scoreable",
 ]

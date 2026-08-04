@@ -233,6 +233,28 @@ def test_build_service_default_stores_are_files_not_memory():
     assert score_path != ":memory:" and os.path.isfile(score_path)
 
 
+def test_repro_server_refuses_an_unadmitted_manifest_before_building_service(monkeypatch):
+    """The real entrypoint must not merely define admission; it has to invoke it
+    before constructing a draw-capable source or binding an HTTP server."""
+    from cathedral_distill import cybergym_repro_server as server
+
+    manifest = _manifest("arvo:3938")
+    monkeypatch.setattr(server, "_manifest_from_environment", lambda: manifest)
+    monkeypatch.setattr(server, "available_tasks", lambda _manifest: ["arvo:3938"])
+
+    def refuse(_manifest):
+        raise ReproManifestError("corpus admission refused manifest task(s): arvo:3938")
+
+    monkeypatch.setattr(server, "require_admitted_private_manifest", refuse)
+    monkeypatch.setattr(
+        server, "build_service",
+        lambda *args, **kwargs: pytest.fail("unadmitted manifest reached build_service"),
+    )
+
+    with pytest.raises(SystemExit, match="CYBERGYM_CORPUS_MANIFEST is not scoreable"):
+        server.main()
+
+
 @pytest.mark.parametrize("seed, complaint", [
     ("deadbeef", "64 hex characters"),               # too short
     ("zz" * 32, "not valid hex"),                    # right length, not hex
