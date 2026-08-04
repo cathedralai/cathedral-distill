@@ -67,7 +67,7 @@ class FakeDocker:
         image = argv[argv.index(mount) + 1]
         crashed = image.endswith("-vul") and poc == self.crashing
         out = ASAN if crashed else CLEAN
-        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr=b"")
+        return subprocess.CompletedProcess(argv, 1 if crashed else 0, stdout=out, stderr=b"")
 
 
 # --------------------------------------------------------------------------- #
@@ -97,13 +97,15 @@ def test_malformed_and_unknown_task_ids_fail_closed():
 # crash detection
 # --------------------------------------------------------------------------- #
 
-def test_crash_detection_matches_the_sanitizer_signatures():
-    assert _is_crash("AddressSanitizer: heap-use-after-free\nABORTING")
-    assert _is_crash("==1==ERROR: AddressSanitizer: SEGV on unknown address")
-    assert _is_crash("runtime error: signed integer overflow")
-    assert not _is_crash("Executed the target, exited cleanly")
-    assert not _is_crash("")  # an AddressSanitizer mention alone (no ABORTING/ERROR) is not a crash
-    assert not _is_crash("built with AddressSanitizer instrumentation")
+def test_crash_detection_requires_expected_death_and_target_sanitizer():
+    asan = "==1==ERROR: AddressSanitizer: SEGV on unknown address"
+    assert _is_crash(asan, 1, task_id="arvo:368")
+    assert _is_crash(asan, -11, task_id="arvo:368")
+    # Reflected marker text is not a crash when the target exits normally.
+    assert not _is_crash(asan, 0, task_id="arvo:368")
+    assert not _is_crash("AddressSanitizer: heap-use-after-free", 1, task_id="arvo:368")
+    assert not _is_crash("==1==ERROR: MemorySanitizer: use-of-uninitialized-value", 1, task_id="arvo:368")
+    assert _is_crash("==1==WARNING: MemorySanitizer: use-of-uninitialized-value", 1, task_id="arvo:1065")
 
 
 # --------------------------------------------------------------------------- #
@@ -137,6 +139,13 @@ def test_backend_isolates_the_verify_container_network():
     # precede the image so they apply to the run (not get parsed as image args).
     assert "--network" in argv and argv[argv.index("--network") + 1] == "none"
     assert "no-new-privileges" in argv
+    assert "--cap-drop" in argv and argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert "--user" in argv and argv[argv.index("--user") + 1] == "65534:65534"
+    assert "--read-only" in argv
+    assert "--tmpfs" in argv and "/tmp:rw,noexec,nosuid,nodev,size=64m" in argv
+    # Docker's default seccomp profile remains in force: this must never be
+    # weakened to seccomp=unconfined on the untrusted-PoC execution path.
+    assert "seccomp=unconfined" not in argv
     image_ix = argv.index("n132/arvo:368-vul")
     assert argv.index("--network") < image_ix
 
