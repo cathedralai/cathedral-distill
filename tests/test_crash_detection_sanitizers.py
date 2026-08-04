@@ -5,18 +5,13 @@ ARVO reproducers. One of the six shipped tasks came back solved=False while its
 captured output contained a full MemorySanitizer stack trace: a miner with a
 correct PoC earned nothing, silently.
 
-`docker_reproduce_backend` decides crash-or-clean from the OUTPUT, not the exit
-code (deliberately -- exit codes are unreliable across harnesses). The pattern
-just did not cover MSan, which reports WARNING rather than ERROR and never says
-AddressSanitizer.
-
-Widening can only cost a solve, never grant a false one: `solved` requires the
-vulnerable build to report AND the patched build to stay clean, so a pattern
-that fires spuriously fires on both and the differential still refuses.
+`docker_reproduce_backend` now requires both a target-specific report and an
+expected process death. These tests keep the sanitizer-report parser broad while
+the verifier's task policy decides which reports and exit signals can score.
 """
 from __future__ import annotations
 
-from cathedral_distill.cybergym_repro import _is_crash
+from cathedral_distill.cybergym_repro import _SANITIZER_REPORT, _is_crash
 
 # Captured verbatim from `n132/arvo:1065-vul` on real hardware -- the task that
 # was being scored as unsolved.
@@ -46,11 +41,11 @@ Executed /tmp/poc in 3 ms
 
 def test_the_real_msan_report_that_was_being_missed():
     """The regression itself: this exact output scored as clean."""
-    assert _is_crash(REAL_MSAN) is True
+    assert _is_crash(REAL_MSAN, 1, task_id="arvo:1065") is True
 
 
 def test_asan_still_detected():
-    assert _is_crash(REAL_ASAN) is True
+    assert _is_crash(REAL_ASAN, 1, task_id="arvo:368") is True
 
 
 def test_every_llvm_sanitizer_is_recognised():
@@ -64,21 +59,29 @@ def test_every_llvm_sanitizer_is_recognised():
         "HWAddressSanitizer": "==2==ERROR: HWAddressSanitizer: tag-mismatch",
     }
     for name, report in reports.items():
-        assert _is_crash(report) is True, name
+        assert _SANITIZER_REPORT.search(report) is not None, name
 
 
 def test_ubsan_inline_form_without_a_banner():
     """UBSan often prints only this line, with no ==N== banner."""
-    assert _is_crash("softmagic.c:365:9: runtime error: load of misaligned address") is True
+    assert _is_crash(
+        "softmagic.c:365:9: runtime error: load of misaligned address",
+        1,
+        task_id="arvo:368",
+    ) is False
 
 
 def test_segv_without_a_sanitizer():
-    assert _is_crash("Program received signal SIGSEGV, Segmentation fault.") is True
+    assert _is_crash(
+        "Program received signal SIGSEGV, Segmentation fault.",
+        -11,
+        task_id="arvo:368",
+    ) is False
 
 
 def test_a_clean_run_is_not_a_crash():
     """The direction that would be dangerous: crediting a non-crash."""
-    assert _is_crash(CLEAN) is False
+    assert _is_crash(CLEAN, 0, task_id="arvo:368") is False
 
 
 def test_merely_naming_a_sanitizer_is_not_a_crash():
@@ -89,4 +92,4 @@ def test_merely_naming_a_sanitizer_is_not_a_crash():
         "MemorySanitizer is not supported on this platform",
         "see the AddressSanitizer documentation for details",
     ):
-        assert _is_crash(benign) is False, benign
+        assert _is_crash(benign, 1, task_id="arvo:368") is False, benign

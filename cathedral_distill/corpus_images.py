@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime
 from typing import Callable, Mapping, Sequence
 
 from cathedral_distill.cybergym_repro import REPRO_SUBSET, _image_and_command
+from cathedral_distill.cybergym_repro_manifest import (
+    MANIFEST_SCHEMA,
+    build_private_repro_manifest,
+)
 
 Runner = Callable[..., subprocess.CompletedProcess]
-MANIFEST_SCHEMA = "cathedral_cybergym_corpus_images_v1"
 PULL_TIMEOUT = 1800  # a cold arvo image is a few GB
 
 
@@ -66,11 +70,30 @@ def unpinned(manifest: Mapping[str, dict]) -> list[str]:
                   if not e.get("vul", {}).get("digest") or not e.get("fix", {}).get("digest"))
 
 
-def write_manifest(manifest: Mapping[str, dict], path: str) -> None:
-    doc = {"schema": MANIFEST_SCHEMA, "images": dict(manifest)}
+def write_manifest(
+    manifest: Mapping[str, dict],
+    path: str,
+    *,
+    source_epoch: int,
+    disclosed_at: datetime,
+) -> dict:
+    """Write the private, immutable repro manifest a validator can dispatch.
+
+    ``pull_and_pin`` intentionally returns raw inspection data so callers can
+    reject failed pulls.  This conversion makes a reward-bearing artifact: every
+    task gets an explicit disclosure timestamp and immutable image pair, and the
+    generated document is re-validated before it reaches disk.
+    """
+    doc = build_private_repro_manifest(
+        manifest,
+        source_epoch=source_epoch,
+        disclosed_at=disclosed_at,
+        metadata=REPRO_SUBSET,
+    )
     with open(path, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=2, sort_keys=True)
         f.write("\n")
+    return doc
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -79,11 +102,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Pull + digest-pin the CyberGym vul/fix corpus images.")
     p.add_argument("--tasks", nargs="*", help="task ids (default: the REPRO_SUBSET)")
     p.add_argument("--out", default="corpus_images.json", help="manifest output path")
+    p.add_argument("--source-epoch", type=int, required=True,
+                   help="epoch that owns this private holdout manifest")
+    p.add_argument("--disclosed-at", required=True,
+                   help="UTC disclosure time for this private holdout (ISO-8601)")
     args = p.parse_args(argv)
 
     ids = args.tasks or list(REPRO_SUBSET)
     manifest = pull_and_pin(ids)
-    write_manifest(manifest, args.out)
+    try:
+        disclosed_at = datetime.fromisoformat(args.disclosed_at.replace("Z", "+00:00"))
+    except ValueError:
+        p.error("--disclosed-at must be an ISO-8601 timestamp")
+    write_manifest(
+        manifest,
+        args.out,
+        source_epoch=args.source_epoch,
+        disclosed_at=disclosed_at,
+    )
     missing = unpinned(manifest)
     print(f"pinned {len(manifest) - len(missing)}/{len(manifest)} tasks → {args.out}")
     if missing:
