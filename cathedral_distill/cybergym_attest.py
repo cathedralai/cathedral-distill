@@ -9,10 +9,11 @@ solve earns work units ONLY when that attestation verifies and is bound to the
 exact submission.
 
 The binding is `report_data`: the attesting enclave commits
-`sha256(domain || batch_id || task_id || poc_sha256 || miner_hotkey)` into the TDX
-quote's report_data, and the validator re-derives the same value and requires the
-match. An attestation therefore cannot be replayed for a different task or PoC, nor
-lifted from another miner's enclave.
+`sha256(domain || batch_id || task_id || poc_sha256 || trace_id || miner_hotkey ||
+model_commitment)` into the TDX quote's report_data, and the validator re-derives
+the same value and requires the match. An attestation therefore cannot be replayed
+for a different task or PoC, lifted from another miner's enclave, or paired with a
+different model than the commitment that selected its batch.
 
 This reuses `cathedral_distill.attestation.verify_attestation` verbatim (trusted-root
 signature, measurement allow-list, report_data nonce binding, freshness — all
@@ -33,7 +34,7 @@ from cathedral_distill.attestation import (
 )
 
 # Domain-separated so this binding can never collide with another report_data use.
-CYBERGYM_ATTEST_DOMAIN = b"cathedral-cybergym-attest-v1\x00"
+CYBERGYM_ATTEST_DOMAIN = b"cathedral-cybergym-attest-v2\x00"
 REQUIRED_TEE = "intel_tdx"
 
 
@@ -42,25 +43,35 @@ class CyberGymAttestError(ValueError):
 
 
 def submission_report_data(
-    *, batch_id: str, task_id: str, poc_sha256: str, trace_id: str, miner_hotkey: str
+    *,
+    batch_id: str,
+    task_id: str,
+    poc_sha256: str,
+    trace_id: str,
+    miner_hotkey: str,
+    model_commitment: str,
 ) -> str:
     """The report_data the attesting enclave MUST bind and the validator re-derives.
 
     Binds the attestation to exactly this submission — this batch, this task, this
-    PoC, this *trajectory*, this miner — so a valid attestation cannot be replayed
-    for another task/PoC or reused from a different miner's enclave (SEC-5), and the
-    enclave must have committed to the exact reasoning trace it emitted (so a
-    fabricated, out-of-enclave trajectory cannot be paired with an attested crash
-    and poison the corpus). `trace_id` content-addresses the trace's steps, model
-    id, seal, and licence. Returned as a 64-char lowercase hex digest, matching the
-    attestation report_data grammar.
+    PoC, this *trajectory*, this miner, and the model commitment that selected the
+    batch — so a valid attestation cannot be replayed for another task/PoC, reused
+    from a different miner's enclave (SEC-5), or paired with a different committed
+    model. The enclave must have committed to the exact reasoning trace it emitted
+    (so a fabricated, out-of-enclave trajectory cannot be paired with an attested
+    crash and poison the corpus). `trace_id` content-addresses the trace's steps,
+    model id, seal, and licence. Returned as a 64-char lowercase hex digest,
+    matching the attestation report_data grammar.
     """
     for name, value in (("batch_id", batch_id), ("task_id", task_id),
                         ("poc_sha256", poc_sha256), ("trace_id", trace_id),
-                        ("miner_hotkey", miner_hotkey)):
+                        ("miner_hotkey", miner_hotkey),
+                        ("model_commitment", model_commitment)):
         if not isinstance(value, str) or not value:
             raise CyberGymAttestError(f"{name} is required to bind the attestation")
-    body = "\x00".join((batch_id, task_id, poc_sha256, trace_id, miner_hotkey)).encode("utf-8")
+    body = "\x00".join(
+        (batch_id, task_id, poc_sha256, trace_id, miner_hotkey, model_commitment)
+    ).encode("utf-8")
     return hashlib.sha256(CYBERGYM_ATTEST_DOMAIN + body).hexdigest()
 
 
@@ -72,6 +83,7 @@ def verify_submission_attestation(
     poc_sha256: str,
     trace_id: str,
     miner_hotkey: str,
+    model_commitment: str,
     policy: AttestationPolicy,
     now: datetime | None = None,
 ) -> Mapping[str, Any]:
@@ -85,6 +97,7 @@ def verify_submission_attestation(
     expected = submission_report_data(
         batch_id=batch_id, task_id=task_id, poc_sha256=poc_sha256,
         trace_id=trace_id, miner_hotkey=miner_hotkey,
+        model_commitment=model_commitment,
     )
     try:
         doc = verify_attestation(token, expected_report_data=expected, policy=policy, now=now)
