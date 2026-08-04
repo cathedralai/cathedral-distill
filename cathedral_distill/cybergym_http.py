@@ -60,6 +60,10 @@ REQUEST_TIMEOUT_SECS = 30.0
 # ThreadingHTTPServer callers routinely raise it; naming it makes the ceiling a
 # decision rather than an accident.
 REQUEST_QUEUE_SIZE = 32
+# The threaded transport may accept many sockets, but only this many mutating
+# requests may read a body or enter the serial service at once. This bounds both
+# slow-body sockets and threads waiting behind an expensive differential verify.
+MAX_CONCURRENT_MUTATING_REQUESTS = 8
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -89,6 +93,7 @@ def make_handler(
     key_registry: ServedKeyRegistry | None = None,
     authenticator: Callable[[Mapping[str, str], bytes], str | None] | None = None,
     require_authentication: bool = False,
+    _mutating_slots: threading.BoundedSemaphore | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build a request-handler class bound to one service instance.
 
@@ -242,45 +247,53 @@ def make_handler(
             return identity, True
 
         def do_POST(self) -> None:  # noqa: N802 (stdlib naming)
-            if self.path == DISPATCH_PATH:
-                body = self._read_body()
-                if body is None:
-                    return
-                try:
-                    request = json.loads(body or b"{}")
-                except ValueError:
-                    self._send(400, {"error": "request is not valid JSON"})
-                    return
-                caller, ok = self._caller(body)
-                if not ok:
-                    return
-                result = service.handle_dispatch(request, authenticated_caller=caller)
-                self._send(400 if "error" in result else 200, result)
-            elif self.path == ARTIFACT_PATH:
-                body = self._read_body()
-                if body is None:
-                    return
-                try:
-                    request = json.loads(body or b"{}")
-                except ValueError:
-                    self._send(400, {"error": "request is not valid JSON"})
-                    return
-                _caller_id, ok = self._caller(body)
-                if not ok:
-                    return
-                result = service.handle_artifact(request)
-                self._send(400 if "error" in result else 200, result)
-            elif self.path == SUBMIT_PATH:
-                body = self._read_body()
-                if body is None:
-                    return
-                _caller_id, ok = self._caller(body)
-                if not ok:
-                    return
-                result = service.handle_submit(body)
-                self._send(200 if result.get("accepted") else 400, result)
-            else:
-                self._send(404, {"error": "unknown route"})
+            acquired = _mutating_slots is None or _mutating_slots.acquire(blocking=False)
+            if not acquired:
+                self._send(429, {"error": "too many concurrent mutating requests"})
+                return
+            try:
+                if self.path == DISPATCH_PATH:
+                    body = self._read_body()
+                    if body is None:
+                        return
+                    try:
+                        request = json.loads(body or b"{}")
+                    except ValueError:
+                        self._send(400, {"error": "request is not valid JSON"})
+                        return
+                    caller, ok = self._caller(body)
+                    if not ok:
+                        return
+                    result = service.handle_dispatch(request, authenticated_caller=caller)
+                    self._send(400 if "error" in result else 200, result)
+                elif self.path == ARTIFACT_PATH:
+                    body = self._read_body()
+                    if body is None:
+                        return
+                    try:
+                        request = json.loads(body or b"{}")
+                    except ValueError:
+                        self._send(400, {"error": "request is not valid JSON"})
+                        return
+                    _caller_id, ok = self._caller(body)
+                    if not ok:
+                        return
+                    result = service.handle_artifact(request)
+                    self._send(400 if "error" in result else 200, result)
+                elif self.path == SUBMIT_PATH:
+                    body = self._read_body()
+                    if body is None:
+                        return
+                    _caller_id, ok = self._caller(body)
+                    if not ok:
+                        return
+                    result = service.handle_submit(body)
+                    self._send(200 if result.get("accepted") else 400, result)
+                else:
+                    self._send(404, {"error": "unknown route"})
+            finally:
+                if _mutating_slots is not None:
+                    _mutating_slots.release()
 
     return _Handler
 
@@ -364,6 +377,7 @@ def make_threaded_server(service: CyberGymService, host: str = "127.0.0.1", port
                          key_registry: ServedKeyRegistry | None = None,
                          authenticator: Callable[[Mapping[str, str], bytes], str | None] | None = None,
                          require_authentication: bool = False,
+                         max_concurrent_mutating_requests: int = MAX_CONCURRENT_MUTATING_REQUESTS,
                          ) -> ThreadingHTTPServer:
     """A production `ThreadingHTTPServer` for a real deployment.
 
@@ -382,6 +396,12 @@ def make_threaded_server(service: CyberGymService, host: str = "127.0.0.1", port
     authentication is required for every mutating route.
     """
     _require_safe_bind(host, require_authentication=require_authentication)
+    if (
+        isinstance(max_concurrent_mutating_requests, bool)
+        or not isinstance(max_concurrent_mutating_requests, int)
+        or max_concurrent_mutating_requests < 1
+    ):
+        raise ValueError("max_concurrent_mutating_requests must be a positive integer")
     locking = _LockingService(service)
     base = make_handler(
         locking,
@@ -394,6 +414,7 @@ def make_threaded_server(service: CyberGymService, host: str = "127.0.0.1", port
         key_registry=key_registry,
         authenticator=authenticator,
         require_authentication=require_authentication,
+        _mutating_slots=threading.BoundedSemaphore(max_concurrent_mutating_requests),
     )
     payload = dict(healthz or {"status": "ok"})
 

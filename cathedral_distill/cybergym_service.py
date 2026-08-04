@@ -67,6 +67,7 @@ class _MinerState:
     # chain-anchored nonce), only to accept NEW submissions.
     dispatch: DispatchMessage | None
     pocs: dict[str, bytes] = field(default_factory=dict)  # task_id -> solved PoC bytes
+    attempts: dict[str, int] = field(default_factory=dict)  # dev-only fallback when no solve store
 
 
 class CyberGymService:
@@ -109,6 +110,7 @@ class CyberGymService:
         gate_policy: EmissionGatePolicy | None = None,
         gates_required: bool = True,
         credit_synthetic_tasks: bool = False,
+        max_verification_attempts_per_task: int = 3,
     ) -> None:
         # Fail closed: Intel-TDX attestation is a MANDATORY control for this track,
         # so the running service refuses to start without an attestation policy
@@ -162,6 +164,14 @@ class CyberGymService:
                 "gates_required=False for the dev/test path (which persists scores "
                 "with NO registered-bundle or contamination gate)."
             )
+        if (
+            isinstance(max_verification_attempts_per_task, bool)
+            or not isinstance(max_verification_attempts_per_task, int)
+            or max_verification_attempts_per_task < 1
+        ):
+            raise ProtocolError(
+                "max_verification_attempts_per_task must be a positive integer"
+            )
         self.holdout = holdout
         self.chain = chain
         self._backend = backend
@@ -186,6 +196,7 @@ class CyberGymService:
         # renders the answer (see cybergym_synthetic.is_synthetic_task). True is an
         # explicit unsafe-for-rewards override.
         self._credit_synthetic_tasks = credit_synthetic_tasks
+        self._max_verification_attempts_per_task = max_verification_attempts_per_task
         self._miners: dict[str, _MinerState] = {}
         self._by_batch: dict[str, str] = {}  # batch_id -> miner_hotkey
         self._dispatched: set[str] = set()   # task_ids actually served this epoch
@@ -429,6 +440,32 @@ class CyberGymService:
         if envelope.miner_hotkey != miner_hotkey:
             raise ProtocolError("submission hotkey does not own this batch")
         state = self._miners[miner_hotkey]
+        if self._solves is not None:
+            try:
+                attempt = self._solves.reserve_submission_attempt(
+                    epoch=self.chain.source_epoch,
+                    miner_hotkey=miner_hotkey,
+                    task_id=envelope.task_id,
+                    max_attempts=self._max_verification_attempts_per_task,
+                )
+            except CyberGymScoreError as exc:
+                raise ProtocolError(
+                    "submission attempt ledger is unavailable; refusing verification"
+                ) from exc
+            if attempt is None:
+                raise ProtocolError(
+                    "verification attempts exhausted for this task in this epoch"
+                )
+        else:
+            # Dev/test-only services can deliberately opt out of the durable solve
+            # store. Retain the same cap while this process lives, but production
+            # always uses the durable branch above.
+            attempt = state.attempts.get(envelope.task_id, 0) + 1
+            if attempt > self._max_verification_attempts_per_task:
+                raise ProtocolError(
+                    "verification attempts exhausted for this task in this epoch"
+                )
+            state.attempts[envelope.task_id] = attempt
         outcome = process_submission(
             envelope, state.dispatch, self._backend,
             trace_policy=self._trace_policy, weights=self._weights,

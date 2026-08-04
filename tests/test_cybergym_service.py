@@ -28,7 +28,11 @@ from cathedral_distill import cybergym_http as chttp  # noqa: E402
 from cathedral_distill import lane_feed as lf  # noqa: E402
 from cathedral_distill.cybergym_holdout import HoldoutError, load_holdout  # noqa: E402
 from cathedral_distill.cybergym_protocol import CyberGymCorpusStore, ProtocolError, SubmissionEnvelope  # noqa: E402
-from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore  # noqa: E402
+from cathedral_distill.cybergym_scores import (  # noqa: E402
+    CyberGymScoreError,
+    CyberGymScoreStore,
+    CyberGymSolveStore,
+)
 from cathedral_distill.cybergym_service import CyberGymService  # noqa: E402
 from cathedral_distill.cybergym_validator import ChainContext  # noqa: E402
 from cathedral_distill.cybergym_verifier import poc_digest  # noqa: E402
@@ -69,7 +73,7 @@ def _backend(solved_ids):
     return run
 
 
-def _service(tmp_path, solved=("arvo:1",)):
+def _service(tmp_path, solved=("arvo:1",), *, max_attempts=3):
     return CyberGymService(
         load_holdout(_manifest()), _chain(),
         backend=_backend(set(solved)),
@@ -78,7 +82,7 @@ def _service(tmp_path, solved=("arvo:1",)):
         solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
         validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
         batch_size=2, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
-        gates_required=False,
+        gates_required=False, max_verification_attempts_per_task=max_attempts,
     )
 
 
@@ -167,6 +171,54 @@ def test_submit_with_foreign_hotkey_is_refused(tmp_path):
     d = svc.dispatch_for("5Miner", MODEL)
     with pytest.raises(ProtocolError, match="does not own this batch"):
         svc.submit(_envelope(d, "arvo:1", b"exploit", miner="5Attacker"))
+
+
+def test_verifier_attempts_are_bounded_before_the_differential_backend(tmp_path):
+    svc = _service(tmp_path, solved=(), max_attempts=2)
+    calls: list[tuple[str, bytes, str]] = []
+
+    def backend(task_id, poc, mode):
+        calls.append((task_id, poc, mode))
+        return 0
+
+    svc._backend = backend
+    dispatch = svc.dispatch_for("5Miner", MODEL)
+    envelope = _envelope(dispatch, "arvo:1", b"not-an-exploit")
+
+    assert not svc.submit(envelope).solved
+    assert not svc.submit(envelope).solved
+    with pytest.raises(ProtocolError, match="verification attempts exhausted"):
+        svc.submit(envelope)
+
+    assert len(calls) == 4  # two differential checks (vulnerable + fixed) only
+    assert svc._solves.submission_attempts(
+        epoch=SOURCE_EPOCH, miner_hotkey="5Miner", task_id="arvo:1"
+    ) == 2
+
+
+def test_verifier_attempt_budget_survives_a_restart(tmp_path):
+    first = _service(tmp_path, solved=(), max_attempts=1)
+    dispatch = first.dispatch_for("5Miner", MODEL)
+    envelope = _envelope(dispatch, "arvo:1", b"not-an-exploit")
+    assert not first.submit(envelope).solved
+
+    restarted = _service(tmp_path, solved=(), max_attempts=1)
+    retry_dispatch = restarted.dispatch_for("5Miner", MODEL)
+    retry = _envelope(retry_dispatch, "arvo:1", b"new-attempt-after-restart")
+    with pytest.raises(ProtocolError, match="verification attempts exhausted"):
+        restarted.submit(retry)
+
+
+def test_attempt_ledger_failure_refuses_before_the_backend_runs(tmp_path, monkeypatch):
+    svc = _service(tmp_path)
+    dispatch = svc.dispatch_for("5Miner", MODEL)
+    monkeypatch.setattr(
+        svc._solves,
+        "reserve_submission_attempt",
+        lambda **_kwargs: (_ for _ in ()).throw(CyberGymScoreError("disk unavailable")),
+    )
+    with pytest.raises(ProtocolError, match="attempt ledger is unavailable"):
+        svc.submit(_envelope(dispatch, "arvo:1", b"exploit"))
 
 
 def test_handle_submit_never_raises(tmp_path):
