@@ -192,22 +192,29 @@ def test_no_policy_keeps_hardware_free_behaviour():
 
 
 # --------------------------------------------------------------------------- #
-# every attestation failure mode: solved stays true, but earns zero
+# every attestation failure mode: rejected before Docker and earns zero
 # --------------------------------------------------------------------------- #
 def test_missing_attestation_earns_zero():
     source, msg, task_id, poc = _fixture()
     env = _envelope(msg.batch_id, task_id, poc, attestation=None)
-    out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and not out.creditable
+    backend_calls = []
+
+    def backend(*args):
+        backend_calls.append(args)
+        raise AssertionError("missing attestation reached the differential backend")
+
+    out = process_submission(env, msg, backend, attestation_policy=POLICY, now=NOW)
+    assert not out.solved and not out.attested and not out.creditable
     assert out.work_units == Decimal(0) and not out.trainable
-    assert out.reason == "solved_unattested:missing_tdx_attestation"
+    assert out.reason == "rejected_unattested:missing_tdx_attestation"
+    assert backend_calls == []
 
 
 def test_wrong_tee_earns_zero():
     source, msg, task_id, poc = _fixture()
     env = _attested_envelope(msg, task_id, poc, tee="amd_sev_snp")
     out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
     assert "Intel TDX" in out.reason or "tdx_attestation_invalid" in out.reason
 
 
@@ -215,14 +222,14 @@ def test_untrusted_signer_earns_zero():
     source, msg, task_id, poc = _fixture()
     env = _attested_envelope(msg, task_id, poc, seed=bytes(range(1, 33)))  # not the trusted root
     out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_unpinned_measurement_earns_zero():
     source, msg, task_id, poc = _fixture()
     env = _attested_envelope(msg, task_id, poc, measurement="tdx-mrtd:deadbeef")  # not allow-listed
     out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_replayed_attestation_for_another_poc_earns_zero():
@@ -242,7 +249,7 @@ def test_replayed_attestation_for_another_poc_earns_zero():
     token = _make_token(report_data=rd)  # bound to other_poc
     env = _envelope(msg.batch_id, task_id, poc, attestation=base64.b64encode(token).decode())
     out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_attestation_from_another_miner_earns_zero():
@@ -260,21 +267,21 @@ def test_attestation_from_another_miner_earns_zero():
     token = _make_token(report_data=rd_other)
     env = _envelope(msg.batch_id, task_id, poc, attestation=base64.b64encode(token).decode())
     out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_stale_attestation_earns_zero():
     source, msg, task_id, poc = _fixture()
     env = _attested_envelope(msg, task_id, poc, issued_at="2026-07-20T00:00:00Z")  # >1 day old
     out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_garbage_attestation_is_soft_reject_not_crash():
     source, msg, task_id, poc = _fixture()
     env = _envelope(msg.batch_id, task_id, poc, attestation="!!!not base64!!!")
     out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_swapped_trace_earns_zero():
@@ -287,7 +294,7 @@ def test_swapped_trace_earns_zero():
     env2 = SubmissionEnvelope(batch_id=env.batch_id, task_id=env.task_id, miner_hotkey=env.miner_hotkey,
                               poc_base64=env.poc_base64, trace=swapped, attestation=env.attestation)
     out = process_submission(env2, msg, source.backend, attestation_policy=POLICY, now=NOW)
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_attestation_cannot_be_reused_for_a_different_model_commitment():
@@ -299,7 +306,7 @@ def test_attestation_cannot_be_reused_for_a_different_model_commitment():
     out = process_submission(
         env, changed, source.backend, attestation_policy=POLICY, now=NOW
     )
-    assert out.solved and not out.attested and out.work_units == Decimal(0)
+    assert not out.solved and not out.attested and out.work_units == Decimal(0)
 
 
 def test_service_requires_attestation_policy_by_default(tmp_path):
@@ -411,9 +418,10 @@ def test_service_only_attested_miner_earns_and_composes(tmp_path):
 
     attested_out = list(solve_all("5Attested", attest=True))
     unattested_out = list(solve_all("5Unattested", attest=False))
-    # both genuinely crashed the target...
-    assert all(o.solved for o in attested_out + unattested_out)
-    # ...but only the attested miner is creditable
+    # Only attested submissions reach the differential backend and can be solved.
+    assert all(o.solved for o in attested_out)
+    assert not any(o.solved for o in unattested_out)
+    # Only the attested miner is creditable.
     assert all(o.creditable for o in attested_out)
     assert not any(o.creditable for o in unattested_out)
 

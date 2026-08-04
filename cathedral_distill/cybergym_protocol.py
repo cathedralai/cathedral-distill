@@ -252,11 +252,10 @@ class SubmissionOutcome:
     """The validator's verdict on one submission.
 
     `solved` is the raw differential-crash result (the PoC crashes the vulnerable
-    build, not the patched one). `attested` is whether the required Intel-TDX
-    attestation verified and bound to this submission. A solve earns work units
-    only when it is *creditable* = solved AND attested; an unattested solve is a
-    genuine crash that proves capability but earns nothing (its PoC never enters
-    the reward pool, and it never lands in the corpus).
+    build, not the patched one) when the verifier reaches that expensive step.
+    A submission that fails required Intel-TDX attestation is rejected before the
+    differential backend runs, so it reports ``solved=False`` rather than spending
+    verifier capacity to learn a result that can never earn or enter the corpus.
     """
 
     task_id: str
@@ -301,9 +300,9 @@ def process_submission(
     units, is corpus-eligible) only when it is both solved AND attested. When no
     policy is given (the hardware-free dev/test path), attestation is not required
     and `attested` is vacuously true, preserving the prior behaviour exactly. A
-    missing or invalid attestation is never a hard protocol error — the submission
-    is simply not credited (`attested=False`), so one bad attestation cannot break
-    an epoch's intake.
+    missing or invalid attestation is never a hard protocol error. It is rejected
+    before the differential backend runs (`attested=False`, `solved=False`), so a
+    flood of invalid proofs cannot turn the verifier into a free Docker oracle.
     """
     if envelope.batch_id != dispatch_msg.batch_id:
         raise ProtocolError("submission batch_id does not match the dispatched batch")
@@ -327,12 +326,11 @@ def process_submission(
         raise ProtocolError("trace poc_sha256 does not match the submitted PoC bytes")
 
     task = Task(task_id=dt.task_id, level=Level(dt.level), binary_digest=dt.binary_digest)
-    result = verify_poc(task, poc_bytes, backend)
-    poc_sub = PoCSubmission(task_id=task.task_id, poc_sha256=digest, result=result)
-
-    solved = result.solved
 
     # Intel-TDX attestation: the CyberGym miner MUST run in an attested TDX enclave.
+    # This precedes `verify_poc`, which invokes the expensive adversarial Docker
+    # differential. An invalid proof can never be rewardable, so running it first
+    # would let an attacker consume verifier capacity without a viable submission.
     attested = True
     attest_reason = ""
     if attestation_policy is not None:
@@ -352,6 +350,27 @@ def process_submission(
             except (ValueError, TypeError, CyberGymAttestError) as exc:
                 attested, attest_reason = False, f"tdx_attestation_invalid:{exc}"
 
+    if not attested:
+        return SubmissionOutcome(
+            task_id=task.task_id,
+            miner_hotkey=envelope.miner_hotkey,
+            source_epoch=dispatch_msg.source_epoch,
+            level=dt.level,
+            solved=False,
+            trainable=False,
+            reason="rejected_unattested:" + attest_reason,
+            work_units=Decimal(0),
+            bonus=0.0,
+            poc_sha256=digest,
+            trace_id=None,
+            submission=None,
+            attested=False,
+        )
+
+    result = verify_poc(task, poc_bytes, backend)
+    poc_sub = PoCSubmission(task_id=task.task_id, poc_sha256=digest, result=result)
+    solved = result.solved
+
     creditable = solved and attested
     work_units = derived_work_units(task, poc_sub if creditable else None, weights)
     trainable = bool(creditable and submission.is_trainable(trace_policy))
@@ -359,8 +378,6 @@ def process_submission(
 
     if not solved:
         reason = "not_solved:" + result.outcome
-    elif not attested:
-        reason = "solved_unattested:" + attest_reason
     elif not trainable:
         reason = "solved_trace_below_floor:" + submission.quality(trace_policy).reason
     else:
