@@ -13,12 +13,20 @@ from __future__ import annotations
 import subprocess
 from types import SimpleNamespace
 
+import pytest
+
 from cathedral_distill.corpus_admission import (
     CONTROL_INPUTS,
     admit,
+    admit_private_manifest,
     answer_is_public,
     reference_poc,
+    require_admitted_private_manifest,
     scoreable,
+)
+from cathedral_distill.cybergym_repro_manifest import (
+    ReproManifestError,
+    load_private_repro_manifest,
 )
 
 
@@ -48,6 +56,22 @@ def _backend(*, crashes_on):
         return 1 if crashes_on(poc, mode) else 0
 
     return backend
+
+
+def _private_manifest(task_id: str):
+    slug = task_id.replace(":", "-")
+    return load_private_repro_manifest({
+        "schema": "cathedral_cybergym_private_repro_manifest_v1",
+        "source_epoch": 21,
+        "tasks": [{
+            "task_id": task_id,
+            "level": 2,
+            "disclosed_at": "2026-07-27T11:00:00Z",
+            "vulnerable_image": f"registry.test/{slug}-vul@sha256:{'ab' * 32}",
+            "fixed_image": f"registry.test/{slug}-fix@sha256:{'cd' * 32}",
+            "context": {},
+        }],
+    })
 
 
 class TestDiscrimination:
@@ -158,3 +182,54 @@ class TestScoreableFilter:
             if admit(t, _run=run_for(t), _backend=backend).scoreable
         ]
         assert kept == ["arvo:368", "arvo:10400"]
+
+
+class TestPrivateManifestAdmission:
+    def test_checks_the_manifests_pinned_images_and_bound_backend(self):
+        manifest = _private_manifest("arvo:10400")
+        task = manifest.task("arvo:10400")
+        real = b"known differential crash"
+        seen = {"images": [], "backend": []}
+
+        def run(argv, **kwargs):
+            if "manifest" in argv:
+                # Public-answer detection must be anonymous, not reuse the
+                # validator host's private-registry credentials.
+                assert "--config" in argv
+                assert argv[-1] == task.vulnerable_image
+                return _completed(returncode=1)
+            if "cat" in argv:
+                assert argv[-2] == task.vulnerable_image
+                seen["images"].append(argv[-2])
+                return _completed(stdout=real)
+            raise AssertionError(argv)
+
+        def backend(task_id, poc, mode, *, manifest, **kwargs):
+            assert manifest is pinned
+            assert manifest.task(task_id).vulnerable_image == task.vulnerable_image
+            seen["backend"].append((task_id, poc, mode))
+            return int(poc == real and mode == "vul")
+
+        pinned = manifest
+        result = admit_private_manifest(manifest, _run=run, _backend=backend)
+
+        assert len(result) == 1 and result[0].scoreable
+        assert seen["images"] == [task.vulnerable_image]
+        assert any(mode == "fix" for _task_id, _poc, mode in seen["backend"])
+
+    def test_refuses_a_degenerate_pinned_task_before_it_can_be_served(self):
+        manifest = _private_manifest("arvo:3938")
+
+        def run(argv, **kwargs):
+            if "manifest" in argv:
+                return _completed(returncode=1)
+            if "cat" in argv:
+                return _completed(stdout=b"")
+            raise AssertionError(argv)
+
+        def backend(_task_id, _poc, mode, **kwargs):
+            return int(mode == "vul")
+
+        with pytest.raises(ReproManifestError, match="arvo:3938") as excinfo:
+            require_admitted_private_manifest(manifest, _run=run, _backend=backend)
+        assert "control inputs" in str(excinfo.value)

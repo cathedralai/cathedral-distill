@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from cathedral_distill.corpus_admission import require_admitted_private_manifest
 from cathedral_distill.cybergym_holdout import Holdout
 from cathedral_distill.cybergym_http import make_threaded_server
 from cathedral_distill.cybergym_protocol import CyberGymCorpusStore
@@ -129,6 +130,10 @@ def main() -> None:
             "every digest-pinned manifest task must have both images available locally; "
             "refusing to serve a partial or unverifiable corpus"
         )
+    try:
+        require_admitted_private_manifest(manifest)
+    except ReproManifestError as exc:
+        raise SystemExit(f"CYBERGYM_CORPUS_MANIFEST is not scoreable: {exc}") from None
     svc = build_service(
         manifest, private_key=key,
         # An unset or empty variable falls through to build_service's per-boot temp
