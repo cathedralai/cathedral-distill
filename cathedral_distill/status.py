@@ -128,17 +128,23 @@ def _leaderboard(scores: Any, epoch: int, limit: int) -> dict[str, Any]:
 def _corpus_block(corpus: Any, epoch: int) -> dict[str, Any]:
     """The aggregated training corpus this validator has produced.
 
-    `CyberGymCorpusStore.record` only accepts verified, trainable, licensed rows
-    (see its docstring), so `size()` is not a proxy for the corpus — it IS the
-    corpus: the README's "the data is the product" claim, made checkable. Reported
-    across all epochs (the product accumulates) and for this epoch (the rate).
+    `CyberGymCorpusStore.record` only admits verified, trainable, licensed rows,
+    then deduplicates each canonical (epoch, task, PoC) solve. The reported corpus
+    count is therefore training weight, while excluded trace variants remain
+    visible as a separate audit count.
     """
     try:
-        total = corpus.size()
-        this_epoch = len(corpus.rows(source_epoch=epoch))
+        total = corpus.audit()
+        this_epoch = corpus.audit(source_epoch=epoch)
     except Exception as exc:  # noqa: BLE001 - a status read never raises
         return _unavailable(exc)
-    return {"available": True, "total_rows": total, "this_epoch_rows": this_epoch}
+    return {
+        "available": True,
+        "total_rows": total["canonical_solves"],
+        "this_epoch_rows": this_epoch["canonical_solves"],
+        "excluded_duplicates": total["excluded_duplicates"],
+        "this_epoch_excluded_duplicates": this_epoch["excluded_duplicates"],
+    }
 
 
 def _participation(service: Any, scores: Any, solves: Any, epoch: int) -> dict[str, Any]:
