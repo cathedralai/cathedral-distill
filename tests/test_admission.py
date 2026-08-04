@@ -76,7 +76,7 @@ _CB_CUTOFF = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 
 def _cybergym_receipt():
     tasks = [cb.PooledTask(task_id=f"arvo:{n}", level=cg.Level(lv),
-                           binary_digest=digest(f"bin-{n}"), disclosed_at=_CB_NOW)
+                           binary_digest=digest(f"bin-{n}"), disclosed_at=_CB_NOW, admitted=True)
              for n, lv in enumerate((0, 1, 2), start=1)]
     nonce = cb.derive_batch_nonce(block=100, block_hash="0x" + "cd" * 32, network="finney",
                                   netuid=39, source_epoch=SOURCE_EPOCH, miner_hotkey="5Miner",

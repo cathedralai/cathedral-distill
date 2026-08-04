@@ -38,8 +38,8 @@ def _dg(seed):
 
 def _pool():
     return cb.TaskPool([
-        cb.PooledTask(task_id="arvo:1", level=cg.Level(0), binary_digest=_dg("b1"), disclosed_at=NOW),
-        cb.PooledTask(task_id="arvo:2", level=cg.Level(2), binary_digest=_dg("b2"), disclosed_at=NOW),
+        cb.PooledTask(task_id="arvo:1", level=cg.Level(0), binary_digest=_dg("b1"), disclosed_at=NOW, admitted=True),
+        cb.PooledTask(task_id="arvo:2", level=cg.Level(2), binary_digest=_dg("b2"), disclosed_at=NOW, admitted=True),
     ])
 
 

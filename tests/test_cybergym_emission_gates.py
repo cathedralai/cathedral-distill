@@ -68,8 +68,8 @@ COMMITMENT = _dg("alice-checkpoint")
 
 def _pool():
     return TaskPool([
-        PooledTask(task_id="arvo:1", level=Level(0), binary_digest=_dg("b1"), disclosed_at=NOW),
-        PooledTask(task_id="arvo:2", level=Level(2), binary_digest=_dg("b2"), disclosed_at=NOW),
+        PooledTask(task_id="arvo:1", level=Level(0), binary_digest=_dg("b1"), disclosed_at=NOW, admitted=True),
+        PooledTask(task_id="arvo:2", level=Level(2), binary_digest=_dg("b2"), disclosed_at=NOW, admitted=True),
     ])
 
 

@@ -174,7 +174,7 @@ def test_a_legal_synthvuln_id_in_a_real_manifest_is_flagged_on_the_wire(tmp_path
 
     task_id = "synthvuln:aabbccdd:1"
     manifest = [{"task_id": task_id, "level": 0, "binary_digest": _dg("b1"),
-                 "disclosed_at": "2026-07-27T00:00:00Z"}]
+                 "disclosed_at": "2026-07-27T00:00:00Z", "admitted": True}]
     service = CyberGymService(
         load_holdout(manifest), _chain(),
         backend=lambda tid, poc, mode: 1 if mode == "vul" else 0,
@@ -218,8 +218,8 @@ def test_a_real_corpus_task_still_earns_in_the_same_epoch(tmp_path):
     """The default must not be "CyberGym pays nothing": a real ARVO task in a mixed
     batch still earns while the synthetic ones beside it do not."""
     pool = TaskPool([
-        PooledTask(task_id="arvo:1", level=Level(0), binary_digest=_dg("b1"), disclosed_at=NOW),
-        PooledTask(task_id="arvo:2", level=Level(2), binary_digest=_dg("b2"), disclosed_at=NOW),
+        PooledTask(task_id="arvo:1", level=Level(0), binary_digest=_dg("b1"), disclosed_at=NOW, admitted=True),
+        PooledTask(task_id="arvo:2", level=Level(2), binary_digest=_dg("b2"), disclosed_at=NOW, admitted=True),
     ])
     store = CyberGymScoreStore(str(tmp_path / "mixed.sqlite"))
     results = cv.run_epoch(
