@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import sqlite3
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -133,6 +135,89 @@ def test_solved_trainable_submission_scores_and_enters_corpus(tmp_path):
     assert row["steps"][3]["action"] == "write_poc"
 
 
+def test_corpus_deduplicates_trace_variants_by_epoch_task_and_poc(tmp_path):
+    """Trace wording must not turn one solved PoC into many training examples."""
+    d = _dispatch()
+    poc = b"one-canonical-exploit"
+    first = cp.process_submission(_envelope(d, "arvo:1", poc), d, _backend({"arvo:1"}))
+    variant_trace = _good_trace("arvo:1", poc_digest(poc))
+    variant_trace["steps"][-1]["output"] = "same PoC; independently recorded trace variant"
+    variant = cp.process_submission(
+        _envelope(d, "arvo:1", poc, variant_trace), d, _backend({"arvo:1"})
+    )
+    assert first.trace_id != variant.trace_id
+
+    store = cp.CyberGymCorpusStore(str(tmp_path / "corpus.sqlite"))
+    assert store.record(first) is True
+    assert store.record(variant) is True
+    assert store.size() == 1
+    assert store.audit() == {
+        "canonical_solves": 1,
+        "excluded_duplicates": 1,
+        "recorded_duplicate_variants": 1,
+    }
+
+    # A new PoC and a new source epoch remain separately auditable examples.
+    changed_poc = cp.process_submission(
+        _envelope(d, "arvo:1", b"different-exploit"), d, _backend({"arvo:1"})
+    )
+    assert store.record(changed_poc) is True
+    assert store.record(replace(first, source_epoch=12)) is True
+    assert store.size() == 3
+
+
+def test_corpus_bounds_duplicate_trace_audit_metadata(tmp_path):
+    d = _dispatch()
+    poc = b"same-exploit-many-traces"
+    store = cp.CyberGymCorpusStore(str(tmp_path / "corpus.sqlite"))
+    assert store.record(
+        cp.process_submission(_envelope(d, "arvo:1", poc), d, _backend({"arvo:1"}))
+    )
+    for index in range(4):
+        trace = _good_trace("arvo:1", poc_digest(poc))
+        trace["steps"][-1]["output"] = f"variant-{index}"
+        outcome = cp.process_submission(
+            _envelope(d, "arvo:1", poc, trace), d, _backend({"arvo:1"})
+        )
+        assert store.record(outcome) is True
+
+    assert store.audit() == {
+        "canonical_solves": 1,
+        "excluded_duplicates": 4,
+        "recorded_duplicate_variants": store.MAX_DUPLICATE_AUDIT_VARIANTS,
+    }
+
+
+def test_corpus_migrates_legacy_trace_identity_to_canonical_solve_identity(tmp_path):
+    """Startup preserves a bounded audit trail before enforcing the unique index."""
+    path = tmp_path / "legacy-corpus.sqlite"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE cybergym_corpus ("
+        "trace_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, level INTEGER NOT NULL, "
+        "source_epoch INTEGER NOT NULL, miner_hotkey TEXT NOT NULL, model_id TEXT NOT NULL, "
+        "poc_sha256 TEXT NOT NULL, licence TEXT NOT NULL, model_seal TEXT NOT NULL, "
+        "work_units TEXT NOT NULL, steps_json TEXT NOT NULL)"
+    )
+    base = ("arvo:1", 0, 11, "5Miner", "model", "sha256:deadbeef", "licence", "seal", "8", "[]")
+    connection.execute(
+        "INSERT INTO cybergym_corpus VALUES (?,?,?,?,?,?,?,?,?,?,?)", ("trace-a", *base)
+    )
+    connection.execute(
+        "INSERT INTO cybergym_corpus VALUES (?,?,?,?,?,?,?,?,?,?,?)", ("trace-b", *base)
+    )
+    connection.commit()
+    connection.close()
+
+    store = cp.CyberGymCorpusStore(str(path))
+    assert [row["trace_id"] for row in store.rows()] == ["trace-a"]
+    assert store.audit() == {
+        "canonical_solves": 1,
+        "excluded_duplicates": 1,
+        "recorded_duplicate_variants": 1,
+    }
+
+
 def test_submission_roundtrips_through_json(tmp_path):
     d = _dispatch()
     env = _envelope(d, "arvo:1", b"exploit-bytes")
@@ -202,6 +287,7 @@ def test_poc_digest_mismatch_is_refused():
 def test_unlicenced_trace_is_refused():
     d = _dispatch()
     poc = b"exploit"
-    bad = _good_trace("arvo:1", poc_digest(poc)); bad["licence"] = ""
+    bad = _good_trace("arvo:1", poc_digest(poc))
+    bad["licence"] = ""
     with pytest.raises(cp.ProtocolError, match="malformed"):
         cp.process_submission(_envelope(d, "arvo:1", poc, bad), d, _backend({"arvo:1"}))
