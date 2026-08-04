@@ -174,7 +174,7 @@ def test_a_legal_synthvuln_id_in_a_real_manifest_is_flagged_on_the_wire(tmp_path
 
     task_id = "synthvuln:aabbccdd:1"
     manifest = [{"task_id": task_id, "level": 0, "binary_digest": _dg("b1"),
-                 "disclosed_at": "2026-07-27T00:00:00Z"}]
+                 "disclosed_at": "2026-07-27T00:00:00Z", "admitted": True}]
     service = CyberGymService(
         load_holdout(manifest), _chain(),
         backend=lambda tid, poc, mode: 1 if mode == "vul" else 0,

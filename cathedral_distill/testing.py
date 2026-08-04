@@ -290,6 +290,7 @@ class IntegrationFixtures:
                 level=_cybergym.Level(level),
                 binary_digest=digest(f"bin-{number}"),
                 disclosed_at=disclosed,
+                admitted=True,   # a controlled synthetic fixture: admission is not what these exercise
             )
             for number, level in enumerate((0, 1, 2), start=1)
         ]

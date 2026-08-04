@@ -96,6 +96,19 @@ def load_holdout(entries: Sequence[Mapping[str, Any]]) -> Holdout:
         level_raw = entry["level"]
         if isinstance(level_raw, bool) or not isinstance(level_raw, int) or not 0 <= level_raw <= 3:
             raise HoldoutError(f"level must be an integer 0..3, got {level_raw!r}")
+        # Admission is read from the manifest, not defaulted. A task is scoreable
+        # only if the entry explicitly records that admission ran and passed
+        # (`corpus_admission.admit_pool` writes this). An entry without the field is
+        # treated as not-yet-admitted and fails closed: it loads, but a scored draw
+        # will not select it. This is the seam a degenerate task (arvo:3938) slipped
+        # through when the field defaulted True — the invariant is enforced HERE, on
+        # the real ingest path, not only in the isolated gate.
+        admitted_raw = entry.get("admitted", False)
+        if not isinstance(admitted_raw, bool):
+            raise HoldoutError(
+                f"admitted for {entry.get('task_id')!r} must be a boolean, got "
+                f"{admitted_raw!r}"
+            )
         try:
             # PooledTask.to_task() validates the task_id and binary_digest grammar.
             task = PooledTask(
@@ -103,6 +116,7 @@ def load_holdout(entries: Sequence[Mapping[str, Any]]) -> Holdout:
                 level=Level(level_raw),
                 binary_digest=str(entry["binary_digest"]),
                 disclosed_at=_parse_disclosed_at(entry["disclosed_at"]),
+                admitted=admitted_raw,
             )
             task.to_task()
         except (BatchError, ValueError) as exc:

@@ -55,9 +55,9 @@ def _dg(seed: str) -> str:
 def _manifest():
     return [
         {"task_id": "arvo:1", "level": 0, "binary_digest": _dg("b1"),
-         "disclosed_at": "2026-07-27T00:00:00Z"},
+         "disclosed_at": "2026-07-27T00:00:00Z", "admitted": True},
         {"task_id": "arvo:2", "level": 2, "binary_digest": _dg("b2"),
-         "disclosed_at": "2026-07-27T00:00:00Z"},
+         "disclosed_at": "2026-07-27T00:00:00Z", "admitted": True},
     ]
 
 

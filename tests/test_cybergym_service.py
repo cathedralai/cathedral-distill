@@ -49,10 +49,10 @@ def _dg(seed: str) -> str:
 def _manifest():
     return [
         {"task_id": "arvo:1", "level": 0, "binary_digest": _dg("b1"),
-         "disclosed_at": "2026-07-27T00:00:00Z"},
+         "disclosed_at": "2026-07-27T00:00:00Z", "admitted": True},
         {"task_id": "arvo:2", "level": 2, "binary_digest": _dg("b2"),
          "disclosed_at": "2026-07-27T00:00:00Z",
-         "context": {"description": "a heap overflow in the length parser",
+         "admitted": True, "context": {"description": "a heap overflow in the length parser",
                      "sanitizer_trace": "AddressSanitizer: heap-buffer-overflow valid.c:1900",
                      "patch": "--- a/valid.c\n+++ b/valid.c\n@@ bound the length @@"}},
     ]
@@ -196,7 +196,7 @@ def test_holdout_manifest_validation():
         load_holdout([{"task_id": "arvo:1", "level": 0}])
     with pytest.raises(HoldoutError, match="level must be"):
         load_holdout([{"task_id": "arvo:1", "level": 9, "binary_digest": _dg("b"),
-                       "disclosed_at": "2026-07-27T00:00:00Z"}])
+                       "disclosed_at": "2026-07-27T00:00:00Z", "admitted": True}])
     with pytest.raises(HoldoutError, match="list of task entries"):
         load_holdout("not-a-list")
 

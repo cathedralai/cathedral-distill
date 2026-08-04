@@ -155,3 +155,53 @@ class TestSyntheticCreditInvariant:
             assert "computable from" not in str(exc)
         except Exception:
             pass
+
+
+class TestLoadHoldoutEnforcesAdmission:
+    """The reviewer's point: the invariant must hold on the PRODUCTION ingest path
+    (load_holdout -> draw_batch), not only in the isolated gate. A manifest entry is
+    scoreable only if it explicitly records that admission passed."""
+
+    def _entry(self, task_id, *, admitted, disclosed="2026-07-27T00:00:00Z"):
+        e = {"task_id": task_id, "level": 0, "binary_digest": "sha256:" + "ab" * 32,
+             "disclosed_at": disclosed}
+        if admitted is not None:
+            e["admitted"] = admitted
+        return e
+
+    def test_a_manifest_entry_without_admission_cannot_be_drawn(self):
+        from cathedral_distill.cybergym_holdout import load_holdout
+
+        # arvo:3938 loaded from an ordinary manifest, no admitted field -> fail closed.
+        h = load_holdout([self._entry("arvo:3938", admitted=None)])
+        assert h.pool._tasks[0].admitted is False
+        with pytest.raises(BatchError, match="no task in the pool passed corpus admission"):
+            draw_batch(h.pool, size=1, nonce="x",
+                       as_of=dt.datetime(2026, 7, 27, 12, tzinfo=dt.timezone.utc),
+                       cutoff=dt.datetime(2026, 7, 20, 12, tzinfo=dt.timezone.utc))
+
+    def test_an_explicitly_admitted_entry_is_drawable(self):
+        from cathedral_distill.cybergym_holdout import load_holdout
+
+        h = load_holdout([self._entry("arvo:100", admitted=True)])
+        batch = draw_batch(h.pool, size=1, nonce="x",
+                           as_of=dt.datetime(2026, 7, 27, 12, tzinfo=dt.timezone.utc),
+                           cutoff=dt.datetime(2026, 7, 20, 12, tzinfo=dt.timezone.utc))
+        assert batch.task_ids == ("arvo:100",)
+
+    def test_admitted_must_be_a_boolean(self):
+        from cathedral_distill.cybergym_holdout import HoldoutError, load_holdout
+
+        with pytest.raises(HoldoutError, match="admitted .* must be a boolean"):
+            load_holdout([self._entry("arvo:1", admitted="yes")])
+
+    def test_a_mixed_manifest_draws_only_the_admitted_task(self):
+        from cathedral_distill.cybergym_holdout import load_holdout
+
+        h = load_holdout([self._entry("arvo:1", admitted=False),
+                          self._entry("arvo:2", admitted=True)])
+        for i in range(10):
+            batch = draw_batch(h.pool, size=1, nonce=f"n{i}",
+                               as_of=dt.datetime(2026, 7, 27, 12, tzinfo=dt.timezone.utc),
+                               cutoff=dt.datetime(2026, 7, 20, 12, tzinfo=dt.timezone.utc))
+            assert batch.task_ids == ("arvo:2",)
