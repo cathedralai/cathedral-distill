@@ -51,6 +51,7 @@ from cathedral_distill.cybergym_validator import (
     MinerCommit,
     MinerResult,
     emission_gate_policy_manifest,
+    freeze_emission_gate_policy,
     run_epoch,
 )
 from cathedral_distill.cybergym_synthetic import is_synthetic_task
@@ -193,6 +194,19 @@ class CyberGymService:
         # it (cybergym_attest) to be creditable; None keeps the hardware-free path.
         self._attestation_policy = attestation_policy
         self._attestation_now = attestation_now
+        if gate_policy is not None:
+            try:
+                gate_policy = freeze_emission_gate_policy(
+                    gate_policy,
+                    source_epoch=chain.source_epoch,
+                    commitment_cutoff=cutoff,
+                    anchor_block=chain.block,
+                )
+            except Exception as exc:  # a missing observation is a startup refusal
+                raise ProtocolError(
+                    "CyberGym could not freeze independently observed registration "
+                    "eligibility for this epoch"
+                ) from exc
         self._gate_policy = gate_policy
         self._gates_required = gates_required
         # Synthetic tasks are graded but not rewarded by default: their artifact
@@ -357,6 +371,26 @@ class CyberGymService:
                 f"authenticated caller {authenticated_caller!r} may not dispatch for "
                 f"{miner_hotkey!r}"
             )
+        if self._gate_policy is not None and (
+            self._gate_policy.require_registered_bundle
+            or self._gate_policy.require_no_contamination
+        ):
+            identity = (self._gate_policy.paid_identities or {}).get(
+                miner_hotkey, miner_hotkey
+            )
+            snapshot = self._gate_policy.eligibility_snapshot
+            if (
+                snapshot is None
+                or not snapshot.permits(
+                    miner_hotkey=miner_hotkey,
+                    model_commitment=model_commitment,
+                    paid_identity=identity,
+                )
+            ):
+                raise ProtocolError(
+                    "model commitment is not in the frozen observed eligibility "
+                    "snapshot for this epoch"
+                )
         previous = self._miners.get(miner_hotkey)
         # A commitment change abandons the previous batch. When accepted solves would
         # be dropped, require the caller to be the miner — otherwise this is a

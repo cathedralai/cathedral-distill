@@ -30,6 +30,7 @@ from cathedral_distill import frontier as fr  # noqa: E402
 from cathedral_distill.bundle_registry import (  # noqa: E402
     BundleRegistration,
     BundleRegistry,
+    RegistrationObservation,
     ed25519_registration_verifier,
     load_registry,
 )
@@ -52,6 +53,7 @@ NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
 CUTOFF = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 ISSUED = "2026-07-27T12:00:00.000000Z"
 KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+OBSERVER_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33)))
 PEER_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(5, 37)))
 SOURCE_EPOCH = 11
 TRACK = "cybergym-v0"
@@ -81,17 +83,28 @@ def _backend(task_id, poc, mode):
     return 1 if mode == "vul" else 0
 
 
-def _registry(*, hotkey=MINER, digest=COMMITMENT, registered_at=None):
+def _registry(*, hotkey=MINER, digest=COMMITMENT, registered_at=None, observed_at=None,
+              observed_block=99, sequence=1):
     # Default to a model registered BEFORE the private-disclosure window opened
     # (`cutoff`), i.e. a legitimately non-contaminated model. A registration merely
     # before the DRAW (as_of) is not enough — the contamination deadline is `cutoff`.
     at = registered_at or (CUTOFF - timedelta(days=1))
+    observed = observed_at or (CUTOFF - timedelta(days=1))
+    observation = RegistrationObservation(
+        source_epoch=SOURCE_EPOCH,
+        observed_at=observed,
+        observed_block=observed_block,
+        observer_key_id="registry-observer-1",
+        sequence=sequence,
+        signature="pending",
+    )
     unsigned = BundleRegistration(
         miner_hotkey=hotkey,
         track=TRACK,
         bundle_digest=digest,
         version="v1",
         registered_at=at,
+        observation=observation,
     )
     registration = BundleRegistration(
         miner_hotkey=hotkey,
@@ -100,12 +113,36 @@ def _registry(*, hotkey=MINER, digest=COMMITMENT, registered_at=None):
         version="v1",
         registered_at=at,
         signature=base64.b64encode(KEY.sign(unsigned.signing_payload())).decode(),
+        observation=observation,
+    )
+    observation = RegistrationObservation(
+        source_epoch=SOURCE_EPOCH,
+        observed_at=observed,
+        observed_block=observed_block,
+        observer_key_id="registry-observer-1",
+        sequence=sequence,
+        signature=base64.b64encode(OBSERVER_KEY.sign(registration.observation_payload())).decode(),
+    )
+    registration = BundleRegistration(
+        miner_hotkey=hotkey,
+        track=TRACK,
+        bundle_digest=digest,
+        version="v1",
+        registered_at=at,
+        signature=registration.signature,
+        observation=observation,
     )
     verifier = ed25519_registration_verifier(
         {hotkey: KEY.public_key().public_bytes_raw()}
     )
     registry = BundleRegistry()
-    registry.register(registration, signature_verifier=verifier)
+    registry.register(
+        registration,
+        signature_verifier=verifier,
+        observation_verifier=ed25519_registration_verifier(
+            {"registry-observer-1": OBSERVER_KEY.public_key().public_bytes_raw()}
+        ),
+    )
     return registry
 
 
@@ -224,11 +261,13 @@ def test_a_commitment_registered_by_another_miner_earns_nothing(tmp_path):
     assert store.epoch_scores(SOURCE_EPOCH) == {}
 
 
-def test_a_commitment_registered_after_the_draw_is_contaminated(tmp_path):
-    """Post-commitment drawing is the whole anti-contamination argument: a model
-    registered AFTER the batch was drawn cannot be proven not to have seen it."""
+def test_a_commitment_observed_after_the_close_is_contaminated(tmp_path):
+    """Only the independent observation time is eligibility evidence."""
     store = _store(tmp_path)
-    late = _registry(registered_at=NOW + timedelta(hours=1))
+    late = _registry(
+        registered_at=CUTOFF - timedelta(days=1),
+        observed_at=NOW + timedelta(hours=1),
+    )
     results = _run(store, cv.EmissionGatePolicy(bundle_registry=late))
     assert fr.GATE_NO_CONTAMINATION in results[0].gate_failures
     assert store.epoch_scores(SOURCE_EPOCH) == {}
@@ -237,22 +276,18 @@ def test_a_commitment_registered_after_the_draw_is_contaminated(tmp_path):
 def test_an_explicit_commitment_deadline_is_enforced(tmp_path):
     store = _store(tmp_path)
     policy = cv.EmissionGatePolicy(
-        bundle_registry=_registry(registered_at=NOW - timedelta(hours=1)),
+        bundle_registry=_registry(observed_at=NOW - timedelta(hours=1)),
         commitment_deadline=NOW - timedelta(days=2),  # the epoch's own commit cutoff
     )
     results = _run(store, policy)
     assert fr.GATE_NO_CONTAMINATION in results[0].gate_failures
 
 
-def test_a_model_registered_after_the_cutoff_is_contaminated_even_before_the_draw(tmp_path):
-    """The contamination deadline is the private-window START (`cutoff`), not the
-    draw time (`as_of`). A model registered inside `(cutoff, as_of]` postdates the
-    public disclosure of holdout tasks in that window, so it can solve them by lookup
-    and must NOT earn — even though it was registered before the batch was drawn.
-    Under the old `as_of` boundary this exact registration wrongly passed."""
+def test_a_model_observed_after_the_cutoff_is_contaminated_even_before_the_draw(tmp_path):
+    """The private-window start, not the draw time, closes registration."""
     store = _store(tmp_path)
     # 07-26: after cutoff (07-20), before the draw (as_of = NOW = 07-27).
-    in_window = _registry(registered_at=NOW - timedelta(days=1))
+    in_window = _registry(observed_at=NOW - timedelta(days=1))
     results = _run(store, cv.EmissionGatePolicy(bundle_registry=in_window))
     assert fr.GATE_NO_CONTAMINATION in results[0].gate_failures
     assert store.epoch_scores(SOURCE_EPOCH) == {}
@@ -355,10 +390,12 @@ def test_a_gate_evaluation_that_raises_outright_is_contained(tmp_path):
     assert store.epoch_scores(SOURCE_EPOCH) == {}
 
 
-def test_a_timezone_naive_registration_fails_that_miner_only(tmp_path):
-    """`registered_at` arrives from a published row, so it can lack an offset. That
-    used to raise `TypeError` mid-comparison and abort the epoch for every miner; an
-    unknown offset is not evidence, so it is that miner's gate failure."""
+def test_miner_claimed_registration_time_is_not_the_eligibility_clock(tmp_path):
+    """A malformed miner timestamp cannot turn a valid observer receipt into a fail.
+
+    The inverse is the important security property: a valid signature on a claimed
+    old time cannot turn a late observation into reward evidence.
+    """
     naive = _registry(registered_at=datetime(2026, 7, 20, 12, 0))
     store = _store(tmp_path)
     results = _run(store, cv.EmissionGatePolicy(bundle_registry=naive), miners=[
@@ -366,12 +403,9 @@ def test_a_timezone_naive_registration_fails_that_miner_only(tmp_path):
         cv.MinerCommit(miner_hotkey="5Bob", model_commitment=_dg("bob"), pocs={"arvo:1": b"b"}),
     ])
     by_miner = {r.miner_hotkey: r for r in results}
-    assert fr.GATE_NO_CONTAMINATION in by_miner[MINER].gate_failures
-    # and the registered-bundle gate still passed for it, so only the unreadable
-    # timestamp was held against it
-    assert fr.GATE_REGISTERED_BUNDLE not in by_miner[MINER].gate_failures
+    assert by_miner[MINER].creditable
     assert len(results) == 2
-    assert store.epoch_scores(SOURCE_EPOCH) == {}
+    assert store.epoch_scores(SOURCE_EPOCH) == {MINER: Decimal("8")}
 
 
 def test_backdating_a_registration_timestamp_is_a_forgery_not_an_edit():

@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cathedral_distill.bundle_registry import (  # noqa: E402
     BundleRegistration,
     BundleRegistry,
+    RegistrationObservation,
     ed25519_registration_verifier,
 )
 from cathedral_distill.cybergym_holdout import load_holdout  # noqa: E402
@@ -59,6 +60,7 @@ NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
 CUTOFF = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 ISSUED = "2026-07-27T12:00:00.000000Z"
 KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+OBSERVER_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33)))
 MODEL = "sha256:" + hashlib.sha256(b"ckpt").hexdigest()
 OTHER_MODEL = "sha256:" + hashlib.sha256(b"ckpt-2").hexdigest()
 SOURCE_EPOCH = 11
@@ -103,12 +105,21 @@ def _trace(task_id, poc_sha256):
 
 
 def _verified_registry(*, digest=MODEL, hotkey="5Miner", registered_at=CUTOFF):
+    observation = RegistrationObservation(
+        source_epoch=SOURCE_EPOCH,
+        observed_at=CUTOFF,
+        observed_block=99,
+        observer_key_id="registry-observer-1",
+        sequence=1,
+        signature="pending",
+    )
     unsigned = BundleRegistration(
         miner_hotkey=hotkey,
         track="cybergym-v0",
         bundle_digest=digest,
         version="v1",
         registered_at=registered_at,
+        observation=observation,
     )
     signed = BundleRegistration(
         miner_hotkey=hotkey,
@@ -117,12 +128,33 @@ def _verified_registry(*, digest=MODEL, hotkey="5Miner", registered_at=CUTOFF):
         version="v1",
         registered_at=registered_at,
         signature=base64.b64encode(KEY.sign(unsigned.signing_payload())).decode(),
+        observation=observation,
+    )
+    observation = RegistrationObservation(
+        source_epoch=SOURCE_EPOCH,
+        observed_at=CUTOFF,
+        observed_block=99,
+        observer_key_id="registry-observer-1",
+        sequence=1,
+        signature=base64.b64encode(OBSERVER_KEY.sign(signed.observation_payload())).decode(),
+    )
+    signed = BundleRegistration(
+        miner_hotkey=hotkey,
+        track="cybergym-v0",
+        bundle_digest=digest,
+        version="v1",
+        registered_at=registered_at,
+        signature=signed.signature,
+        observation=observation,
     )
     registry = BundleRegistry()
     registry.register(
         signed,
         signature_verifier=ed25519_registration_verifier(
             {hotkey: KEY.public_key().public_bytes_raw()}
+        ),
+        observation_verifier=ed25519_registration_verifier(
+            {"registry-observer-1": OBSERVER_KEY.public_key().public_bytes_raw()}
         ),
     )
     return registry

@@ -30,6 +30,10 @@ from typing import Any, Callable, Iterable, Mapping
 REGISTRATION_SCHEMA = "cathedral_bundle_registration_v1"
 REGISTRATION_DOMAIN = b"cathedral-bundle-registration-v1\x00"
 REWARD_EVIDENCE_SCHEMA = "cathedral_bundle_registry_reward_evidence_v1"
+OBSERVATION_SCHEMA = "cathedral_bundle_registration_observation_v1"
+OBSERVATION_DOMAIN = b"cathedral-bundle-registration-observation-v1\x00"
+ELIGIBILITY_SNAPSHOT_SCHEMA = "cathedral_bundle_registry_eligibility_snapshot_v1"
+REGISTRY_VERSION = "1"
 
 # Verifies a registration signature: (signing_payload, signature_str, miner_hotkey)
 # -> True iff the signature is a valid signature over signing_payload by the key
@@ -37,12 +41,71 @@ REWARD_EVIDENCE_SCHEMA = "cathedral_bundle_registry_reward_evidence_v1"
 # hotkey while the hardware-free path uses `ed25519_registration_verifier`.
 SignatureVerifier = Callable[[bytes, str, str], bool]
 
+# An observation is signed by an independently controlled registration service or
+# by a chain-observation adapter.  It deliberately has the same narrow callable
+# shape as registration verification, but resolves the observer key, never the
+# miner hotkey.
+ObservationVerifier = SignatureVerifier
+
 MAX_TRACK_CHARS = 64
 MAX_VERSION_CHARS = 32
 
 
 class RegistrationError(ValueError):
     """Raised when a registration cannot be accepted."""
+
+
+def _aware_utc(value: datetime, *, field: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise RegistrationError(f"{field} must include a UTC offset")
+    return value
+
+
+@dataclass(frozen=True)
+class RegistrationObservation:
+    """An independently signed, append-only observation of a registration.
+
+    The miner's ``registered_at`` remains useful provenance, but it is not an
+    eligibility clock.  This receipt is the clock: it binds the exact signed
+    registration to an observer sequence, source epoch, chain block, and observed
+    timestamp.  Reusing a receipt for another model, hotkey, epoch, or registry
+    version therefore invalidates its observer signature.
+    """
+
+    source_epoch: int
+    observed_at: datetime
+    observed_block: int
+    observer_key_id: str
+    sequence: int
+    signature: str
+    registry_version: str = REGISTRY_VERSION
+
+    def __post_init__(self) -> None:
+        if isinstance(self.source_epoch, bool) or not isinstance(self.source_epoch, int) or self.source_epoch < 0:
+            raise RegistrationError("observation source_epoch must be a non-negative integer")
+        _aware_utc(self.observed_at, field="observation observed_at")
+        if isinstance(self.observed_block, bool) or not isinstance(self.observed_block, int) or self.observed_block < 0:
+            raise RegistrationError("observation observed_block must be a non-negative integer")
+        if not isinstance(self.observer_key_id, str) or not self.observer_key_id:
+            raise RegistrationError("observation observer_key_id is required")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 0:
+            raise RegistrationError("observation sequence must be a non-negative integer")
+        if not isinstance(self.signature, str) or not self.signature:
+            raise RegistrationError("observation signature is required")
+        if not isinstance(self.registry_version, str) or not self.registry_version:
+            raise RegistrationError("observation registry_version is required")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema": OBSERVATION_SCHEMA,
+            "source_epoch": self.source_epoch,
+            "observed_at": self.observed_at.isoformat(),
+            "observed_block": self.observed_block,
+            "observer_key_id": self.observer_key_id,
+            "sequence": self.sequence,
+            "registry_version": self.registry_version,
+            "signature": self.signature,
+        }
 
 
 @dataclass(frozen=True)
@@ -56,6 +119,7 @@ class BundleRegistration:
     registered_at: datetime
     parent_digest: str | None = None
     signature: str = ""
+    observation: RegistrationObservation | None = None
 
     def __post_init__(self) -> None:
         if not self.miner_hotkey:
@@ -96,6 +160,35 @@ class BundleRegistration:
             body, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
 
+    def observation_payload(self) -> bytes:
+        """Exact bytes an independent observer signs for this registration.
+
+        The observer receipt binds the full miner-signed registration digest, not
+        just a mutable digest label.  A post-disclosure registration cannot borrow
+        an earlier receipt by rewriting its claimed timestamp, epoch, or bundle.
+        """
+        observation = self.observation
+        if observation is None:
+            raise RegistrationError("registration has no observation receipt")
+        registration_digest = "sha256:" + hashlib.sha256(
+            self.signing_payload()
+        ).hexdigest()
+        body = {
+            "schema": OBSERVATION_SCHEMA,
+            "registration_digest": registration_digest,
+            "miner_hotkey": self.miner_hotkey,
+            "bundle_digest": self.bundle_digest,
+            "source_epoch": observation.source_epoch,
+            "observed_at": observation.observed_at.isoformat(),
+            "observed_block": observation.observed_block,
+            "observer_key_id": observation.observer_key_id,
+            "sequence": observation.sequence,
+            "registry_version": observation.registry_version,
+        }
+        return OBSERVATION_DOMAIN + json.dumps(
+            body, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "schema": REGISTRATION_SCHEMA,
@@ -106,6 +199,9 @@ class BundleRegistration:
             "parent_digest": self.parent_digest,
             "registered_at": self.registered_at.isoformat(),
             "signature": self.signature,
+            "observation": (
+                None if self.observation is None else self.observation.as_dict()
+            ),
         }
 
 
@@ -123,6 +219,67 @@ def bundle_digest(*parts: bytes) -> str:
     return "sha256:" + hasher.hexdigest()
 
 
+@dataclass(frozen=True)
+class EligibilitySnapshot:
+    """The immutable observed-registration set eligible for one reward epoch.
+
+    ``entries`` contains exactly one commitment for each paid identity.  An
+    identity with multiple pre-close commitments is represented in
+    ``rejected_identities`` and receives no challenge or credit; choosing the
+    favourable one after the unpredictable anchor is therefore impossible.
+    ``observed_registry_digest`` commits to every independently verified receipt
+    considered at freeze time, including late and conflicted rows, so a restart
+    cannot silently use a changed registration set for the same epoch.
+    """
+
+    source_epoch: int
+    registration_close: datetime
+    anchor_block: int
+    entries: tuple[dict[str, Any], ...]
+    rejected_identities: tuple[dict[str, str], ...]
+    observed_registry_digest: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.source_epoch, bool) or not isinstance(self.source_epoch, int) or self.source_epoch < 0:
+            raise RegistrationError("snapshot source_epoch must be a non-negative integer")
+        _aware_utc(self.registration_close, field="snapshot registration_close")
+        if isinstance(self.anchor_block, bool) or not isinstance(self.anchor_block, int) or self.anchor_block < 0:
+            raise RegistrationError("snapshot anchor_block must be a non-negative integer")
+        if not isinstance(self.observed_registry_digest, str) or not self.observed_registry_digest.startswith("sha256:"):
+            raise RegistrationError("snapshot observed_registry_digest must be a sha256 digest")
+
+    def unsigned_dict(self) -> dict[str, Any]:
+        return {
+            "schema": ELIGIBILITY_SNAPSHOT_SCHEMA,
+            "source_epoch": self.source_epoch,
+            "registration_close": self.registration_close.isoformat(),
+            "anchor_block": self.anchor_block,
+            "entries": [dict(entry) for entry in self.entries],
+            "rejected_identities": [dict(item) for item in self.rejected_identities],
+            "observed_registry_digest": self.observed_registry_digest,
+        }
+
+    @property
+    def digest(self) -> str:
+        canonical = json.dumps(
+            self.unsigned_dict(), sort_keys=True, ensure_ascii=True, separators=(",", ":")
+        ).encode("ascii")
+        return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+    def as_dict(self) -> dict[str, Any]:
+        document = self.unsigned_dict()
+        document["digest"] = self.digest
+        return document
+
+    def permits(self, *, miner_hotkey: str, model_commitment: str, paid_identity: str) -> bool:
+        return any(
+            entry.get("miner_hotkey") == miner_hotkey
+            and entry.get("bundle_digest") == model_commitment
+            and entry.get("paid_identity") == paid_identity
+            for entry in self.entries
+        )
+
+
 class BundleRegistry:
     """First valid signed registration establishes the claim over a digest.
 
@@ -136,6 +293,8 @@ class BundleRegistry:
     def __init__(self) -> None:
         self._by_digest: dict[str, BundleRegistration] = {}
         self._cryptographically_verified: set[str] = set()
+        self._observations_verified: set[str] = set()
+        self._observation_sequences: set[tuple[str, int, int]] = set()
 
     def register(
         self,
@@ -143,6 +302,7 @@ class BundleRegistry:
         *,
         verify_signature: bool = True,
         signature_verifier: SignatureVerifier | None = None,
+        observation_verifier: ObservationVerifier | None = None,
     ) -> BundleRegistration:
         """Accept a registration, or raise.
 
@@ -170,6 +330,30 @@ class BundleRegistry:
                 raise RegistrationError("registration signature does not verify")
             cryptographically_verified = True
 
+        observation_verified = False
+        observation = registration.observation
+        if observation is not None and observation_verifier is not None:
+            if observation.observer_key_id == registration.miner_hotkey:
+                raise RegistrationError("observer_key_id must not equal miner_hotkey")
+            sequence = (
+                observation.observer_key_id,
+                observation.source_epoch,
+                observation.sequence,
+            )
+            if sequence in self._observation_sequences:
+                raise RegistrationError("observation sequence was already used")
+            try:
+                observed = observation_verifier(
+                    registration.observation_payload(),
+                    observation.signature,
+                    observation.observer_key_id,
+                )
+            except Exception as exc:  # observer lookup failure is never an observation
+                raise RegistrationError(f"observation signature check failed: {exc}") from exc
+            if observed is not True:
+                raise RegistrationError("observation signature does not verify")
+            observation_verified = True
+
         existing = self._by_digest.get(registration.bundle_digest)
         if existing is not None:
             if existing.miner_hotkey == registration.miner_hotkey:
@@ -196,6 +380,9 @@ class BundleRegistry:
         self._by_digest[registration.bundle_digest] = registration
         if cryptographically_verified:
             self._cryptographically_verified.add(registration.bundle_digest)
+        if observation_verified:
+            self._observations_verified.add(registration.bundle_digest)
+            self._observation_sequences.add(sequence)
         return registration
 
     def claim_for(self, digest: str) -> BundleRegistration | None:
@@ -216,6 +403,120 @@ class BundleRegistry:
     ) -> bool:
         claim = self.verified_claim_for(digest)
         return claim is not None and claim.miner_hotkey == miner_hotkey
+
+    def verified_observation_for(self, digest: str) -> BundleRegistration | None:
+        """Return a registration only when both signer and observer verified it."""
+        if digest not in self._cryptographically_verified:
+            return None
+        if digest not in self._observations_verified:
+            return None
+        return self._by_digest.get(digest)
+
+    def _observed_registry_digest(self, source_epoch: int) -> str:
+        rows = [
+            self._by_digest[digest].as_dict()
+            for digest in sorted(self._observations_verified)
+            if self._by_digest[digest].observation is not None
+            and self._by_digest[digest].observation.source_epoch == source_epoch
+        ]
+        canonical = json.dumps(
+            rows, sort_keys=True, ensure_ascii=True, separators=(",", ":")
+        ).encode("ascii")
+        return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+    def freeze_eligibility_snapshot(
+        self,
+        *,
+        source_epoch: int,
+        registration_close: datetime,
+        anchor_block: int,
+        paid_identities: Mapping[str, str] | None = None,
+    ) -> EligibilitySnapshot:
+        """Freeze one observed pre-anchor commitment per paid identity.
+
+        Only rows independently observed before both the configured registration
+        close and the unpredictable anchor are eligible.  A miner-signed
+        ``registered_at`` is intentionally not read here.  Multiple qualifying
+        commitments for one paid identity fail closed rather than choosing the
+        earliest row, because any selection rule would restore a commitment-grind
+        channel.
+        """
+        if isinstance(source_epoch, bool) or not isinstance(source_epoch, int) or source_epoch < 0:
+            raise RegistrationError("source_epoch must be a non-negative integer")
+        _aware_utc(registration_close, field="registration_close")
+        if isinstance(anchor_block, bool) or not isinstance(anchor_block, int) or anchor_block < 0:
+            raise RegistrationError("anchor_block must be a non-negative integer")
+
+        by_identity: dict[str, list[BundleRegistration]] = {}
+        rejections: list[dict[str, str]] = []
+        for digest in sorted(self._observations_verified):
+            registration = self._by_digest[digest]
+            observation = registration.observation
+            if observation is None or observation.source_epoch != source_epoch:
+                continue
+            identity = (paid_identities or {}).get(
+                registration.miner_hotkey, registration.miner_hotkey
+            )
+            if not isinstance(identity, str) or not identity:
+                rejections.append({
+                    "paid_identity": registration.miner_hotkey,
+                    "reason": "missing_paid_identity",
+                })
+                continue
+            if observation.observed_at > registration_close:
+                rejections.append({"paid_identity": identity, "reason": "observed_after_close"})
+                continue
+            if observation.observed_block >= anchor_block:
+                rejections.append({"paid_identity": identity, "reason": "observed_at_or_after_anchor"})
+                continue
+            by_identity.setdefault(identity, []).append(registration)
+
+        entries: list[dict[str, Any]] = []
+        for identity, registrations in sorted(by_identity.items()):
+            if len(registrations) != 1:
+                rejections.append({"paid_identity": identity, "reason": "multiple_commitments"})
+                continue
+            registration = registrations[0]
+            observation = registration.observation
+            assert observation is not None  # selected only from observed rows
+            entries.append({
+                "paid_identity": identity,
+                "miner_hotkey": registration.miner_hotkey,
+                "bundle_digest": registration.bundle_digest,
+                "source_epoch": observation.source_epoch,
+                "observed_at": observation.observed_at.isoformat(),
+                "observed_block": observation.observed_block,
+                "observer_key_id": observation.observer_key_id,
+                "observation_sequence": observation.sequence,
+                "registry_version": observation.registry_version,
+            })
+
+        return EligibilitySnapshot(
+            source_epoch=source_epoch,
+            registration_close=registration_close,
+            anchor_block=anchor_block,
+            entries=tuple(entries),
+            rejected_identities=tuple(sorted(rejections, key=lambda item: (item["paid_identity"], item["reason"]))),
+            observed_registry_digest=self._observed_registry_digest(source_epoch),
+        )
+
+    def verify_eligibility_snapshot(
+        self,
+        snapshot: EligibilitySnapshot,
+        *,
+        paid_identities: Mapping[str, str] | None = None,
+    ) -> bool:
+        """True only if ``snapshot`` exactly matches currently verified receipts."""
+        try:
+            expected = self.freeze_eligibility_snapshot(
+                source_epoch=snapshot.source_epoch,
+                registration_close=snapshot.registration_close,
+                anchor_block=snapshot.anchor_block,
+                paid_identities=paid_identities,
+            )
+        except RegistrationError:
+            return False
+        return expected.as_dict() == snapshot.as_dict()
 
     def reward_evidence_identity(self) -> dict[str, Any]:
         """Stable identity of exactly the registry rows reward gates can trust.
@@ -307,6 +608,7 @@ def load_registry(
     *,
     verify_signature: bool = True,
     signature_verifier: SignatureVerifier | None = None,
+    observation_verifier: ObservationVerifier | None = None,
 ) -> BundleRegistry:
     """Rebuild a registry from published rows, preserving registration order.
 
@@ -322,9 +624,51 @@ def load_registry(
     evidence.
     """
     registry = BundleRegistry()
-    ordered = sorted(rows, key=lambda row: str(row.get("registered_at") or ""))
+
+    def replay_order(row: Mapping[str, Any]) -> tuple[object, ...]:
+        """Use observer order whenever the row carries an observation receipt.
+
+        A miner can truthfully sign any claimed wall-clock value, including an old
+        one; it therefore cannot decide first-wins replay once observed receipts
+        exist.  Legacy provenance-only rows retain the old deterministic fallback
+        but are never reward evidence.
+        """
+        observation = row.get("observation")
+        if isinstance(observation, Mapping):
+            try:
+                return (
+                    0,
+                    int(observation["source_epoch"]),
+                    int(observation["observed_block"]),
+                    str(observation["observer_key_id"]),
+                    int(observation["sequence"]),
+                    str(row.get("bundle_digest") or ""),
+                )
+            except (KeyError, TypeError, ValueError):
+                # The parser below rejects malformed receipts.  Keep sorting total
+                # so one corrupt public row cannot prevent replay of sound rows.
+                return (1, str(row.get("registered_at") or ""), str(row.get("bundle_digest") or ""))
+        return (1, str(row.get("registered_at") or ""), str(row.get("bundle_digest") or ""))
+
+    ordered = sorted(rows, key=replay_order)
     for row in ordered:
         try:
+            raw_observation = row.get("observation")
+            observation = None
+            if raw_observation is not None:
+                if not isinstance(raw_observation, Mapping):
+                    raise RegistrationError("observation must be an object")
+                if raw_observation.get("schema") != OBSERVATION_SCHEMA:
+                    raise RegistrationError("unsupported observation schema")
+                observation = RegistrationObservation(
+                    source_epoch=int(raw_observation["source_epoch"]),
+                    observed_at=datetime.fromisoformat(str(raw_observation["observed_at"])),
+                    observed_block=int(raw_observation["observed_block"]),
+                    observer_key_id=str(raw_observation["observer_key_id"]),
+                    sequence=int(raw_observation["sequence"]),
+                    signature=str(raw_observation["signature"]),
+                    registry_version=str(raw_observation.get("registry_version") or ""),
+                )
             registry.register(
                 BundleRegistration(
                     miner_hotkey=str(row["miner_hotkey"]),
@@ -334,9 +678,11 @@ def load_registry(
                     registered_at=datetime.fromisoformat(str(row["registered_at"])),
                     parent_digest=row.get("parent_digest") or None,
                     signature=str(row.get("signature") or ""),
+                    observation=observation,
                 ),
                 verify_signature=verify_signature,
                 signature_verifier=signature_verifier,
+                observation_verifier=observation_verifier,
             )
         except (RegistrationError, KeyError, ValueError):
             continue

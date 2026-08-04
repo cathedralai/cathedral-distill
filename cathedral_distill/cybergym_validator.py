@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Mapping
@@ -26,6 +26,7 @@ from typing import Any, Mapping
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral_distill import cybergym_receipt as cr
+from cathedral_distill.bundle_registry import EligibilitySnapshot, RegistrationError
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level, PoCSubmission, score_batch
 from cathedral_distill.cybergym_batch import Batch, TaskPool, derive_batch_nonce
 from cathedral_distill.cybergym_scores import CyberGymScoreStore
@@ -120,17 +121,11 @@ class EmissionGatePolicy:
     Each gate has an evidence source, and a gate with no evidence FAILS (it is
     never skipped):
 
-      * `registered_bundle`:
-        `bundle_registry.is_cryptographically_verified_by(commitment, miner)`.
-        A presence-only or unverified registry row is provenance, not reward
-        evidence. No verified registry means no miner can prove its model is
-        registered, so all fail.
-      * `no_contamination`: the committed model must have been registered before the
-        private-disclosure window OPENED (`registered_at <= commitment_deadline`,
-        defaulting to the epoch's `cutoff`). `as_of` (the draw time) is the WRONG
-        boundary: a holdout task disclosed inside `(cutoff, as_of]` could be trained
-        on by a model registered before the draw but after that public disclosure, so
-        the deadline must be the window start, never its end.
+      * `registered_bundle` and `no_contamination` share an immutable
+        independently-observed eligibility snapshot.  A miner signature authenticates
+        a claimed ``registered_at`` but never proves when the registration was seen.
+        The snapshot admits exactly one verified observer receipt per paid identity,
+        before both the registration close and the unpredictable chain anchor.
       * `reproduced`: a peer validator's receipt for the same `batch_id` with the
         same `items_root` and a DIFFERENT `validator_hotkey`, verified against the
         anchored key registry. Off by default: a single-validator deployment has no
@@ -148,10 +143,55 @@ class EmissionGatePolicy:
     reproduction_key_registry: Any = None
     evaluator_coldkey: str = ""
     miner_coldkeys: Mapping[str, str] | None = None
+    # Miner hotkey -> paid identity.  Hotkey is the conservative fallback until the
+    # deployment provides a coldkey or attested-platform mapping.
+    paid_identities: Mapping[str, str] | None = None
+    eligibility_snapshot: EligibilitySnapshot | None = None
     require_registered_bundle: bool = True
     require_no_contamination: bool = True
     require_reproduction: bool = False
     require_independent_evaluator: bool = False
+
+
+def freeze_emission_gate_policy(
+    policy: EmissionGatePolicy,
+    *,
+    source_epoch: int,
+    commitment_cutoff: datetime | None,
+    anchor_block: int,
+) -> EmissionGatePolicy:
+    """Pin independently observed eligibility before batches are dispatched.
+
+    The return value is a value-copy, so a service's epoch manifest can bind the
+    exact snapshot and a later registry change cannot mutate an in-progress epoch.
+    A caller-supplied snapshot is re-derived from the verified registry before use;
+    synthetic or stale snapshots are not a backdoor around observer verification.
+    """
+    if not (policy.require_registered_bundle or policy.require_no_contamination):
+        return policy
+    if policy.bundle_registry is None or commitment_cutoff is None:
+        return replace(policy, eligibility_snapshot=None)
+    freezer = getattr(policy.bundle_registry, "freeze_eligibility_snapshot", None)
+    if not callable(freezer):
+        return replace(policy, eligibility_snapshot=None)
+    try:
+        snapshot = freezer(
+            source_epoch=source_epoch,
+            registration_close=policy.commitment_deadline or commitment_cutoff,
+            anchor_block=anchor_block,
+            paid_identities=policy.paid_identities,
+        )
+    except (RegistrationError, ValueError, TypeError) as exc:
+        raise EmissionGateError("could not freeze observed registration eligibility") from exc
+    if policy.eligibility_snapshot is not None:
+        verifier = getattr(policy.bundle_registry, "verify_eligibility_snapshot", None)
+        if not callable(verifier) or not verifier(
+            policy.eligibility_snapshot, paid_identities=policy.paid_identities
+        ):
+            raise EmissionGateError("provided eligibility snapshot is not verified")
+        if policy.eligibility_snapshot.as_dict() != snapshot.as_dict():
+            raise EmissionGateError("provided eligibility snapshot does not match registry")
+    return replace(policy, eligibility_snapshot=snapshot)
 
 
 def _canonical_evidence_digest(value: object, *, label: str) -> str:
@@ -243,6 +283,15 @@ def emission_gate_policy_manifest(
             dict(policy.miner_coldkeys or {}), label="miner coldkeys"
         )
 
+    paid_identities_digest = _canonical_evidence_digest(
+        dict(policy.paid_identities or {}), label="paid identities"
+    )
+    eligibility_snapshot = (
+        None
+        if policy.eligibility_snapshot is None
+        else policy.eligibility_snapshot.as_dict()
+    )
+
     return {
         "schema": "cathedral_cybergym_emission_gate_policy_v1",
         "require_registered_bundle": bool(policy.require_registered_bundle),
@@ -265,6 +314,8 @@ def emission_gate_policy_manifest(
             else None
         ),
         "miner_coldkeys_digest": miner_coldkeys_digest,
+        "paid_identities_digest": paid_identities_digest,
+        "eligibility_snapshot": eligibility_snapshot,
     }
 
 
@@ -297,49 +348,29 @@ def evaluate_emission_gates(
         except Exception:  # noqa: BLE001 - unreadable evidence is a gate failure
             return None
 
-    registration = None
-    if policy.bundle_registry is not None:
-        registration = lookup(
-            policy.bundle_registry, "verified_claim_for", model_commitment
+    paid_identity = (policy.paid_identities or {}).get(miner_hotkey, miner_hotkey)
+    snapshot = policy.eligibility_snapshot
+    observed_eligible = bool(
+        isinstance(paid_identity, str)
+        and paid_identity
+        and snapshot is not None
+        and snapshot.source_epoch == source_epoch
+        and snapshot.permits(
+            miner_hotkey=miner_hotkey,
+            model_commitment=model_commitment,
+            paid_identity=paid_identity,
         )
+    )
 
     if policy.require_registered_bundle:
-        registered = bool(
-            policy.bundle_registry is not None
-            and lookup(
-                policy.bundle_registry,
-                "is_cryptographically_verified_by",
-                model_commitment,
-                miner_hotkey,
-            )
-        )
-        if not registered:
+        if not observed_eligible:
             failures.append(fr.GATE_REGISTERED_BUNDLE)
 
     if policy.require_no_contamination:
-        # The contamination deadline is the START of the private-disclosure window
-        # (`cutoff`), not the draw time: a model must pre-date every holdout task it
-        # could be scored on. If neither an explicit deadline nor a cutoff is known,
-        # `deadline` is None and the gate fails closed (non-contamination unprovable).
-        deadline = policy.commitment_deadline or commitment_cutoff
-        registered_at = getattr(registration, "registered_at", None)
-        # A registration timestamp with no timezone cannot be compared with an aware
-        # deadline: Python raises, and that raise used to abort the epoch for every
-        # miner. It is also not evidence of anything, since the offset it means is
-        # unknown, so treat it as this miner's gate failure.
-        aware = (
-            registered_at is not None
-            and getattr(registered_at, "tzinfo", None) is not None
-            and registered_at.utcoffset() is not None
-        )
-        proven_pre_commitment = bool(
-            registration is not None
-            and registration.miner_hotkey == miner_hotkey
-            and deadline is not None
-            and aware
-            and registered_at <= deadline
-        )
-        if not proven_pre_commitment:
+        # ``observed_eligible`` already proves an independently signed observer
+        # receipt before the policy close and chain anchor. Miner-provided
+        # ``registered_at`` is deliberately absent from this decision.
+        if not observed_eligible:
             failures.append(fr.GATE_NO_CONTAMINATION)
 
     if policy.require_reproduction:
@@ -532,6 +563,13 @@ def run_epoch(
             "(gates_required=False): an unregistered model commitment earns normally. "
             "Dev/test only, never on a live reward path.",
             stacklevel=2,
+        )
+    else:
+        gate_policy = freeze_emission_gate_policy(
+            gate_policy,
+            source_epoch=chain.source_epoch,
+            commitment_cutoff=cutoff,
+            anchor_block=chain.block,
         )
     # The validator resolves its own signing key by id, exactly as a peer will —
     # never a caller-supplied key.
