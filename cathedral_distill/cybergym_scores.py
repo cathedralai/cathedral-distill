@@ -319,6 +319,17 @@ class CyberGymSolveStore:
             "  poc BLOB NOT NULL,"
             "  PRIMARY KEY (epoch, miner_hotkey, task_id))"
         )
+        # Verification runs an adversarial PoC through the differential backend.
+        # Keep the bounded attempt budget beside durable solves so a process
+        # restart cannot reset a miner's expensive-execution allowance.
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS cybergym_submission_attempts ("
+            "  epoch INTEGER NOT NULL,"
+            "  miner_hotkey TEXT NOT NULL,"
+            "  task_id TEXT NOT NULL,"
+            "  attempts INTEGER NOT NULL CHECK (attempts >= 0),"
+            "  PRIMARY KEY (epoch, miner_hotkey, task_id))"
+        )
         # Solves that exist in durable evidence (a corpus row) but can no longer be
         # scored, with the reason. Two sources: a miner that abandoned the commitment
         # they were drawn against (its own act, its own loss), and an operator
@@ -446,6 +457,54 @@ class CyberGymSolveStore:
                 )
         except sqlite3.DatabaseError as exc:
             raise CyberGymScoreError("failed to record cybergym solve") from exc
+
+    def reserve_submission_attempt(
+        self,
+        *,
+        epoch: int,
+        miner_hotkey: str,
+        task_id: str,
+        max_attempts: int,
+    ) -> int | None:
+        """Atomically consume one expensive verification attempt.
+
+        Returns its one-based count, or ``None`` if the durable task budget is
+        already exhausted. The reservation deliberately happens before the
+        untrusted PoC reaches the differential backend; a crashing process can
+        spend an attempt, but cannot reset or exceed the bound.
+        """
+        if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts < 1:
+            raise CyberGymScoreError("max_attempts must be a positive integer")
+        try:
+            with self._connection:
+                row = self._connection.execute(
+                    "SELECT attempts FROM cybergym_submission_attempts "
+                    "WHERE epoch=? AND miner_hotkey=? AND task_id=?",
+                    (int(epoch), str(miner_hotkey), str(task_id)),
+                ).fetchone()
+                current = int(row["attempts"]) if row is not None else 0
+                if current >= max_attempts:
+                    return None
+                next_attempt = current + 1
+                self._connection.execute(
+                    "INSERT INTO cybergym_submission_attempts"
+                    "(epoch, miner_hotkey, task_id, attempts) VALUES (?,?,?,?)"
+                    " ON CONFLICT(epoch, miner_hotkey, task_id) DO UPDATE SET"
+                    " attempts=excluded.attempts",
+                    (int(epoch), str(miner_hotkey), str(task_id), next_attempt),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError("failed to reserve cybergym submission attempt") from exc
+        return next_attempt
+
+    def submission_attempts(self, *, epoch: int, miner_hotkey: str, task_id: str) -> int:
+        """Return the durable attempt count for observability and tests."""
+        row = self._connection.execute(
+            "SELECT attempts FROM cybergym_submission_attempts "
+            "WHERE epoch=? AND miner_hotkey=? AND task_id=?",
+            (int(epoch), str(miner_hotkey), str(task_id)),
+        ).fetchone()
+        return int(row["attempts"]) if row is not None else 0
 
     def forget_miner(self, *, epoch: int, miner_hotkey: str) -> None:
         """Drop a miner's solves for an epoch (it re-committed a different model)."""

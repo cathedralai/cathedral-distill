@@ -37,6 +37,18 @@ class _StubService:
         return {"accepted": True}
 
 
+class _BlockingSubmitService(_StubService):
+    def __init__(self):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def handle_submit(self, body):
+        self.entered.set()
+        assert self.release.wait(timeout=10)
+        return {"accepted": True}
+
+
 def _serve(server):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -171,6 +183,38 @@ def test_threaded_server_bounds_its_accept_queue():
     from http.server import ThreadingHTTPServer
     assert chttp.REQUEST_QUEUE_SIZE >= 1
     assert ThreadingHTTPServer.request_queue_size or True  # set at construction
+
+
+def test_threaded_server_rejects_mutating_requests_beyond_the_active_cap():
+    service = _BlockingSubmitService()
+    server = chttp.make_threaded_server(
+        service, max_concurrent_mutating_requests=1
+    )
+    _serve(server)
+    first: list[tuple[int, dict]] = []
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        thread = threading.Thread(
+            target=lambda: first.append(_post(base, chttp.SUBMIT_PATH)), daemon=True
+        )
+        thread.start()
+        assert service.entered.wait(timeout=5)
+
+        status, payload = _post(base, chttp.SUBMIT_PATH)
+        assert status == 429
+        assert payload["error"] == "too many concurrent mutating requests"
+    finally:
+        service.release.set()
+        thread.join(timeout=5)
+        server.shutdown()
+
+    assert first == [(200, {"accepted": True})]
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+def test_threaded_server_refuses_an_invalid_mutating_request_cap(limit):
+    with pytest.raises(ValueError, match="max_concurrent_mutating_requests"):
+        chttp.make_threaded_server(_StubService(), max_concurrent_mutating_requests=limit)
 
 
 def test_server_helpers_default_to_loopback_and_refuse_anonymous_public_binds():
