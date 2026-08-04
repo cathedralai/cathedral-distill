@@ -166,6 +166,24 @@ def test_artifact_route_is_not_a_holdout_oracle(tmp_path):
     assert "error" in svc.handle_artifact({})                # missing task_id
 
 
+def test_authenticated_artifact_request_is_bound_to_its_sealed_batch(tmp_path):
+    svc = _service(tmp_path)
+    dispatch = svc.dispatch_for("5Miner", MODEL, authenticated_caller="5Miner")
+    task_id = dispatch.tasks[0].task_id
+
+    accepted = svc.handle_artifact(
+        {"task_id": task_id, "batch_id": dispatch.batch_id},
+        authenticated_caller="5Miner",
+    )
+    assert accepted["task_id"] == task_id and "memcpy" in accepted["program"]
+    assert "error" in svc.handle_artifact(
+        {"task_id": task_id, "batch_id": dispatch.batch_id},
+        authenticated_caller="5Attacker",
+    )
+    assert "batch_id" in svc.handle_artifact(
+        {"task_id": task_id}, authenticated_caller="5Miner").get("error", "")
+
+
 def test_artifact_delivered_over_the_http_wire(tmp_path):
     import json
     import threading
