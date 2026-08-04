@@ -281,8 +281,12 @@ def make_handler(
                     caller, ok = self._caller(body)
                     if not ok:
                         return
-                    result = service.handle_artifact(
-                        request, authenticated_caller=caller
+                    result = (
+                        service.handle_artifact(request)
+                        if caller is None
+                        else service.handle_artifact(
+                            request, authenticated_caller=caller
+                        )
                     )
                     self._send(400 if "error" in result else 200, result)
                 elif self.path == SUBMIT_PATH:
@@ -292,8 +296,12 @@ def make_handler(
                     caller, ok = self._caller(body)
                     if not ok:
                         return
-                    result = service.handle_submit(
-                        body, authenticated_caller=caller
+                    result = (
+                        service.handle_submit(body)
+                        if caller is None
+                        else service.handle_submit(
+                            body, authenticated_caller=caller
+                        )
                     )
                     self._send(200 if result.get("accepted") else 400, result)
                 else:
@@ -381,16 +389,24 @@ class _LockingService:
         self, request: Any, *, authenticated_caller: str | None = None
     ) -> dict[str, Any]:
         with self._lock:
-            return self._service.handle_artifact(
-                request, authenticated_caller=authenticated_caller
+            return (
+                self._service.handle_artifact(request)
+                if authenticated_caller is None
+                else self._service.handle_artifact(
+                    request, authenticated_caller=authenticated_caller
+                )
             )
 
     def handle_submit(
         self, body: Any, *, authenticated_caller: str | None = None
     ) -> dict[str, Any]:
         with self._lock:
-            return self._service.handle_submit(
-                body, authenticated_caller=authenticated_caller
+            return (
+                self._service.handle_submit(body)
+                if authenticated_caller is None
+                else self._service.handle_submit(
+                    body, authenticated_caller=authenticated_caller
+                )
             )
 
 

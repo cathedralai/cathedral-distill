@@ -628,30 +628,59 @@ class CyberGymService:
     def handle_artifact(
         self, request: Mapping[str, Any], *, authenticated_caller: str | None = None
     ) -> dict[str, Any]:
-        """Caller-bound ``{batch_id, task_id}`` -> artifact (or error)."""
+        """Caller-bound artifact access, with a safe single-owner legacy form."""
         if not isinstance(request, Mapping):
             return {"error": "artifact request must be an object"}
         task_id = request.get("task_id")
         batch_id = request.get("batch_id")
         if not isinstance(task_id, str) or not task_id:
             return {"error": "task_id is required"}
-        if not isinstance(batch_id, str) or not batch_id:
-            return {"error": "batch_id is required"}
         try:
-            owners = self._by_batch.get(batch_id)
-            if owners is None:
-                raise ProtocolError("artifact references an unknown or expired batch")
-            if authenticated_caller is None:
-                if len(owners) != 1:
-                    raise ProtocolError(
-                        "artifact access for a common batch requires an authenticated caller"
-                    )
-                miner_hotkey = next(iter(owners))
+            if isinstance(batch_id, str) and batch_id:
+                owners = self._by_batch.get(batch_id)
+                if owners is None:
+                    raise ProtocolError("artifact references an unknown or expired batch")
+                if authenticated_caller is None:
+                    if len(owners) != 1:
+                        raise ProtocolError(
+                            "artifact access for a common batch requires an authenticated caller"
+                        )
+                    miner_hotkey = next(iter(owners))
+                else:
+                    if authenticated_caller not in owners:
+                        raise ProtocolError("authenticated caller does not own this batch")
+                    miner_hotkey = authenticated_caller
             else:
-                if authenticated_caller not in owners:
-                    raise ProtocolError("authenticated caller does not own this batch")
-                miner_hotkey = authenticated_caller
-            if self._miners[miner_hotkey].dispatch.task(task_id) is None:
+                # Older loopback/dev clients send only ``task_id``. Preserve that
+                # form only when it resolves to exactly one dispatched owner. A
+                # common reward batch deliberately has several owners, so it still
+                # requires caller authentication and cannot become a holdout oracle.
+                candidates = {
+                    hotkey
+                    for hotkey, state in self._miners.items()
+                    if state.dispatch is not None
+                    and state.dispatch.task(task_id) is not None
+                }
+                if authenticated_caller is not None:
+                    if authenticated_caller not in candidates:
+                        raise ProtocolError("authenticated caller does not own this artifact")
+                    miner_hotkey = authenticated_caller
+                elif len(candidates) == 1:
+                    miner_hotkey = next(iter(candidates))
+                elif len(candidates) > 1:
+                    raise ProtocolError(
+                        "artifact access for a shared task requires an authenticated caller"
+                    )
+                else:
+                    # Preserve the precise oracle-refusal reason for an unknown
+                    # task instead of treating it as an absent batch identifier.
+                    if task_id not in self._dispatched:
+                        raise ProtocolError("no such dispatched task")
+                    raise ProtocolError(
+                        "artifact owner is no longer active; re-dispatch before fetching"
+                    )
+            dispatch_msg = self._miners[miner_hotkey].dispatch
+            if dispatch_msg is None or dispatch_msg.task(task_id) is None:
                 raise ProtocolError("artifact task is not in this batch")
             return {"task_id": task_id, "program": self.artifact_for(task_id)}
         except (ProtocolError, ValueError) as exc:
