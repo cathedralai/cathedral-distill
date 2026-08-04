@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
 from cathedral_distill.cybergym_protocol import CyberGymCorpusStore, ProtocolError, SubmissionEnvelope
-from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore
+from cathedral_distill.cybergym_scores import CyberGymScoreError, CyberGymScoreStore, CyberGymSolveStore
 from cathedral_distill.cybergym_service import CyberGymService
 from cathedral_distill.cybergym_fresh import (
     CRASH_EXIT,
@@ -266,3 +266,68 @@ def test_fresh_close_command_restores_solves_and_closes_epoch(tmp_path, monkeypa
     payload = json.loads(capsys.readouterr().out)
     assert payload["state"] == "closed"
     assert payload["scores"] == {"5FreshMiner": "8"}
+
+
+def test_fresh_close_rejects_bad_timestamp_before_it_is_pinned(tmp_path, monkeypatch):
+    paths = {
+        "corpus_db": str(tmp_path / "corpus.sqlite"),
+        "score_db": str(tmp_path / "scores.sqlite"),
+        "solve_db": str(tmp_path / "solves.sqlite"),
+    }
+    service = build_fresh_e2e_service(
+        fresh_seed=SEED,
+        private_key=KEY,
+        validator_hotkey="5FreshE2E",
+        as_of=NOW,
+        **paths,
+    )
+    monkeypatch.setenv("CYBERGYM_E2E_ALLOW_UNATTESTED", "1")
+    monkeypatch.setenv("CYBERGYM_FRESH_SEED", SEED.hex())
+    monkeypatch.setenv("CYBERGYM_SIGNING_SEED", bytes(range(32, 64)).hex())
+    monkeypatch.setenv("CYBERGYM_E2E_AS_OF", NOW.isoformat())
+    monkeypatch.setenv("CYBERGYM_VALIDATOR_HOTKEY", "5FreshE2E")
+    for name, path in paths.items():
+        monkeypatch.setenv("CYBERGYM_" + name.upper(), path)
+
+    with pytest.raises(CyberGymScoreError, match="refusing to pin invalid issued_at"):
+        close_fresh_e2e(["--issued-at", "2026-08-04T12:00:00Z"])
+    assert service._solves.manifest_for(21)["issued_at"] is None
+
+
+def test_fresh_close_repairs_only_a_legacy_invalid_timestamp_before_scoring(
+    tmp_path, monkeypatch, capsys
+):
+    paths = {
+        "corpus_db": str(tmp_path / "corpus.sqlite"),
+        "score_db": str(tmp_path / "scores.sqlite"),
+        "solve_db": str(tmp_path / "solves.sqlite"),
+    }
+    service = build_fresh_e2e_service(
+        fresh_seed=SEED,
+        private_key=KEY,
+        validator_hotkey="5FreshE2E",
+        as_of=NOW,
+        **paths,
+    )
+    with service._solves._connection:
+        service._solves._connection.execute(
+            "UPDATE cybergym_epoch_manifest SET issued_at=? WHERE epoch=?",
+            ("2026-08-04T12:00:00Z", 21),
+        )
+    monkeypatch.setenv("CYBERGYM_E2E_ALLOW_UNATTESTED", "1")
+    monkeypatch.setenv("CYBERGYM_FRESH_SEED", SEED.hex())
+    monkeypatch.setenv("CYBERGYM_SIGNING_SEED", bytes(range(32, 64)).hex())
+    monkeypatch.setenv("CYBERGYM_E2E_AS_OF", NOW.isoformat())
+    monkeypatch.setenv("CYBERGYM_VALIDATOR_HOTKEY", "5FreshE2E")
+    for name, path in paths.items():
+        monkeypatch.setenv("CYBERGYM_" + name.upper(), path)
+
+    assert close_fresh_e2e([
+        "--issued-at", "2026-08-04T12:00:00.000000Z",
+        "--repair-invalid-issued-at", "--repair-reason", "pre-validation E2E timestamp pin",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "closed"
+    assert payload["issued_at_repaired"] is True
+    assert payload["issued_at_repair"]["reason"] == "pre-validation E2E timestamp pin"
+    assert service._solves.issued_at_repair(21)["previous_value"] == "2026-08-04T12:00:00Z"

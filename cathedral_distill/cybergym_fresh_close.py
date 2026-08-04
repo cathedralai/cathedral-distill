@@ -28,17 +28,48 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="stable ISO-8601 receipt timestamp (pinned on first close attempt)",
     )
+    parser.add_argument(
+        "--repair-invalid-issued-at",
+        action="store_true",
+        help="explicitly repair a malformed pin made by a pre-validation E2E build",
+    )
+    parser.add_argument(
+        "--repair-reason",
+        help="required audit reason with --repair-invalid-issued-at",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.repair_invalid_issued_at != bool(args.repair_reason):
+        parser = build_parser()
+        parser.error(
+            "--repair-invalid-issued-at and --repair-reason must be supplied together"
+        )
     service = build_service_from_environment()
+    repaired = False
+    if args.repair_invalid_issued_at:
+        epoch = service.chain.source_epoch
+        if service._solves is None:  # defensive: the E2E builder always supplies one
+            raise SystemExit("fresh E2E close requires a durable solve store")
+        service._solves.repair_invalid_issued_at(
+            epoch=epoch,
+            issued_at=args.issued_at,
+            reason=args.repair_reason,
+            score_store=service._scores,
+        )
+        repaired = True
     results = service.score_epoch(issued_at=args.issued_at)
     state, detail = service._scores.epoch_state(service.chain.source_epoch)
     payload = {
         "schema": "cathedral_cybergym_fresh_e2e_close_v1",
         "source_epoch": service.chain.source_epoch,
+        "issued_at_repaired": repaired,
+        "issued_at_repair": (
+            service._solves.issued_at_repair(service.chain.source_epoch)
+            if service._solves is not None else None
+        ),
         "state": state,
         "detail": detail,
         "scored_miners": [result.miner_hotkey for result in results],

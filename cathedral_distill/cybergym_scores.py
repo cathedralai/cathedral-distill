@@ -26,7 +26,7 @@ import sqlite3
 from decimal import Decimal
 from typing import Mapping
 
-from cathedral_distill.cybergym_receipt import validate_structure
+from cathedral_distill.cybergym_receipt import CyberGymReceiptError, validate_issued_at, validate_structure
 
 
 class CyberGymScoreError(RuntimeError):
@@ -345,6 +345,20 @@ class CyberGymSolveStore:
             "  manifest_digest TEXT NOT NULL,"
             "  issued_at TEXT)"
         )
+        # A malformed timestamp could be pinned by versions that accepted it
+        # before the receipt validator ran.  Repairs are rare, explicit, and
+        # permanently recorded rather than silently changing a first-write-wins
+        # epoch input.
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS cybergym_epoch_pin_repairs ("
+            "  epoch INTEGER NOT NULL,"
+            "  field TEXT NOT NULL,"
+            "  previous_value TEXT NOT NULL,"
+            "  replacement_value TEXT NOT NULL,"
+            "  reason TEXT NOT NULL,"
+            "  repaired_at TEXT NOT NULL,"
+            "  PRIMARY KEY (epoch, field))"
+        )
         self._connection.commit()
 
     # -- the epoch's scoring inputs ---------------------------------------- #
@@ -409,6 +423,12 @@ class CyberGymSolveStore:
         "recovered byte-identically" would be false. The first value wins and every
         later pass reuses it.
         """
+        try:
+            requested = validate_issued_at(issued_at)
+        except CyberGymReceiptError as exc:
+            raise CyberGymScoreError(
+                f"refusing to pin invalid issued_at for epoch {int(epoch)}: {exc}"
+            ) from exc
         row = self._connection.execute(
             "SELECT issued_at FROM cybergym_epoch_manifest WHERE epoch=?", (int(epoch),)
         ).fetchone()
@@ -417,16 +437,116 @@ class CyberGymSolveStore:
                 f"epoch {int(epoch)} has no pinned manifest; record_manifest first"
             )
         if row["issued_at"]:
-            return str(row["issued_at"])
+            pinned = str(row["issued_at"])
+            try:
+                return validate_issued_at(pinned)
+            except CyberGymReceiptError as exc:
+                raise CyberGymScoreError(
+                    f"epoch {int(epoch)} has a malformed legacy issued_at pin; "
+                    "refusing to replace it implicitly. Use the explicit audited "
+                    f"repair path after confirming the epoch is unscored: {exc}"
+                ) from exc
         try:
             with self._connection:
                 self._connection.execute(
                     "UPDATE cybergym_epoch_manifest SET issued_at=? WHERE epoch=?",
-                    (str(issued_at), int(epoch)),
+                    (requested, int(epoch)),
                 )
         except sqlite3.DatabaseError as exc:
             raise CyberGymScoreError("failed to pin the epoch issue timestamp") from exc
-        return str(issued_at)
+        return requested
+
+    def repair_invalid_issued_at(
+        self,
+        *,
+        epoch: int,
+        issued_at: str,
+        reason: str,
+        score_store: CyberGymScoreStore,
+    ) -> str:
+        """Explicitly replace a legacy malformed timestamp and leave an audit row.
+
+        This repair exists only for values an earlier version pinned even though
+        no receipt could ever validate with them.  A valid pin is immutable; a
+        caller must supply the score store so this method can establish that no
+        score state or rows exist before it changes the pin.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise CyberGymScoreError("issued_at repair requires a non-empty reason")
+        state, _detail = score_store.epoch_state(epoch)
+        if state != EPOCH_OPEN or score_store.epoch_scores(epoch):
+            raise CyberGymScoreError(
+                "refusing issued_at repair: the epoch has score state or persisted scores"
+            )
+        try:
+            replacement = validate_issued_at(issued_at)
+        except CyberGymReceiptError as exc:
+            raise CyberGymScoreError(f"replacement issued_at is invalid: {exc}") from exc
+        row = self._connection.execute(
+            "SELECT issued_at FROM cybergym_epoch_manifest WHERE epoch=?", (int(epoch),)
+        ).fetchone()
+        if row is None or not row["issued_at"]:
+            raise CyberGymScoreError(f"epoch {int(epoch)} has no issued_at pin to repair")
+        previous = str(row["issued_at"])
+        try:
+            validate_issued_at(previous)
+        except CyberGymReceiptError:
+            pass
+        else:
+            raise CyberGymScoreError(
+                f"epoch {int(epoch)} has a valid issued_at pin and cannot be repaired"
+            )
+        existing = self._connection.execute(
+            "SELECT previous_value, replacement_value, reason FROM cybergym_epoch_pin_repairs "
+            "WHERE epoch=? AND field='issued_at'",
+            (int(epoch),),
+        ).fetchone()
+        if existing is not None:
+            if (
+                str(existing["previous_value"]) == previous
+                and str(existing["replacement_value"]) == replacement
+                and str(existing["reason"]) == reason.strip()
+            ):
+                return replacement
+            raise CyberGymScoreError(
+                f"epoch {int(epoch)} already has an issued_at repair audit row"
+            )
+        from datetime import datetime, timezone
+
+        try:
+            with self._connection:
+                self._connection.execute(
+                    "UPDATE cybergym_epoch_manifest SET issued_at=? WHERE epoch=?",
+                    (replacement, int(epoch)),
+                )
+                self._connection.execute(
+                    "INSERT INTO cybergym_epoch_pin_repairs"
+                    "(epoch, field, previous_value, replacement_value, reason, repaired_at) "
+                    "VALUES (?, 'issued_at', ?, ?, ?, ?)",
+                    (
+                        int(epoch), previous, replacement, reason.strip(),
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError("failed to record issued_at repair") from exc
+        return replacement
+
+    def issued_at_repair(self, epoch: int) -> dict[str, str] | None:
+        """The immutable audit row for an explicit legacy timestamp repair."""
+        row = self._connection.execute(
+            "SELECT previous_value, replacement_value, reason, repaired_at "
+            "FROM cybergym_epoch_pin_repairs WHERE epoch=? AND field='issued_at'",
+            (int(epoch),),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "previous_value": str(row["previous_value"]),
+            "replacement_value": str(row["replacement_value"]),
+            "reason": str(row["reason"]),
+            "repaired_at": str(row["repaired_at"]),
+        }
 
     def record(
         self, *, epoch: int, miner_hotkey: str, model_commitment: str, task_id: str, poc: bytes
