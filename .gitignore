@@ -20,4 +20,3 @@ receipts/
 corpus*.jsonl
 corpus*.manifest.json
 corpus*.jsonl.*
-.tmp-cathedral/
