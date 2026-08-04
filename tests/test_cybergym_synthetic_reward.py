@@ -218,8 +218,8 @@ def test_a_real_corpus_task_still_earns_in_the_same_epoch(tmp_path):
     """The default must not be "CyberGym pays nothing": a real ARVO task in a mixed
     batch still earns while the synthetic ones beside it do not."""
     pool = TaskPool([
-        PooledTask(task_id="arvo:1", level=Level(0), binary_digest=_dg("b1"), disclosed_at=NOW),
-        PooledTask(task_id="arvo:2", level=Level(2), binary_digest=_dg("b2"), disclosed_at=NOW),
+        PooledTask(task_id="arvo:1", level=Level(0), binary_digest=_dg("b1"), disclosed_at=NOW, admitted=True),
+        PooledTask(task_id="arvo:2", level=Level(2), binary_digest=_dg("b2"), disclosed_at=NOW, admitted=True),
     ])
     store = CyberGymScoreStore(str(tmp_path / "mixed.sqlite"))
     results = cv.run_epoch(

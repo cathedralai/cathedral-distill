@@ -150,16 +150,17 @@ class PooledTask:
     differential in Docker is acceptable — never in the draw, which must stay
     deterministic and side-effect-free. A scored batch draws only from admitted
     tasks; an un-admitted task is the shape that paid for garbage (`arvo:3938`)
-    or shipped its own answer in a public image. Defaults True so a pool built
-    from an already-vetted manifest needs no change, but the ingest path should
-    set it explicitly from the gate.
+    or shipped its own answer in a public image. Defaults False — admission is
+    a claim someone must make, never a state a task starts in; a constructor
+    that forgets the field builds a task that cannot be drawn, not one that
+    can be paid.
     """
 
     task_id: str
     level: Level
     binary_digest: str
     disclosed_at: datetime
-    admitted: bool = True
+    admitted: bool = False
 
     def to_task(self) -> Task:
         return Task(task_id=self.task_id, level=self.level,

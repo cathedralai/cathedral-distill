@@ -222,7 +222,7 @@ def test_mix_backend_requires_a_backend_on_the_source():
 
 def _corpus_pool():
     tasks = [PooledTask(task_id=f"arvo:{n}", level=Level(0), binary_digest=_dg(f"c{n}"),
-                        disclosed_at=NOW) for n in range(1, 6)]
+                        disclosed_at=NOW, admitted=True) for n in range(1, 6)]
     return TaskPool(tasks)
 
 
@@ -407,7 +407,7 @@ def _public_pool():
     # disclosed BEFORE the cutoff -> public (retired, freely trainable)
     old = datetime(2026, 7, 1, tzinfo=UTC)
     return TaskPool([PooledTask(task_id=f"arvo:{n}", level=Level(0),
-                                binary_digest=_dg(f"p{n}"), disclosed_at=old) for n in range(1, 6)])
+                                binary_digest=_dg(f"p{n}"), disclosed_at=old, admitted=True) for n in range(1, 6)])
 
 
 def test_task_pool_draw_public_is_deterministic_and_uses_the_public_set():
@@ -458,7 +458,7 @@ def test_mix_normalises_sub_source_errors_to_mixerror():
     # a corpus sub-source that can't fill its share -> BatchError -> MixError
     from cathedral_distill.cybergym_mix import CorpusSource
     pool = TaskPool([PooledTask(task_id="arvo:1", level=Level(0), binary_digest=_dg("x"),
-                                disclosed_at=NOW)])
+                                disclosed_at=NOW, admitted=True)])
     m = MixedTaskSource([SourceSpec("corpus", CorpusSource(pool, backend=lambda *a: 0), 1)])
     with pytest.raises(MixError, match="could not draw"):
         m.draw(size=3, nonce=NONCE, as_of=NOW, cutoff=CUTOFF)  # pool has 1, needs 3

@@ -142,14 +142,12 @@ def _pool():
                 task_id="arvo:1",
                 level=Level(0),
                 binary_digest=_digest("bin-1"),
-                disclosed_at=NOW,
-            ),
+                disclosed_at=NOW, admitted=True),
             PooledTask(
                 task_id="arvo:2",
                 level=Level(2),
                 binary_digest=_digest("bin-2"),
-                disclosed_at=NOW,
-            ),
+                disclosed_at=NOW, admitted=True),
         ]
     )
 

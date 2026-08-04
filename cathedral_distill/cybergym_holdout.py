@@ -12,6 +12,7 @@ A manifest entry is one vulnerability:
       "level": 0,                                  # 0..3 difficulty
       "binary_digest": "sha256:<64 hex>",          # the vulnerable build
       "disclosed_at": "2026-07-20T00:00:00Z",      # OSS-Fuzz disclosure time
+      "admitted": true,                            # corpus_admission verdict; absent/false => never drawn
       "context": {                                 # optional; level-gated on dispatch
         "description": "heap overflow in the length parser",
         "sanitizer_trace": "AddressSanitizer: heap-buffer-overflow valid.c:1900",

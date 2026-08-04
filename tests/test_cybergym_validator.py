@@ -41,7 +41,7 @@ def _digest(seed: str) -> str:
 def _pool():
     tasks = [
         cb.PooledTask(task_id=f"arvo:{n}", level=cg.Level(level), binary_digest=_digest(f"bin-{n}"),
-                      disclosed_at=NOW)  # after cutoff -> private holdout
+                      disclosed_at=NOW, admitted=True)  # after cutoff -> private holdout
         for n, level in enumerate((0, 1, 2), start=1)
     ]
     return cb.TaskPool(tasks)

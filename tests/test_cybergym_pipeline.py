@@ -40,7 +40,7 @@ def _pool(n=40):
                      else NOW - timedelta(days=5))  # old vs recent
         tasks.append(cb.PooledTask(
             task_id=f"arvo:{1000 + i}", level=levels[i % 4],
-            binary_digest=BIN, disclosed_at=disclosed))
+            binary_digest=BIN, disclosed_at=disclosed, admitted=True))
     return cb.TaskPool(tasks)
 
 
