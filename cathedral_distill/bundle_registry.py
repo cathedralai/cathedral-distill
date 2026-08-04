@@ -34,6 +34,7 @@ OBSERVATION_SCHEMA = "cathedral_bundle_registration_observation_v1"
 OBSERVATION_DOMAIN = b"cathedral-bundle-registration-observation-v1\x00"
 ELIGIBILITY_SNAPSHOT_SCHEMA = "cathedral_bundle_registry_eligibility_snapshot_v1"
 REGISTRY_VERSION = "1"
+PAID_IDENTITY_KINDS = frozenset({"coldkey", "tdx_platform"})
 
 # Verifies a registration signature: (signing_payload, signature_str, miner_hotkey)
 # -> True iff the signature is a valid signature over signing_payload by the key
@@ -79,6 +80,8 @@ class RegistrationObservation:
     sequence: int
     signature: str
     registry_version: str = REGISTRY_VERSION
+    paid_identity: str | None = None
+    paid_identity_kind: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.source_epoch, bool) or not isinstance(self.source_epoch, int) or self.source_epoch < 0:
@@ -94,6 +97,14 @@ class RegistrationObservation:
             raise RegistrationError("observation signature is required")
         if not isinstance(self.registry_version, str) or not self.registry_version:
             raise RegistrationError("observation registry_version is required")
+        if self.paid_identity is None and self.paid_identity_kind is None:
+            return
+        if not isinstance(self.paid_identity, str) or not self.paid_identity:
+            raise RegistrationError("observation paid_identity is invalid")
+        if self.paid_identity_kind not in PAID_IDENTITY_KINDS:
+            raise RegistrationError(
+                "observation paid_identity_kind must be coldkey or tdx_platform"
+            )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -104,6 +115,8 @@ class RegistrationObservation:
             "observer_key_id": self.observer_key_id,
             "sequence": self.sequence,
             "registry_version": self.registry_version,
+            "paid_identity": self.paid_identity,
+            "paid_identity_kind": self.paid_identity_kind,
             "signature": self.signature,
         }
 
@@ -184,6 +197,8 @@ class BundleRegistration:
             "observer_key_id": observation.observer_key_id,
             "sequence": observation.sequence,
             "registry_version": observation.registry_version,
+            "paid_identity": observation.paid_identity,
+            "paid_identity_kind": observation.paid_identity_kind,
         }
         return OBSERVATION_DOMAIN + json.dumps(
             body, sort_keys=True, separators=(",", ":")
@@ -271,11 +286,20 @@ class EligibilitySnapshot:
         document["digest"] = self.digest
         return document
 
-    def permits(self, *, miner_hotkey: str, model_commitment: str, paid_identity: str) -> bool:
+    def permits(
+        self,
+        *,
+        miner_hotkey: str,
+        model_commitment: str,
+        paid_identity: str | None = None,
+    ) -> bool:
         return any(
             entry.get("miner_hotkey") == miner_hotkey
             and entry.get("bundle_digest") == model_commitment
-            and entry.get("paid_identity") == paid_identity
+            and (
+                paid_identity is None
+                or entry.get("paid_identity") == paid_identity
+            )
             for entry in self.entries
         )
 
@@ -456,9 +480,26 @@ class BundleRegistry:
             if observation is None or observation.source_epoch != source_epoch:
                 continue
             identity_map = paid_identities or {}
-            identity = identity_map.get(registration.miner_hotkey)
-            if identity is None and not require_paid_identity:
-                identity = registration.miner_hotkey
+            configured_identity = identity_map.get(registration.miner_hotkey)
+            observed_identity = observation.paid_identity
+            if (
+                configured_identity is not None
+                and observed_identity is not None
+                and configured_identity != observed_identity
+            ):
+                rejections.append({
+                    "paid_identity": observed_identity,
+                    "reason": "paid_identity_binding_mismatch",
+                })
+                continue
+            if require_paid_identity:
+                # This is reward evidence, not validator configuration.  The
+                # independent observer signs the coldkey/platform identity with
+                # the exact hotkey+commitment receipt, so an operator mapping
+                # cannot turn many hotkeys into independently paid identities.
+                identity = observed_identity
+            else:
+                identity = configured_identity or registration.miner_hotkey
             if not isinstance(identity, str) or not identity:
                 rejections.append({
                     "paid_identity": registration.miner_hotkey,
@@ -491,6 +532,7 @@ class BundleRegistry:
                 "observer_key_id": observation.observer_key_id,
                 "observation_sequence": observation.sequence,
                 "registry_version": observation.registry_version,
+                "paid_identity_kind": observation.paid_identity_kind,
             })
 
         return EligibilitySnapshot(
@@ -672,6 +714,16 @@ def load_registry(
                     sequence=int(raw_observation["sequence"]),
                     signature=str(raw_observation["signature"]),
                     registry_version=str(raw_observation.get("registry_version") or ""),
+                    paid_identity=(
+                        None
+                        if raw_observation.get("paid_identity") is None
+                        else str(raw_observation["paid_identity"])
+                    ),
+                    paid_identity_kind=(
+                        None
+                        if raw_observation.get("paid_identity_kind") is None
+                        else str(raw_observation["paid_identity_kind"])
+                    ),
                 )
             registry.register(
                 BundleRegistration(

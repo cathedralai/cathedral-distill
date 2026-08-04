@@ -382,18 +382,12 @@ class CyberGymService:
             self._gate_policy.require_registered_bundle
             or self._gate_policy.require_no_contamination
         ):
-            identity = (self._gate_policy.paid_identities or {}).get(miner_hotkey)
-            if identity is None and not self._gate_policy.require_paid_identity:
-                identity = miner_hotkey
             snapshot = self._gate_policy.eligibility_snapshot
             if (
                 snapshot is None
-                or not isinstance(identity, str)
-                or not identity
                 or not snapshot.permits(
                     miner_hotkey=miner_hotkey,
                     model_commitment=model_commitment,
-                    paid_identity=identity,
                 )
             ):
                 raise ProtocolError(

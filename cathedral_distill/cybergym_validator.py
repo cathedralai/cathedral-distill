@@ -148,8 +148,8 @@ class EmissionGatePolicy:
     reproduction_key_registry: Any = None
     evaluator_coldkey: str = ""
     miner_coldkeys: Mapping[str, str] | None = None
-    # Miner hotkey -> paid identity.  Hotkey is the conservative fallback until the
-    # deployment provides a coldkey or attested-platform mapping.
+    # Optional deployment allow-list. In reward mode this can only cross-check an
+    # identity already signed into an observer receipt; it cannot create one.
     paid_identities: Mapping[str, str] | None = None
     eligibility_snapshot: EligibilitySnapshot | None = None
     require_registered_bundle: bool = True
@@ -159,9 +159,8 @@ class EmissionGatePolicy:
     # Reward-bearing epochs compare capability on one post-anchor task set.  The
     # compatibility escape hatch is explicit for non-paying tests only.
     require_common_batch: bool = True
-    # A hotkey is cheap to multiply.  Reward mode requires an externally
-    # registered coldkey or attested-platform identity for every participant;
-    # unknown identities fail closed rather than falling back to hotkey.
+    # A hotkey is cheap to multiply. Reward mode requires an independently
+    # observed coldkey or TDX-platform identity for every participant.
     require_paid_identity: bool = True
 
 
@@ -365,19 +364,13 @@ def evaluate_emission_gates(
         except Exception:  # noqa: BLE001 - unreadable evidence is a gate failure
             return None
 
-    paid_identity = (policy.paid_identities or {}).get(miner_hotkey)
-    if paid_identity is None and not policy.require_paid_identity:
-        paid_identity = miner_hotkey
     snapshot = policy.eligibility_snapshot
     observed_eligible = bool(
-        isinstance(paid_identity, str)
-        and paid_identity
-        and snapshot is not None
+        snapshot is not None
         and snapshot.source_epoch == source_epoch
         and snapshot.permits(
             miner_hotkey=miner_hotkey,
             model_commitment=model_commitment,
-            paid_identity=paid_identity,
         )
     )
 

@@ -106,6 +106,7 @@ def _trace(task_id, poc_sha256):
 
 
 def _verified_registry(*, digest=MODEL, hotkey="5Miner", registered_at=CUTOFF):
+    paid_identity = f"coldkey:{hotkey}"
     observation = RegistrationObservation(
         source_epoch=SOURCE_EPOCH,
         observed_at=CUTOFF,
@@ -113,6 +114,8 @@ def _verified_registry(*, digest=MODEL, hotkey="5Miner", registered_at=CUTOFF):
         observer_key_id="registry-observer-1",
         sequence=1,
         signature="pending",
+        paid_identity=paid_identity,
+        paid_identity_kind="coldkey",
     )
     unsigned = BundleRegistration(
         miner_hotkey=hotkey,
@@ -138,6 +141,8 @@ def _verified_registry(*, digest=MODEL, hotkey="5Miner", registered_at=CUTOFF):
         observer_key_id="registry-observer-1",
         sequence=1,
         signature=base64.b64encode(OBSERVER_KEY.sign(signed.observation_payload())).decode(),
+        paid_identity=paid_identity,
+        paid_identity_kind="coldkey",
     )
     signed = BundleRegistration(
         miner_hotkey=hotkey,

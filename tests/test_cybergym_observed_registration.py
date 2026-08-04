@@ -59,6 +59,8 @@ def _registration(
     observed_at: datetime = CLOSE - timedelta(days=1),
     observed_block: int = ANCHOR_BLOCK - 1,
     sequence: int = 1,
+    paid_identity: str | None = "coldkey:alice",
+    paid_identity_kind: str | None = "coldkey",
 ) -> BundleRegistration:
     observation = RegistrationObservation(
         source_epoch=EPOCH,
@@ -67,6 +69,8 @@ def _registration(
         observer_key_id=OBSERVER,
         sequence=sequence,
         signature="pending",
+        paid_identity=paid_identity,
+        paid_identity_kind=paid_identity_kind,
     )
     unsigned = BundleRegistration(
         miner_hotkey=hotkey,
@@ -94,6 +98,8 @@ def _registration(
         signature=base64.b64encode(
             OBSERVER_KEY.sign(signed.observation_payload())
         ).decode(),
+        paid_identity=paid_identity,
+        paid_identity_kind=paid_identity_kind,
     )
     return BundleRegistration(
         miner_hotkey=signed.miner_hotkey,
@@ -157,6 +163,8 @@ def test_an_observer_signature_cannot_be_reused_with_a_backdated_receipt():
             sequence=late.sequence,
             signature=late.signature,
             registry_version=late.registry_version,
+            paid_identity=late.paid_identity,
+            paid_identity_kind=late.paid_identity_kind,
         ),
     )
     with pytest.raises(RegistrationError, match="observation signature does not verify"):
@@ -192,6 +200,49 @@ def test_multiple_pre_registered_commitments_fail_closed_for_one_paid_identity()
     assert not snapshot.permits(
         miner_hotkey="5Alice", model_commitment=second.bundle_digest,
         paid_identity="coldkey:alice",
+    )
+
+
+def test_duplicate_observed_platform_identity_cannot_multiply_hotkeys():
+    """The signed platform binding, not a local map, is the paid identity."""
+    first = _registration(
+        hotkey="5Alice",
+        digest=_digest("alice"),
+        sequence=1,
+        paid_identity="tdx:platform-42",
+        paid_identity_kind="tdx_platform",
+    )
+    second = _registration(
+        hotkey="5Bob",
+        digest=_digest("bob"),
+        sequence=2,
+        paid_identity="tdx:platform-42",
+        paid_identity_kind="tdx_platform",
+    )
+    snapshot = _registry(first, second).freeze_eligibility_snapshot(
+        source_epoch=EPOCH,
+        registration_close=CLOSE,
+        anchor_block=ANCHOR_BLOCK,
+        require_paid_identity=True,
+    )
+    assert snapshot.entries == ()
+    assert snapshot.rejected_identities == (
+        {"paid_identity": "tdx:platform-42", "reason": "multiple_commitments"},
+    )
+
+
+def test_local_identity_map_cannot_override_the_signed_observation():
+    registration = _registration()
+    snapshot = _registry(registration).freeze_eligibility_snapshot(
+        source_epoch=EPOCH,
+        registration_close=CLOSE,
+        anchor_block=ANCHOR_BLOCK,
+        paid_identities={"5Alice": "coldkey:someone-else"},
+        require_paid_identity=True,
+    )
+    assert snapshot.entries == ()
+    assert snapshot.rejected_identities == (
+        {"paid_identity": "coldkey:alice", "reason": "paid_identity_binding_mismatch"},
     )
 
 

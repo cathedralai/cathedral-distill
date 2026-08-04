@@ -85,12 +85,18 @@ def _backend(task_id, poc, mode):
 
 
 def _registry(*, hotkey=MINER, digest=COMMITMENT, registered_at=None, observed_at=None,
-              observed_block=99, sequence=1):
+              observed_block=99, sequence=1, paid_identity=None,
+              include_paid_identity=True):
     # Default to a model registered BEFORE the private-disclosure window opened
     # (`cutoff`), i.e. a legitimately non-contaminated model. A registration merely
     # before the DRAW (as_of) is not enough — the contamination deadline is `cutoff`.
     at = registered_at or (CUTOFF - timedelta(days=1))
     observed = observed_at or (CUTOFF - timedelta(days=1))
+    paid_identity = (
+        paid_identity or f"coldkey:{hotkey}"
+        if include_paid_identity
+        else None
+    )
     observation = RegistrationObservation(
         source_epoch=SOURCE_EPOCH,
         observed_at=observed,
@@ -98,6 +104,8 @@ def _registry(*, hotkey=MINER, digest=COMMITMENT, registered_at=None, observed_a
         observer_key_id="registry-observer-1",
         sequence=sequence,
         signature="pending",
+        paid_identity=paid_identity,
+        paid_identity_kind="coldkey" if paid_identity is not None else None,
     )
     unsigned = BundleRegistration(
         miner_hotkey=hotkey,
@@ -123,6 +131,8 @@ def _registry(*, hotkey=MINER, digest=COMMITMENT, registered_at=None, observed_a
         observer_key_id="registry-observer-1",
         sequence=sequence,
         signature=base64.b64encode(OBSERVER_KEY.sign(registration.observation_payload())).decode(),
+        paid_identity=paid_identity,
+        paid_identity_kind="coldkey" if paid_identity is not None else None,
     )
     registration = BundleRegistration(
         miner_hotkey=hotkey,
@@ -242,7 +252,10 @@ def test_missing_paid_identity_fails_closed_before_credit(tmp_path):
     store = _store(tmp_path)
     result = _run(
         store,
-        cv.EmissionGatePolicy(bundle_registry=_registry(), paid_identities={}),
+        cv.EmissionGatePolicy(
+            bundle_registry=_registry(include_paid_identity=False),
+            paid_identities={},
+        ),
         with_identity=False,
     )[0]
     assert set(result.gate_failures) == {
