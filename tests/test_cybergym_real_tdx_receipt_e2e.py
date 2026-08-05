@@ -74,11 +74,15 @@ def _cathedral_signed_bytes(receipt: dict) -> bytes:
     ).encode("ascii")
 
 
-# Point this at a `cathedral_customer_receipt_trusted_keys_v1` JSON (the operator's
-# published policy registry) to CRYPTOGRAPHICALLY verify the fixture's signature.
-# Absent it, the loop tests still run on the trusted-issuer flags; only the pure
-# signature check below is skipped — and it says exactly what to provide.
-TRUST_FILE = os.environ.get("CATHEDRAL_RECEIPT_TRUSTED_KEYS")
+# Cathedral's `cathedral_customer_receipt_trusted_keys_v1` registry — a PINNED copy of
+# https://cathedral.computer/customer-receipt-trusted-keys.json (holds the public key for
+# `cathedral-customer-receipt-2026-07-31-01`). Pinned, not runtime-fetched, on purpose: the
+# trust file is not authenticated by the receipt, so fetching it over TLS from the same
+# operator whose receipts we check gives TLS's guarantees, not the receipt's — pin it and
+# distribute through an independent channel, treating a change as an event. `CATHEDRAL_RECEIPT
+# _TRUSTED_KEYS` overrides the path (e.g. to test a rotation).
+PINNED_TRUST_FILE = Path(__file__).parent / "fixtures" / "cathedral-customer-receipt-trusted-keys.json"
+TRUST_FILE = os.environ.get("CATHEDRAL_RECEIPT_TRUSTED_KEYS") or str(PINNED_TRUST_FILE)
 
 
 @pytest.fixture
@@ -159,19 +163,14 @@ def test_the_signature_is_well_formed_over_cathedrals_canonical_bytes():
     assert doc["signing_key_id"] == RECEIPT["signing_key_id"]
 
 
-@pytest.mark.skipif(
-    not TRUST_FILE,
-    reason=("set CATHEDRAL_RECEIPT_TRUSTED_KEYS to a cathedral_customer_receipt_trusted_keys_v1 "
-            "JSON containing the public key for "
-            "'cathedral-customer-receipt-2026-07-31-01' to verify the signature"),
-)
 def test_the_receipt_signature_verifies_against_cathedrals_published_key():
-    """With the operator's trust file, prove the fixture is genuinely Cathedral-signed.
+    """Prove the fixture is genuinely Cathedral-signed — verified against the PINNED key.
 
     Closes the one gap the loop tests leave open: they trust the receipt's
     `intel_verified`/`execution_binding_verified` flags; this verifies Cathedral's
-    Ed25519 signature over the canonical receipt bytes, so a forged receipt with the
-    right flags would fail here.
+    Ed25519 signature over the canonical receipt bytes against the pinned trusted-keys
+    registry, so a forged receipt with the right flags fails here. Runs unconditionally
+    now that the trust file is pinned (was gated on an env var before it was located).
     """
     keys = json.loads(Path(TRUST_FILE).read_text())["keys"]
     entry = keys[RECEIPT["signing_key_id"]]
