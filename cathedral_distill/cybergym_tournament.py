@@ -21,6 +21,7 @@ document.
 """
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
@@ -109,6 +110,7 @@ class Scoreboard:
     standings: tuple[Standing, ...]    # every miner, ranked best → worst
     winners: tuple[str, ...]           # top-5 hotkeys, rank order
     lane_burn: Decimal                 # lane fraction forfeited to burn (unfilled slots)
+    tiebreak_nonce: str                # the epoch nonce that keyed the tie-break (auditable)
 
     def to_dict(self) -> dict[str, Any]:
         """Canonical announcement — deterministic across validators.
@@ -121,6 +123,7 @@ class Scoreboard:
             "source_epoch": int(self.source_epoch),
             "rolling_weights": [str(w) for w in ROLLING_WEIGHTS],
             "tournament_shares": [str(s) for s in TOURNAMENT_SHARES],
+            "tiebreak_nonce": self.tiebreak_nonce,
             "lane_burn": str(self.lane_burn),
             "winners": list(self.winners),
             "standings": [
@@ -136,23 +139,27 @@ class Scoreboard:
         }
 
 
-def _tiebreak_key(hotkey: str, tiebreak: Mapping[str, Any] | None) -> tuple[Any, str]:
-    """Deterministic ordering key among equal totals.
+def _nonce_digest(nonce: bytes, hotkey: str) -> str:
+    """The ungrindable per-epoch ordering value for ``hotkey``.
 
-    The caller supplies a reproducible per-miner value (e.g. the earliest solve time in
-    the window) via ``tiebreak``; the hotkey is the final, always-present discriminator.
-    Both are derivable from the disclosed solve set, so every validator breaks ties the
-    same way. When no ``tiebreak`` is given, hotkey alone orders (still deterministic).
+    ``sha256(nonce ‖ hotkey)`` — deterministic (every validator computes the same) but
+    keyed on the chain-anchored epoch **nonce**, which no miner controls and which
+    changes each epoch. So a miner cannot pre-register a hotkey that sorts early: which
+    of a set of tied hotkeys wins is pseudo-random per epoch, not a permanent property
+    of the address. Same pattern as ``cybergym_mix.apportion``. (This does not by itself
+    resist Sybil — registering many hotkeys still costs registration + a UID slot each,
+    and each must independently earn the tying score; it removes the *free, permanent,
+    zero-work* advantage of a lexicographically-early address.)
     """
-    aux = "" if tiebreak is None else str(tiebreak.get(hotkey, ""))
-    return (aux, hotkey)
+    return hashlib.sha256(nonce + b"\x00" + hotkey.encode("utf-8")).hexdigest()
 
 
 def build_scoreboard(
     source_epoch: int,
     per_miner_scores: Mapping[str, Sequence[Decimal | int | str]],
     *,
-    tiebreak: Mapping[str, Any] | None = None,
+    nonce: bytes | str,
+    tiebreak: Mapping[str, int] | None = None,
     renormalize_when_short: bool = True,
 ) -> Scoreboard:
     """Rank every miner by their rolling total and award the top-5 lane shares.
@@ -160,6 +167,17 @@ def build_scoreboard(
     ``per_miner_scores`` maps hotkey → that miner's last-≤5 base-100 epoch scores
     (oldest → latest). A **winner** is a top-5 miner with ``T > 0`` (no zero-solve
     earners).
+
+    ``nonce`` is the epoch's chain-anchored nonce (required). Because the top-5 cutoff
+    is payout-decisive and level-weighted scores tie often (a fully-solved batch ties at
+    ``T=100``), ties MUST break in a way no miner can grind. Ties break by the
+    ``nonce``-keyed digest (see ``_nonce_digest``), then hotkey — never by hotkey alone.
+
+    ``tiebreak`` optionally supplies a **typed merit** key per miner (``int``; a *smaller*
+    value ranks first, e.g. earliest-solve sequence). It takes precedence over the nonce
+    digest when present, is validated as ``int`` (compared numerically — not string-
+    coerced, so ``9 < 10 < 100``), and misses fall to the nonce digest. Omit it for the
+    pure ungrindable default.
 
     ``renormalize_when_short`` controls the < 5-winner case:
       * ``True`` (onboarding): renormalize the present ranks' shares to sum to 1 so the
@@ -169,6 +187,18 @@ def build_scoreboard(
         (``lane_burn``) is forfeited to burn.
     When 5+ miners qualify the two are identical (shares already sum to 1, burn 0).
     """
+    nonce_bytes = bytes(nonce) if isinstance(nonce, (bytes, bytearray)) else str(nonce).encode("utf-8")
+    if not nonce_bytes:
+        raise TournamentError(
+            "build_scoreboard requires a non-empty epoch nonce: the top-5 cutoff is "
+            "payout-decisive and ties are common, so the tie-break must be ungrindable")
+    if tiebreak is not None:
+        for hk, value in tiebreak.items():
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TournamentError(
+                    f"tiebreak[{hk!r}] must be an int (e.g. solve-time seconds; smaller "
+                    "ranks first) — string values would compare lexicographically")
+
     totals: dict[str, Decimal] = {}
     scores: dict[str, tuple[Decimal, ...]] = {}
     for hotkey, epoch_scores in per_miner_scores.items():
@@ -176,10 +206,13 @@ def build_scoreboard(
         scores[hotkey] = window
         totals[hotkey] = rolling_total(epoch_scores)
 
-    # Deterministic ranking: T desc, then the canonical tie-break.
-    ordered = sorted(
-        totals, key=lambda h: (-totals[h], _tiebreak_key(h, tiebreak))
-    )
+    # Deterministic AND ungrindable ranking: T desc, then the typed merit key (missing =
+    # +inf so it defers to the shuffle), then the nonce-keyed digest, then hotkey.
+    def _order_key(hk: str) -> tuple[Decimal, float, str, str]:
+        merit: float = 0.0 if tiebreak is None else float(tiebreak.get(hk, float("inf")))
+        return (-totals[hk], merit, _nonce_digest(nonce_bytes, hk), hk)
+
+    ordered = sorted(totals, key=_order_key)
 
     winners = [h for h in ordered if totals[h] > 0][:WINNER_SLOTS]
     shares = _award_shares(len(winners), renormalize_when_short=renormalize_when_short)
@@ -201,6 +234,7 @@ def build_scoreboard(
         standings=standings,
         winners=tuple(winners),
         lane_burn=lane_burn,
+        tiebreak_nonce=nonce if isinstance(nonce, str) else nonce_bytes.hex(),
     )
 
 

@@ -25,6 +25,9 @@ from cathedral_distill.cybergym_tournament import (  # noqa: E402
     rolling_total,
 )
 
+# The epoch's chain-anchored nonce that keys the ungrindable tie-break.
+NONCE = b"cgnonce-sha256:" + b"ab" * 16
+
 
 def test_the_two_weight_vectors_are_normalised():
     assert sum(ROLLING_WEIGHTS) == Decimal("1")
@@ -107,7 +110,7 @@ WORKED = {
 
 
 def test_worked_example_totals_ranking_and_payout():
-    sb = build_scoreboard(21, WORKED)
+    sb = build_scoreboard(21, WORKED, nonce=NONCE)
     got = {s.miner_hotkey: s.total for s in sb.standings}
     assert got == {
         "M1": Decimal("95.6"), "M3": Decimal("72.5"), "M2": Decimal("68.8"),
@@ -128,7 +131,7 @@ def test_worked_example_totals_ranking_and_payout():
 
 def test_effective_emission_is_share_times_the_lane():
     # v3 CyberGym lane = 0.30 of total emission.
-    sb = build_scoreboard(21, WORKED)
+    sb = build_scoreboard(21, WORKED, nonce=NONCE)
     lane = Decimal("0.30")
     top = next(s for s in sb.standings if s.rank == 1)
     assert top.lane_share * lane == Decimal("0.1950")
@@ -139,19 +142,59 @@ def test_effective_emission_is_share_times_the_lane():
 # --------------------------------------------------------------------------- #
 
 def test_scoreboard_is_deterministic():
-    a = build_scoreboard(21, WORKED).to_dict()
-    b = build_scoreboard(21, dict(reversed(list(WORKED.items())))).to_dict()
+    a = build_scoreboard(21, WORKED, nonce=NONCE).to_dict()
+    b = build_scoreboard(21, dict(reversed(list(WORKED.items()))), nonce=NONCE).to_dict()
     assert a == b  # input order must not matter
 
 
-def test_ties_break_by_tiebreak_then_hotkey():
-    scores = {"5bbbb": [50], "5aaaa": [50], "5cccc": [50]}
-    # equal totals -> without a tiebreak, hotkey ascending decides
-    plain = build_scoreboard(1, scores)
-    assert [s.miner_hotkey for s in plain.standings] == ["5aaaa", "5bbbb", "5cccc"]
-    # a supplied tiebreak (e.g. earliest solve time) wins over hotkey
-    tb = build_scoreboard(1, scores, tiebreak={"5cccc": 1, "5aaaa": 2, "5bbbb": 3})
-    assert [s.miner_hotkey for s in tb.standings] == ["5cccc", "5aaaa", "5bbbb"]
+def test_ties_break_by_the_nonce_digest_not_hotkey_order():
+    # All tied at T=50: order is the nonce-keyed digest — deterministic for a fixed
+    # nonce, but NOT plain hotkey-ascending (that was the grindable default), and it
+    # reshuffles when the epoch nonce changes.
+    hks = ["5Kf", "5Zz", "5Mn", "5Qp", "5Rt", "5Bc", "5Aa"]
+    scores = {h: [50] for h in hks}
+    order1 = [s.miner_hotkey for s in build_scoreboard(1, scores, nonce=b"nonce-one").standings]
+    again = [s.miner_hotkey for s in build_scoreboard(1, scores, nonce=b"nonce-one").standings]
+    order2 = [s.miner_hotkey for s in build_scoreboard(1, scores, nonce=b"nonce-two").standings]
+    assert order1 == again              # deterministic for a fixed nonce (consensus)
+    assert order1 != sorted(hks)        # NOT hotkey-ascending (the grindable behaviour)
+    assert order1 != order2             # a different epoch nonce reshuffles the tie
+
+
+def test_grinding_an_early_hotkey_earns_no_permanent_advantage():
+    # wallscaler's exploit: register a lexicographically-early hotkey to win ties for
+    # free, forever. With a nonce-keyed tie-break its rank is not a property of the
+    # address — the epoch nonce moves it, so there is no permanent edge.
+    hks = ["5Aaaaa", "5m1", "5m2", "5m3", "5m4", "5m5"]  # all tied at 100
+    scores = {h: [100] for h in hks}
+
+    def rank_of(target: str, nonce: bytes) -> int:
+        sb = build_scoreboard(1, scores, nonce=nonce)
+        return next(s.rank for s in sb.standings if s.miner_hotkey == target)
+
+    ranks = {n: rank_of("5Aaaaa", n) for n in (b"e1", b"e2", b"e3", b"e4", b"e5")}
+    assert len(set(ranks.values())) > 1  # the early address does not hold a fixed rank
+
+
+def test_a_numeric_merit_tiebreak_orders_numerically_not_lexicographically():
+    # solve-time seconds 9 / 10 / 100: earliest (9) must rank first. String order would
+    # be 10, 100, 9 — the earliest solver ranking LAST, the low-severity bug found.
+    scores = {"5x": [50], "5y": [50], "5z": [50]}
+    sb = build_scoreboard(1, scores, nonce=NONCE, tiebreak={"5x": 9, "5y": 10, "5z": 100})
+    assert [s.miner_hotkey for s in sb.standings] == ["5x", "5y", "5z"]
+
+
+def test_nonce_is_required():
+    with pytest.raises(TournamentError):
+        build_scoreboard(1, {"5a": [50]}, nonce=b"")
+    with pytest.raises(TournamentError):
+        build_scoreboard(1, {"5a": [50]}, nonce="")
+
+
+def test_string_tiebreak_values_are_rejected():
+    # A str tiebreak would reintroduce lexicographic comparison; reject it at the door.
+    with pytest.raises(TournamentError):
+        build_scoreboard(1, {"5a": [50]}, nonce=NONCE, tiebreak={"5a": "09"})
 
 
 def _canonical(doc: dict) -> bytes:
@@ -160,7 +203,7 @@ def _canonical(doc: dict) -> bytes:
 
 
 def test_scoreboard_dict_is_canonical_json():
-    doc = build_scoreboard(21, WORKED).to_dict()
+    doc = build_scoreboard(21, WORKED, nonce=NONCE).to_dict()
     body = _canonical(doc)
     # canonical: re-serialising the parsed body is byte-identical, and it digests.
     assert _canonical(json.loads(body)) == body
@@ -172,13 +215,13 @@ def test_scoreboard_dict_is_canonical_json():
 # --------------------------------------------------------------------------- #
 
 def test_zero_score_miners_never_win():
-    sb = build_scoreboard(1, {"5solver": [40], "5idle": [0], "5absent": []})
+    sb = build_scoreboard(1, {"5solver": [40], "5idle": [0], "5absent": []}, nonce=NONCE)
     assert sb.winners == ("5solver",)
     assert {s.miner_hotkey: s.lane_share for s in sb.standings}["5idle"] == Decimal("0")
 
 
 def test_short_field_renormalises_during_onboarding():
-    sb = build_scoreboard(1, {"5a": [90], "5b": [80]}, renormalize_when_short=True)
+    sb = build_scoreboard(1, {"5a": [90], "5b": [80]}, nonce=NONCE, renormalize_when_short=True)
     shares = {s.miner_hotkey: s.lane_share for s in sb.standings}
     # 0.65 and 0.14 renormalised to sum to 1 -> full lane pays out, no burn
     assert shares["5a"] == Decimal("0.822785")   # 0.65 / 0.79
@@ -188,7 +231,7 @@ def test_short_field_renormalises_during_onboarding():
 
 
 def test_short_field_burns_unfilled_slots_when_mature():
-    sb = build_scoreboard(1, {"5a": [90], "5b": [80]}, renormalize_when_short=False)
+    sb = build_scoreboard(1, {"5a": [90], "5b": [80]}, nonce=NONCE, renormalize_when_short=False)
     shares = {s.miner_hotkey: s.lane_share for s in sb.standings}
     assert shares["5a"] == Decimal("0.65") and shares["5b"] == Decimal("0.14")
     # the three unfilled slots' share is forfeited to burn
@@ -196,13 +239,13 @@ def test_short_field_burns_unfilled_slots_when_mature():
 
 
 def test_no_qualified_miners_burns_the_whole_lane():
-    sb = build_scoreboard(1, {"5idle": [0]}, renormalize_when_short=True)
+    sb = build_scoreboard(1, {"5idle": [0]}, nonce=NONCE, renormalize_when_short=True)
     assert sb.winners == ()
     assert sb.lane_burn == Decimal("1")
 
 
 def test_lane_contributions_map_shares_to_work_units():
-    sb = build_scoreboard(21, WORKED)
+    sb = build_scoreboard(21, WORKED, nonce=NONCE)
     contribs = {c["miner_hotkey"]: Decimal(c["work_units"]) for c in lane_contributions(sb)}
     assert contribs == {
         "M1": Decimal("0.65"), "M3": Decimal("0.14"), "M2": Decimal("0.10"),
