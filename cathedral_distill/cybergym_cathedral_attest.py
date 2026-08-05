@@ -85,18 +85,24 @@ def commitment_sha256(*, task_id: str, poc_sha256: str, trace_id: str) -> str:
 
 
 def enclave_commitment_bytes(
-    *, task_id: str, poc_sha256: str, trace_id: str, verdict: str | None = None
+    *, task_id: str, poc_sha256: str, trace_id: str, miner_hotkey: str, nonce: str,
+    verdict: str | None = None,
 ) -> bytes:
     """The canonical bytes the persistent enclave signs with its own key.
 
-    Binds `(task, poc, trace)` and, when the differential runs in-enclave (#95),
-    the signed `verdict` — so an external party confirms PASS/FAIL from the
-    signature alone, with no corpus and no re-execution. `verdict` is omitted from
-    the body (not sent as null) when absent, so the boot-only #94 shape and the
+    Binds `(task, poc, trace)`, the **miner** it was dispatched to, and the batch
+    **nonce** — so a receipt is valid only for the exact miner and dispatch that
+    produced it. Without the miner and nonce, a second miner dispatched the same
+    task could resubmit another miner's `(poc, trace, receipt)` under its own batch
+    and earn the credit (the receipt binds only the solve, not who ran it). When the
+    differential runs in-enclave (#95) the signed `verdict` is bound too, so an
+    external party confirms PASS/FAIL from the signature alone. `verdict` is omitted
+    from the body (not sent as null) when absent, so the boot-only #94 shape and the
     verdict-carrying #95 shape are distinct signed messages.
     """
     body: dict[str, Any] = {"schema": ENCLAVE_COMMITMENT_SCHEMA, "task_id": task_id,
-                            "poc_sha256": poc_sha256, "trace_id": trace_id}
+                            "poc_sha256": poc_sha256, "trace_id": trace_id,
+                            "miner_hotkey": miner_hotkey, "nonce": nonce}
     if verdict is not None:
         body["verdict"] = verdict
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -104,19 +110,21 @@ def enclave_commitment_bytes(
 
 def enclave_result_bytes(
     *, enclave_pubkey_b64: str, task_id: str, poc_sha256: str, trace_id: str,
-    verdict: str | None, signature_b64: str,
+    miner_hotkey: str, nonce: str, verdict: str | None, signature_b64: str,
 ) -> bytes:
     """The exact result an approved enclave workload writes, whose sha256 the
     Cathedral receipt binds as `result_sha256`.
 
-    It carries the enclave-generated public key, the `(task, poc, trace[, verdict])`
-    commitment, and the enclave's signature over that commitment. Because the
-    workload that produced it is pinned by `workload_sha256` to the approved solver
-    and the result is bound by `result_sha256`, this envelope could only have been
-    produced by the genuine solver inside the attested enclave.
+    It carries the enclave-generated public key, the
+    `(task, poc, trace, miner, nonce[, verdict])` commitment, and the enclave's
+    signature over that commitment. Because the workload that produced it is pinned
+    by `workload_sha256` to the approved solver and the result is bound by
+    `result_sha256`, this envelope could only have been produced by the genuine
+    solver inside the attested enclave — for this miner and this dispatch.
     """
     commitment: dict[str, Any] = {"schema": ENCLAVE_COMMITMENT_SCHEMA, "task_id": task_id,
-                                  "poc_sha256": poc_sha256, "trace_id": trace_id}
+                                  "poc_sha256": poc_sha256, "trace_id": trace_id,
+                                  "miner_hotkey": miner_hotkey, "nonce": nonce}
     if verdict is not None:
         commitment["verdict"] = verdict
     body = {"schema": ENCLAVE_RESULT_SCHEMA, "enclave_pubkey_b64": enclave_pubkey_b64,
@@ -411,6 +419,7 @@ class EnclaveAttestation:
 
 def verify_persistent_enclave_attestation(
     receipt: Mapping[str, Any], *, task_id: str, poc_sha256: str, trace_id: str,
+    miner_hotkey: str, nonce: str,
     result_bytes: bytes, expected_workload_sha256: str,
     require_verdict: bool = False, now: datetime | None = None,
     max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
@@ -517,8 +526,10 @@ def verify_persistent_enclave_attestation(
         return no("enclave commitment carries no verdict (require_verdict)")
     if (str(commitment.get("task_id")) != task_id
             or str(commitment.get("poc_sha256")) != poc_sha256
-            or str(commitment.get("trace_id")) != trace_id):
-        return no("attested result commits to a different task/poc/trace")
+            or str(commitment.get("trace_id")) != trace_id
+            or str(commitment.get("miner_hotkey")) != miner_hotkey
+            or str(commitment.get("nonce")) != nonce):
+        return no("attested result commits to a different task/poc/trace/miner/nonce")
 
     enclave_key_b64 = str(envelope.get("enclave_pubkey_b64", ""))
     sig_b64 = str(envelope.get("signature_b64", ""))
@@ -529,12 +540,17 @@ def verify_persistent_enclave_attestation(
         signature = base64.b64decode(sig_b64)
     except Exception:
         return no("enclave pubkey or signature is malformed")
+    # Recompute the signed bytes from the EXPECTED (submission-supplied) miner and
+    # nonce, not the envelope's — so another miner reusing this result verifies its
+    # signature against its own hotkey and fails.
     signed = enclave_commitment_bytes(
-        task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id, verdict=verdict)
+        task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id,
+        miner_hotkey=miner_hotkey, nonce=nonce, verdict=verdict)
     try:
         enclave_pub.verify(signature, signed)
     except InvalidSignature:
-        return no("enclave signature does not verify over this task/poc/trace/verdict")
+        return no("enclave signature does not verify over this "
+                  "task/poc/trace/miner/nonce/verdict")
 
     return EnclaveAttestation(
         True, REQUIRED_TEE,

@@ -196,7 +196,8 @@ def _policy(*, trusted: dict[str, bytes], gpu: frozenset[str] | None = None):
     )
 
 
-def _service(tmp_path, *, policy: AttestationPolicy | None, name: str = "run"):
+def _service(tmp_path, *, policy: AttestationPolicy | None, name: str = "run",
+             receipt_policy=None):
     """The running verifier on durable stores, attestation ENFORCED unless stated.
 
     ``policy=None`` is the hardware-free E2E posture — the configuration the
@@ -237,6 +238,7 @@ def _service(tmp_path, *, policy: AttestationPolicy | None, name: str = "run"):
         cutoff=None,
         as_of=NOW,
         attestation_policy=policy,
+        cathedral_receipt_policy=receipt_policy,
         attestation_now=NOW,
         attestation_required=policy is not None,
         # The emission gates are a different control with its own coverage; this
@@ -688,10 +690,7 @@ def test_a_swapped_trust_root_cannot_resume_the_epoch_it_did_not_open(tmp_path):
     submitted at all. What the operator gets is a refusal naming both digests, not a
     silently re-anchored epoch.
     """
-    from cathedral_distill.cybergym_score_report import (
-        CyberGymScoreReportError,
-        build_score_report,
-    )
+    from cathedral_distill.cybergym_score_report import build_score_report
 
     # 1. The epoch opens under the Intel root, and refuses the synthetic receipt.
     honest = _service(
@@ -925,3 +924,78 @@ def test_a_cathedral_tdx_worker_receipt_is_not_admissible_here(tmp_path):
         "attestation token missing keys:"
     )
     assert not outcome.attested and outcome.work_units == Decimal(0)
+
+
+# --------------------------------------------------------------------------- #
+# #104: the receipt policy is a SECOND verdict-decider — bind it in the posture
+# --------------------------------------------------------------------------- #
+def test_a_receipt_policy_only_service_is_recorded_as_enforced(tmp_path):
+    """A CathedralReceiptPolicy IS attestation enforcement, not an unattested run.
+
+    Without this the posture reads `enforced=False` for a service that only accepts
+    real Cathedral receipts, and the exporter would publish it as unattested.
+    """
+    from cathedral_distill.cybergym_attest import CathedralReceiptPolicy
+
+    svc = _service(
+        tmp_path, policy=None, name="rcpt-only",
+        receipt_policy=CathedralReceiptPolicy(expected_workload_sha256="wl-approved"),
+    )
+    posture = svc._scores.attestation_posture(EPOCH)
+    assert posture["enforced"] is True
+    assert posture["policy_digest"]  # binds the receipt policy, not empty
+
+
+def test_a_swapped_approved_workload_cannot_resume_the_epoch(tmp_path):
+    """The #99 bypass, reproduced for the receipt path and refused the same way.
+
+    Open the epoch pinning the approved solver `wl-approved`, then restart the SAME
+    epoch on the SAME score database with `expected_workload_sha256` swapped to the
+    attacker's workload. Before #104 the posture bound only the AttestationPolicy, so
+    this swap resumed silently and any receipt from `wl-attacker` earned. Now the
+    receipt policy is in the posture digest, so the swap is refused at the door.
+    """
+    from cathedral_distill.cybergym_attest import CathedralReceiptPolicy
+
+    _service(
+        tmp_path, policy=None, name="wl-swap",
+        receipt_policy=CathedralReceiptPolicy(expected_workload_sha256="wl-approved"),
+    )
+    with pytest.raises(ProtocolError) as raised:
+        _service(
+            tmp_path, policy=None, name="wl-swap",
+            receipt_policy=CathedralReceiptPolicy(expected_workload_sha256="wl-attacker"),
+        )
+    assert "attestation POLICY changed" in str(raised.value)
+
+
+def test_an_attestation_only_epoch_still_resumes_across_the_receipt_change(tmp_path):
+    """No receipt policy -> the posture digest is byte-identical to the prior build,
+    so an epoch opened before #104 (or by a plain attestation service) resumes."""
+    svc = _service(tmp_path, policy=_policy(trusted={DCAP_ROOT_ID: DCAP_ROOT_PUB}),
+                   name="att-only")
+    pinned = svc._scores.attestation_posture(EPOCH)["policy_digest"]
+    assert pinned == attestation_policy_digest(_policy(trusted={DCAP_ROOT_ID: DCAP_ROOT_PUB}))
+    # reopening with the identical attestation policy and no receipt policy is fine
+    _service(tmp_path, policy=_policy(trusted={DCAP_ROOT_ID: DCAP_ROOT_PUB}),
+             name="att-only")
+
+
+def test_the_receipt_policy_manifest_fails_closed_on_an_unbound_field():
+    """Adding a knob to CathedralReceiptPolicy without encoding it must refuse to
+    digest, exactly as AttestationPolicy's manifest does — a digest that omits a
+    verdict-deciding field is worse than none."""
+    import dataclasses
+
+    from cathedral_distill.cybergym_attest import (
+        CathedralReceiptPolicy,
+        cathedral_receipt_policy_manifest,
+    )
+
+    Extended = dataclasses.make_dataclass(
+        "ExtendedReceiptPolicy", [("surprise_knob", int, 0)],
+        bases=(CathedralReceiptPolicy,), frozen=True,
+    )
+    with pytest.raises(Exception) as exc:
+        cathedral_receipt_policy_manifest(Extended(expected_workload_sha256="wl"))
+    assert "does not bind" in str(exc.value)

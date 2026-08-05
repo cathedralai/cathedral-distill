@@ -31,6 +31,10 @@ from cathedral_distill.attestation import (
     AttestationPolicy,
     attestation_policy_digest,
 )
+from cathedral_distill.cybergym_attest import (
+    CathedralReceiptPolicy,
+    cathedral_receipt_policy_digest,
+)
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level
 from cathedral_distill.cybergym_holdout import Holdout
 from cathedral_distill.cybergym_protocol import (
@@ -111,6 +115,7 @@ class CyberGymService:
         level_weights: Mapping[Level, Decimal] = DEFAULT_LEVEL_WEIGHTS,
         trace_policy: TraceQualityPolicy = TraceQualityPolicy(),
         attestation_policy: AttestationPolicy | None = None,
+        cathedral_receipt_policy: CathedralReceiptPolicy | None = None,
         attestation_now: datetime | None = None,
         attestation_required: bool = True,
         gate_policy: EmissionGatePolicy | None = None,
@@ -219,6 +224,10 @@ class CyberGymService:
         # When set, a submission must carry a valid Intel-TDX attestation bound to
         # it (cybergym_attest) to be creditable; None keeps the hardware-free path.
         self._attestation_policy = attestation_policy
+        # The #61 path: a submission may instead attest with a real Cathedral receipt
+        # (attest.v1 / persistent enclave), whose Intel DCAP root cannot live in an
+        # AttestationPolicy's Ed25519 trusted_roots. None keeps the current behaviour.
+        self._cathedral_receipt_policy = cathedral_receipt_policy
         self._attestation_now = attestation_now
         self._gate_policy = gate_policy
         self._gates_required = gates_required
@@ -319,21 +328,42 @@ class CyberGymService:
         `attestation.attestation_policy_digest` makes that restart refuse on exactly
         the terms a dropped policy already does.
         """
+        # Two policies can each require attestation on the reward path: the
+        # report_data-bound cc token (AttestationPolicy) and the real Cathedral
+        # receipt (CathedralReceiptPolicy, the #61 path). EITHER makes the epoch
+        # enforced, and BOTH decide verdicts, so both must be bound into the posture
+        # or a resume that swaps one — e.g. the receipt policy's approved-solver pin —
+        # reopens the swapped-policy bypass the posture guard exists to close.
         try:
-            digest = attestation_policy_digest(self._attestation_policy)
+            att_digest = attestation_policy_digest(self._attestation_policy)
+            rcpt_digest = cathedral_receipt_policy_digest(self._cathedral_receipt_policy)
         except AttestationError as exc:
             raise ProtocolError(
-                "refusing to open the epoch: this Intel-TDX attestation policy "
-                f"cannot be pinned to the score database ({exc}). A policy the "
-                "posture record cannot bind is one a restart could change unseen."
+                "refusing to open the epoch: an Intel-TDX attestation policy cannot "
+                f"be pinned to the score database ({exc}). A policy the posture record "
+                "cannot bind is one a restart could change unseen."
             ) from exc
+        enforced = (
+            self._attestation_policy is not None
+            or self._cathedral_receipt_policy is not None
+        )
+        # No receipt policy -> the digest is byte-identical to the attestation-only
+        # value the prior build wrote, so an epoch opened before this change resumes
+        # cleanly. With one, the digest binds both, so swapping either is refused.
+        if self._cathedral_receipt_policy is None:
+            digest = att_digest
+        else:
+            digest = "sha256:" + hashlib.sha256(
+                (att_digest + "|" + rcpt_digest).encode("ascii")
+            ).hexdigest()
         try:
             self._scores.record_attestation_posture(
                 self.chain.source_epoch,
-                enforced=self._attestation_policy is not None,
+                enforced=enforced,
                 detail=(
-                    f"Intel-TDX attestation policy configured ({digest})"
-                    if self._attestation_policy is not None
+                    f"Intel-TDX attestation enforced (attestation={att_digest or 'none'}, "
+                    f"receipt={rcpt_digest or 'none'})"
+                    if enforced
                     else "no Intel-TDX attestation policy: solves are credited unattested"
                 ),
                 policy_digest=digest,
@@ -595,7 +625,9 @@ class CyberGymService:
         outcome = process_submission(
             envelope, state.dispatch, self._backend,
             trace_policy=self._trace_policy, weights=self._weights,
-            attestation_policy=self._attestation_policy, now=self._attestation_now,
+            attestation_policy=self._attestation_policy,
+            cathedral_receipt_policy=self._cathedral_receipt_policy,
+            now=self._attestation_now,
         )
         source = self._non_rewardable_source(envelope.task_id)
         if outcome.work_units > 0 and not self.rewardable_task(envelope.task_id):

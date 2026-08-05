@@ -48,6 +48,8 @@ def solve(
     task_id: str,
     poc_bytes: bytes,
     trace_id: str,
+    miner_hotkey: str,
+    nonce: str,
     backend: VerifierBackend,
     signing_key: Ed25519PrivateKey | None = None,
 ) -> bytes:
@@ -56,8 +58,10 @@ def solve(
     `backend(task_id, poc, mode)` returns the exit code for the vulnerable
     (`mode != "fix"`) or patched build; `DifferentialResult.solved` is the exact
     crash-vuln-and-clean-patch test the validator applies. The verdict is derived,
-    never taken from the caller. A fresh key is generated when `signing_key` is
-    omitted (the production path — the private half never leaves the enclave).
+    never taken from the caller. The commitment binds the dispatched `miner_hotkey`
+    and batch `nonce`, so the receipt is valid only for this miner and dispatch and
+    cannot be resubmitted by another miner. A fresh key is generated when
+    `signing_key` is omitted (the private half never leaves the enclave).
     """
     key = signing_key or Ed25519PrivateKey.generate()
     vul = int(backend(task_id, bytes(poc_bytes), "vul"))
@@ -67,7 +71,8 @@ def solve(
     pd = poc_digest(poc_bytes)
     signature = key.sign(
         enclave_commitment_bytes(
-            task_id=task_id, poc_sha256=pd, trace_id=trace_id, verdict=verdict
+            task_id=task_id, poc_sha256=pd, trace_id=trace_id,
+            miner_hotkey=miner_hotkey, nonce=nonce, verdict=verdict,
         )
     )
     return enclave_result_bytes(
@@ -75,6 +80,8 @@ def solve(
         task_id=task_id,
         poc_sha256=pd,
         trace_id=trace_id,
+        miner_hotkey=miner_hotkey,
+        nonce=nonce,
         verdict=verdict,
         signature_b64=base64.b64encode(signature).decode(),
     )
@@ -114,6 +121,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         CYBERGYM_TASK_ID          the dispatched task id
         CYBERGYM_POC_PATH         path to the miner's PoC bytes
         CYBERGYM_TRACE_ID         the reasoning-trace id bound into the commitment
+        CYBERGYM_MINER_HOTKEY     the dispatched miner, bound into the commitment
+        CYBERGYM_NONCE            the batch nonce, bound into the commitment
         CYBERGYM_CORPUS_MANIFEST  the digest-pinned manifest baked into this worker
 
     The signed envelope is written to stdout — its sha256 is what the Cathedral
@@ -121,12 +130,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     task_id = _required("CYBERGYM_TASK_ID")
     trace_id = _required("CYBERGYM_TRACE_ID")
+    miner_hotkey = _required("CYBERGYM_MINER_HOTKEY")
+    nonce = _required("CYBERGYM_NONCE")
     with open(_required("CYBERGYM_POC_PATH"), "rb") as handle:
         poc_bytes = handle.read()
     envelope = solve(
         task_id=task_id,
         poc_bytes=poc_bytes,
         trace_id=trace_id,
+        miner_hotkey=miner_hotkey,
+        nonce=nonce,
         backend=_docker_backend_from_environment(),
     )
     sys.stdout.buffer.write(envelope)

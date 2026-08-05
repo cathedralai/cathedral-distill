@@ -458,3 +458,142 @@ def test_service_only_attested_miner_earns_and_composes(tmp_path):
     lane = svc.compose_lane(allocation=Decimal("0.90"))
     holders = {c.miner_hotkey for c in lane.contributions}
     assert holders == {"5Attested"}
+
+
+# --------------------------------------------------------------------------- #
+# #61: a submission that attests with a REAL Cathedral receipt reaches the gate
+# --------------------------------------------------------------------------- #
+import json as _json  # noqa: E402
+
+from cathedral_distill.cybergym_attest import (  # noqa: E402
+    RECEIPT_ATTESTATION_SCHEMA,
+    CathedralReceiptPolicy,
+    verify_submission_receipt,
+)
+from cathedral_distill.cybergym_cathedral_attest import (  # noqa: E402
+    commitment_sha256,
+    enclave_commitment_bytes,
+    enclave_result_bytes,
+)
+from cathedral_distill.cybergym_verifier import poc_digest  # noqa: E402
+
+_FRESH = "2026-07-29T11:59:00Z"
+
+
+def _attest_v1_receipt(task_id, poc, trace_id, **over):
+    pd = poc_digest(poc)
+    receipt = {
+        "receipt_id": "r-attestv1", "receipt_status": "ready", "kind": "tdx-1.5",
+        "exit_code": 0,
+        "task_policy": {"hardware_class": "tdx_cpu", "reuse": "forbidden", "egress": "none"},
+        "started_at": _FRESH,
+        "artifacts": [{"path": "result.txt",
+                       "sha256": commitment_sha256(task_id=task_id, poc_sha256=pd, trace_id=trace_id)}],
+        "verification": {"intel_verified": True, "report_data_match": True},
+    }
+    receipt.update(over)
+    return receipt
+
+
+def _enclave_receipt_and_result(task_id, poc, trace_id, *, miner_hotkey, nonce,
+                                verdict="pass", workload="wl-approved"):
+    key = Ed25519PrivateKey.generate()
+    pd = poc_digest(poc)
+    sig = key.sign(enclave_commitment_bytes(
+        task_id=task_id, poc_sha256=pd, trace_id=trace_id,
+        miner_hotkey=miner_hotkey, nonce=nonce, verdict=verdict))
+    result = enclave_result_bytes(
+        enclave_pubkey_b64=base64.b64encode(key.public_key().public_bytes_raw()).decode(),
+        task_id=task_id, poc_sha256=pd, trace_id=trace_id,
+        miner_hotkey=miner_hotkey, nonce=nonce, verdict=verdict,
+        signature_b64=base64.b64encode(sig).decode())
+    receipt = {
+        "receipt_id": "r-enc", "receipt_status": "ready",
+        "schema": "cathedral_customer_receipt_v1", "cpu_tee": "intel_tdx",
+        "execution_class": "tdx_cpu", "issued_at": _FRESH, "workload_sha256": workload,
+        "result_sha256": hashlib.sha256(result).hexdigest(), "intel_verified": True,
+        "report_data_match": True, "execution_binding_verified": True,
+    }
+    return receipt, result
+
+
+def _receipt_attestation(profile, receipt, result=None):
+    doc = {"schema": RECEIPT_ATTESTATION_SCHEMA, "profile": profile, "receipt": receipt}
+    if result is not None:
+        doc["result_b64"] = base64.b64encode(result).decode()
+    return base64.b64encode(_json.dumps(doc).encode()).decode()
+
+
+def test_attest_v1_receipt_reaches_the_reward_path():
+    source, msg, task_id, poc = _fixture()
+    digest = "sha256:" + hashlib.sha256(poc).hexdigest()
+    tid = _trace_id_of(task_id, digest)
+    att = _receipt_attestation("attest.v1", _attest_v1_receipt(task_id, poc, tid))
+    env = _envelope(msg.batch_id, task_id, poc, attestation=att)
+    out = process_submission(
+        env, msg, source.backend, cathedral_receipt_policy=CathedralReceiptPolicy(), now=NOW)
+    assert out.creditable and out.solved
+
+
+def test_persistent_enclave_receipt_reaches_the_reward_path():
+    source, msg, task_id, poc = _fixture()
+    digest = "sha256:" + hashlib.sha256(poc).hexdigest()
+    tid = _trace_id_of(task_id, digest)
+    receipt, result = _enclave_receipt_and_result(task_id, poc, tid, miner_hotkey=MINER, nonce=msg.nonce, workload="wl-approved")
+    att = _receipt_attestation("persistent_enclave", receipt, result)
+    env = _envelope(msg.batch_id, task_id, poc, attestation=att)
+    policy = CathedralReceiptPolicy(expected_workload_sha256="wl-approved")
+    out = process_submission(env, msg, source.backend, cathedral_receipt_policy=policy, now=NOW)
+    assert out.creditable and out.solved
+
+
+def test_a_receipt_bound_to_another_task_earns_zero():
+    source, msg, task_id, poc = _fixture()
+    digest = "sha256:" + hashlib.sha256(poc).hexdigest()
+    tid = _trace_id_of(task_id, digest)
+    # the receipt commits to a DIFFERENT task than the submission
+    bad = _attest_v1_receipt("arvo:999", poc, tid)
+    att = _receipt_attestation("attest.v1", bad)
+    env = _envelope(msg.batch_id, task_id, poc, attestation=att)
+    out = process_submission(
+        env, msg, source.backend, cathedral_receipt_policy=CathedralReceiptPolicy(), now=NOW)
+    assert not out.creditable and "tdx_attestation_invalid" in out.reason
+
+
+def test_a_persistent_enclave_receipt_needs_the_approved_workload_pin():
+    source, msg, task_id, poc = _fixture()
+    digest = "sha256:" + hashlib.sha256(poc).hexdigest()
+    tid = _trace_id_of(task_id, digest)
+    receipt, result = _enclave_receipt_and_result(task_id, poc, tid, miner_hotkey=MINER, nonce=msg.nonce, workload="wl-attacker")
+    att = _receipt_attestation("persistent_enclave", receipt, result)
+    env = _envelope(msg.batch_id, task_id, poc, attestation=att)
+    # policy pins a DIFFERENT approved workload -> the attacker workload is refused
+    policy = CathedralReceiptPolicy(expected_workload_sha256="wl-approved")
+    out = process_submission(env, msg, source.backend, cathedral_receipt_policy=policy, now=NOW)
+    assert not out.creditable
+    # and with no workload pin at all, the persistent-enclave profile refuses
+    out2 = process_submission(
+        env, msg, source.backend, cathedral_receipt_policy=CathedralReceiptPolicy(), now=NOW)
+    assert not out2.creditable and "approved workload pin" in out2.reason
+
+
+def test_a_receipt_with_only_the_cc_policy_configured_is_refused():
+    # a Cathedral receipt arrives but only the (Ed25519) cc policy is set: the schema
+    # does not match the cc token, and there is no receipt policy to accept it.
+    source, msg, task_id, poc = _fixture()
+    digest = "sha256:" + hashlib.sha256(poc).hexdigest()
+    tid = _trace_id_of(task_id, digest)
+    att = _receipt_attestation("attest.v1", _attest_v1_receipt(task_id, poc, tid))
+    env = _envelope(msg.batch_id, task_id, poc, attestation=att)
+    out = process_submission(env, msg, source.backend, attestation_policy=POLICY, now=NOW)
+    assert not out.creditable and "no cathedral_receipt_policy" in out.reason
+
+
+def test_verify_submission_receipt_rejects_an_unknown_profile():
+    receipt = _attest_v1_receipt("arvo:1", b"poc", "sha256:" + "cd" * 32)
+    with pytest.raises(Exception) as exc:
+        verify_submission_receipt(
+            {"profile": "nope", "receipt": receipt}, task_id="arvo:1",
+            poc_sha256=poc_digest(b"poc"), trace_id="sha256:" + "cd" * 32,
+            miner_hotkey=MINER, nonce="n", policy=CathedralReceiptPolicy(), now=NOW)
+    assert "unknown submission attestation profile" in str(exc.value)
