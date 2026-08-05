@@ -1,20 +1,23 @@
 # CyberGym on Intel TDX — the attestation model
 
 A CyberGym solve earns only when it ran inside a genuine Intel TDX enclave and the
-validator can verify it. Two Cathedral profiles provide that, with complementary
+validator can verify it. Three Cathedral profiles provide that, with complementary
 strengths; [`cybergym_cathedral_attest.py`](../cathedral_distill/cybergym_cathedral_attest.py)
-verifies both, fail-closed.
+verifies all three, fail-closed.
 
-| | `attest.v1` — result quote | `custom.v1` — boot quote |
-|---|---|---|
-| **What runs** | one bounded command, stock image + uploaded workspace | a customer image on a sealed worker, SSH access |
-| **Binds** | the exact `(task, poc, trace)` via `report_data[32:64]` | the machine boot + the customer SSH key |
-| **`workload_result_binding`** | yes | no |
-| **Real corpus image?** | no (bounded; can't hold the ~4 GB arvo image) | **yes** — runs `n132/arvo:{id}` in TDX |
-| **Pricing** | $0.20 / completed receipt | ~$0.40 / worker-hour (Sealed CPU Small), from workload-ready |
-| **Adapter** | `verify_cathedral_attestation(...)` | `verify_boot_attestation(...)` |
+| | `attest.v1` — result quote | `custom.v1` — boot quote | `custom.v1` — persistent enclave key |
+|---|---|---|---|
+| **What runs** | one bounded command, stock image + uploaded workspace | a customer image on a sealed worker, SSH access | a persistent worker with the corpus baked in, an enclave-held signing key |
+| **Binds** | the exact `(task, poc, trace)` via `report_data[32:64]` | the machine boot + the customer SSH key | the machine boot + the **enclave** key, which signs `(task, poc, trace[, verdict])` |
+| **`workload_result_binding`** | yes | no | **yes** |
+| **Real corpus image?** | no (bounded; can't hold the ~4 GB arvo image) | **yes** — runs `n132/arvo:{id}` in TDX | **yes** — corpus baked into the sealed worker |
+| **Pricing** | $0.20 / completed receipt | ~$0.40 / worker-hour (Sealed CPU Small), from workload-ready | ~$0.40 / worker-hour, amortized across a long-lived worker |
+| **Adapter** | `verify_cathedral_attestation(...)` | `verify_boot_attestation(...)` | `verify_persistent_enclave_attestation(...)` |
 
-Both are proven live on real hardware (real Intel DCAP quotes).
+`attest.v1` and `custom.v1` are proven live on real hardware (real Intel DCAP quotes).
+The persistent-enclave **verifier** is implemented and tested; its enclave **worker**
+(boot-time keygen, in-enclave differential) is the remaining infrastructure build
+(#94/#95).
 
 ## `attest.v1` — result-bound solve
 
@@ -82,6 +85,15 @@ key never leaves the enclave) and the boot quote binds that enclave key. The enc
 the reproduction and **signs a commitment over `(task, poc, trace)`** — so the output is
 bound to the attested enclave, and a miner cannot sign a looked-up PoC's commitment outside
 it. (Binding the *customer's* SSH key, as the plain SSH flow does, does not achieve this —
-the customer holds that private key.) That is an infrastructure/build step (a long-lived
-sealed worker with an enclave-held key), not a verification-code gap; the adapters for both
-quote shapes are in place and tested.
+the customer holds that private key.)
+
+The **verifier** for this is `verify_persistent_enclave_attestation`: it requires the boot
+quote's `report_data[0:32]` to bind the enclave key (`sha256(nonce || enclave_pubkey_b64)`),
+verifies the enclave's Ed25519 signature over the canonical `(task, poc, trace[, verdict])`
+commitment, and only then reports `result_bound=True`. A commitment signed anywhere but
+inside the attested enclave — or for a different solve — fails the signature check and is
+refused, on the same freshness/replay bounds as `attest.v1`. When the vul/fix differential
+runs in-enclave (#95), the `verdict` is inside that signed commitment, so an external party
+confirms PASS/FAIL from the signature alone. What remains is the enclave **worker** itself
+(a long-lived sealed worker that generates the key at boot and runs the differential) — an
+infrastructure build, not a verification-code gap.
