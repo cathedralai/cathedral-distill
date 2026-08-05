@@ -130,8 +130,11 @@ unit file names.
 ```bash
 ps -eo pid,user,cmd | grep '[s]caffold.cli serve'
 systemctl list-units --type=service --state=running --no-pager | grep -i cathedral
-sudo systemctl cat cathedral-validator-passive.service | grep -A3 '^\[Service\]$' | tail -20
+sudo systemctl cat cathedral-validator-passive.service
 ```
+
+Read the *last* `ExecStart=` in that output. Drop-ins override, and the
+overriding one is at the bottom.
 
 GREEN: exactly one `scaffold.cli serve … --broadcast` process. Note its
 `--config` path and its interpreter prefix; those are `$VAL` and the config you
@@ -260,7 +263,7 @@ and the tree actually installed on the box.
 2026-08-05T05:48Z.
 
 ```bash
-sudo "$VAL/.venv/bin/cathedral-validator-integration-preview" --lanes \
+sudo -u cathedral-validator "$VAL/.venv/bin/cathedral-validator-integration-preview" --lanes \
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["distill_contract_commit"]); [print(" ", l["lane_id"]) for l in d["lanes"]]'
 ```
 
@@ -442,12 +445,19 @@ headroom or raise the ceiling deliberately, but know which you did.
 
 `--consume-receipts` is the authoritative pass: it records each credited receipt
 in the replay ledger so it can never be credited again. Run it at most once per
-epoch, and never against the live validator's state on a rehearsal. Give it its
-own state file and runtime root:
+epoch, and never against the live ledger on a rehearsal.
+
+The preview CLI takes only `--bundle`, `--lanes`, `--out`,
+`--allow-unpoliced-preview` and `--consume-receipts` — it has no `--state-file`
+and no `--runtime-root`. Its durable state is the **replay ledger and
+epoch-state SQLite files named inside the bundle**, so that is where disposal
+happens: point them at fresh paths under a scratch directory, exactly as
+`cathedral-validator#61` step 5 specifies.
 
 ```bash
 PREVIEW=/var/tmp/cybergym-preview-$(date -u +%Y%m%dT%H%M%SZ)
 sudo -u cathedral-validator mkdir -p "$PREVIEW"
+# The bundle's ledger/epoch-state paths must point inside $PREVIEW before this runs.
 sudo -u cathedral-validator "$VAL/.venv/bin/cathedral-validator-integration-preview" \
   --bundle /path/to/preview-bundle.json \
   --out "$PREVIEW/preview.json"
@@ -613,19 +623,37 @@ RED: `VECTOR_REJECTED` with `reason=VectorError`. The two vectors disagree. Go
 to section 4's rollback now, do not debug in place — every minute past the
 cooldown expiry is a minute of real dark.
 
-**Independent cross-check.** The public reproducer selects its expected lane by
-the *pin* and then requires the result's own stamp to agree, so neither
-direction of a disagreement can reproduce:
+**In-window cross-check.** Confirm the served vector and the accepted result
+agree on the contract, from the validator's own event stream and the publisher's
+metadata — both already shown above. That is the check that fits inside the
+cooldown.
 
-```bash
-sudo -u cathedral-validator "$VAL/.venv/bin/python" \
-  "$VAL/scripts/assert_sn39_public_reproduction.py"
-```
+The **public reproduction** is the stronger independent check, and it is
+deliberately *not* in the flip window. It selects its expected lane by the
+*pin* and then requires the result's own stamp to agree
+(`_PIN_TO_DRY_RUN_CONTRACT_VERSION`), so neither direction of a disagreement can
+reproduce; under a v3 pin `_assert_current_dry_run_v3` additionally requires
+burn share exactly 0, `intel_tdx_share` 0.70, `cybergym_share` 0.30, and a full
+UID vector summing to 1.0.
 
-GREEN: `SN39 public reproduction: PASS {…}`. Under a v3 pin
-`_assert_current_dry_run_v3` additionally requires burn share exactly 0,
-`intel_tdx_share` 0.70, `cybergym_share` 0.30, and a full UID vector summing
-to 1.0.
+It cannot be run from any working install on this host, by design — it is a
+third-party reproduction and it enforces that posture:
+
+- Run from the deployed release tree
+  (`$VAL/scripts/assert_sn39_public_reproduction.py`) it exits 3 with
+  `SN39 public reproduction: NOT_PROVEN: cannot resolve the reproducer Git
+  revision` — a release tree is not a Git checkout.
+- Run from an existing checkout such as `/opt/cathedral-validator-selfserve` it
+  exits 1 with `SN39 public reproduction: FAIL: reproducer checkout is not
+  pristine (modified, untracked, or ignored files are forbidden)` — an in-place
+  checkout has a `.venv/`, a `__pycache__/` and an operator's TOML in it.
+
+Do it properly, out of band, after the watch window: a fresh clone of
+`cathedral-validator` at the reproducer revision, with its virtualenv created
+**outside** the tree, and `git status --porcelain=v1 --untracked-files=all
+--ignored=matching` empty before you run it. GREEN is
+`SN39 public reproduction: PASS {…}`, exit 0. Budget it as its own task; do not
+spend cooldown on it.
 
 ---
 
@@ -657,6 +685,10 @@ sudo tail -f "$EVENTS" | grep --line-buffered -E \
   paid. `forfeited_fraction` of 0.30 with `contributing_fraction` 0 means the
   entire CyberGym allocation is burning. See section 5.
 - **`cathedral-mismatch-check`** — should stay quiet across the whole window.
+
+Once the window closes and the posture is stable, run the public reproduction
+from a pristine clone as described at the end of 3.d. It is the check that
+proves the pin and the vector agree to someone who does not trust either host.
 
 ### 4.b — Rollback
 
