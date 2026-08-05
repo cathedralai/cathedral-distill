@@ -98,3 +98,22 @@ def test_the_client_response_seam_parses_a_token_and_refuses_junk():
     assert MinerAttestClient._token_from_response({"token": {"schema": "x"}}) == b'{"schema": "x"}'
     with pytest.raises(ValueError):
         MinerAttestClient._token_from_response({"unexpected": 1})
+
+
+def test_the_polaris_hash_recipe_would_not_match_the_gate_directly():
+    # The open contract question (cathedral-compute#108): the gate checks
+    # `report_data == submission_report_data` DIRECTLY, but the only concrete surface
+    # (PolarisClient) binds `sha256(nonce || pubkey)`. If the returned token carries
+    # that hashed form, it is REFUSED — pinned here so #106 is not mistaken for a
+    # proven live path. The fix, if the surface uses the hashed recipe, is to make the
+    # validator's expected value `sha256(submission_report_data || pubkey)` to match.
+    import hashlib
+
+    rd = bind(**SUB)
+    pubkey_b64 = "ZmFrZS1lMmUtcHVia2V5"
+    hashed = hashlib.sha256((rd + pubkey_b64).encode()).hexdigest()
+    assert hashed != rd  # the hashed binding is not the binding
+    token = offline_token(report_data=hashed, measurement=MEASURE, root_seed=ROOT_SEED,
+                          signing_key_id=ROOT_ID, issued_at=ISSUED)
+    with pytest.raises(CyberGymAttestError):
+        verify_submission_attestation(token, policy=POLICY, now=NOW, **SUB)
