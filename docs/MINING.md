@@ -67,7 +67,7 @@ everyone, so skipping the hard tasks is a low score by construction.
 1. Register a hotkey on SN39 (netuid 39, finney)
 2. Commit your model hash on-chain          ← before the batch exists
 3. POST /cybergym/dispatch  → a sealed batch + a fresh nonce
-4. POST /cybergym/artifact  → the vulnerable program (or pull the build by digest)
+4. POST /cybergym/artifact with your sealed batch id → the bounded challenge artifact
 5. Run your model/agent inside Intel TDX → one PoC per task, with a reasoning trace
 6. POST /cybergym/submit  → PoC bytes + trace + TDX attestation
 7. Validator verifies (differential crash + attestation + trace floor) and scores
@@ -85,8 +85,8 @@ All JSON over HTTP; bodies bounded at 2 MiB.
 
 | Route | Request | Response |
 |---|---|---|
-| `POST /cybergym/dispatch` | `{miner_hotkey, model_commitment}` | `{batch_id, nonce, tasks:[{task_id, level, binary_digest, context}], …}` |
-| `POST /cybergym/artifact` | `{task_id}` | `{task_id, program}` — synthetic source; real builds are pulled by `binary_digest` |
+| `POST /cybergym/dispatch` | `{miner_hotkey, model_commitment}` | `{batch_id, nonce, tasks:[{task_id, level, binary_digest, artifact_digest?, context}], …}` |
+| `POST /cybergym/artifact` | `{task_id, batch_id}` | `{task_id, program}` for source tasks, or `{task_id, artifact_base64, artifact_digest, encoding}` for private repro tasks |
 | `POST /cybergym/submit` | a `SubmissionEnvelope` (below) | `{accepted, solved, attested, creditable, trainable, work_units, bonus, reason, …}` |
 
 Two more, anonymous and read-only — where you are in the epoch, without submitting
@@ -99,6 +99,7 @@ anything: `GET /v1/status` (participation, leaderboard, corpus growth) and
 ```json
 {"schema":"cathedral_cybergym_submission_envelope_v1",
  "batch_id":"…","task_id":"…","miner_hotkey":"5…",
+ "artifact_digest":"sha256:…",
  "poc_base64":"<base64 of the raw PoC input bytes>",
  "trace":{ "task_id":"…","poc_sha256":"sha256:…","model_id":"…",
            "steps":[{"step":1,"action":"read_file","thought":"…","output":"…"}],
@@ -106,8 +107,11 @@ anything: `GET /v1/status` (participation, leaderboard, corpus growth) and
  "attestation":"<base64 TDX token>"}
 ```
 
-The verifier fails closed: wrong `batch_id`, a task not in your batch, bad base64, an
-empty or >1 MiB PoC, or a `trace.poc_sha256` that doesn't match your PoC bytes are all
+When dispatch supplies `artifact_digest`, echo that exact value in the envelope and
+bind it in the TDX quote; a missing or changed digest is rejected before replay.
+The verifier fails closed: wrong `batch_id`, a task not in your batch, a substituted
+artifact digest, bad base64, an empty or >1 MiB PoC, or a `trace.poc_sha256` that
+doesn't match your PoC bytes are all
 rejected. The submission **is** the corpus row — no separate conversion.
 
 ---

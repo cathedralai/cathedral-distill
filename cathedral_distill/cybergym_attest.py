@@ -11,9 +11,11 @@ exact submission.
 The binding is `report_data`: the attesting enclave commits
 `sha256(domain || batch_id || task_id || poc_sha256 || trace_id || miner_hotkey ||
 model_commitment)` into the TDX quote's report_data, and the validator re-derives
-the same value and requires the match. An attestation therefore cannot be replayed
-for a different task or PoC, lifted from another miner's enclave, or paired with a
-different model than the commitment that selected its batch.
+the same value and requires the match. A private challenge additionally commits
+the digest of the exact miner artifact dispatched for its sealed batch. An
+attestation therefore cannot be replayed for a different task or PoC, lifted from
+another miner's enclave, paired with a different model than the commitment that
+selected its batch, or reused after artifact substitution.
 
 This reuses `cathedral_distill.attestation.verify_attestation` verbatim (trusted-root
 signature, measurement allow-list, report_data nonce binding, freshness — all
@@ -35,6 +37,7 @@ from cathedral_distill.attestation import (
 
 # Domain-separated so this binding can never collide with another report_data use.
 CYBERGYM_ATTEST_DOMAIN = b"cathedral-cybergym-attest-v2\x00"
+CYBERGYM_ARTIFACT_ATTEST_DOMAIN = b"cathedral-cybergym-attest-v3\x00"
 REQUIRED_TEE = "intel_tdx"
 
 
@@ -50,6 +53,7 @@ def submission_report_data(
     trace_id: str,
     miner_hotkey: str,
     model_commitment: str,
+    artifact_digest: str | None = None,
 ) -> str:
     """The report_data the attesting enclave MUST bind and the validator re-derives.
 
@@ -69,10 +73,19 @@ def submission_report_data(
                         ("model_commitment", model_commitment)):
         if not isinstance(value, str) or not value:
             raise CyberGymAttestError(f"{name} is required to bind the attestation")
-    body = "\x00".join(
-        (batch_id, task_id, poc_sha256, trace_id, miner_hotkey, model_commitment)
-    ).encode("utf-8")
-    return hashlib.sha256(CYBERGYM_ATTEST_DOMAIN + body).hexdigest()
+    fields = (batch_id, task_id, poc_sha256, trace_id, miner_hotkey, model_commitment)
+    if artifact_digest is None:
+        body = "\x00".join(fields).encode("utf-8")
+        return hashlib.sha256(CYBERGYM_ATTEST_DOMAIN + body).hexdigest()
+    if (
+        not isinstance(artifact_digest, str)
+        or len(artifact_digest) != 71
+        or not artifact_digest.startswith("sha256:")
+        or any(char not in "0123456789abcdef" for char in artifact_digest[7:])
+    ):
+        raise CyberGymAttestError("artifact_digest must be sha256:<64 lowercase hex>")
+    body = "\x00".join((*fields, artifact_digest)).encode("utf-8")
+    return hashlib.sha256(CYBERGYM_ARTIFACT_ATTEST_DOMAIN + body).hexdigest()
 
 
 def verify_submission_attestation(
@@ -84,6 +97,7 @@ def verify_submission_attestation(
     trace_id: str,
     miner_hotkey: str,
     model_commitment: str,
+    artifact_digest: str | None = None,
     policy: AttestationPolicy,
     now: datetime | None = None,
 ) -> Mapping[str, Any]:
@@ -97,7 +111,7 @@ def verify_submission_attestation(
     expected = submission_report_data(
         batch_id=batch_id, task_id=task_id, poc_sha256=poc_sha256,
         trace_id=trace_id, miner_hotkey=miner_hotkey,
-        model_commitment=model_commitment,
+        model_commitment=model_commitment, artifact_digest=artifact_digest,
     )
     try:
         doc = verify_attestation(token, expected_report_data=expected, policy=policy, now=now)
@@ -112,6 +126,7 @@ def verify_submission_attestation(
 
 __all__ = [
     "CYBERGYM_ATTEST_DOMAIN",
+    "CYBERGYM_ARTIFACT_ATTEST_DOMAIN",
     "REQUIRED_TEE",
     "CyberGymAttestError",
     "submission_report_data",

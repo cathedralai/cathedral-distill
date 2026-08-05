@@ -585,6 +585,11 @@ def run_epoch(
     to reconstruct those bytes. No development override may pay for that
     artifact-only computation; fresh tasks need a non-mechanically-recoverable
     delivery design before they can be admitted to a reward-bearing pool.
+
+    A task source may also define ``rewardable_task(task_id)``. This is the
+    private-repro admission seam: a manifest without a separately pinned miner
+    artifact is still useful for dry-run verification but must contribute zero
+    units. A source-policy exception fails closed for that task.
     """
     if gate_policy is None:
         if gates_required:
@@ -625,6 +630,7 @@ def run_epoch(
         batch = pool.draw(size=batch_size, nonce=nonce, as_of=as_of, cutoff=cutoff)
 
         submissions: list[PoCSubmission] = []
+        source_rewardable = getattr(pool, "rewardable_task", None)
         for task in batch.tasks:
             poc = miner.pocs.get(task.task_id)
             if poc is None:
@@ -635,6 +641,17 @@ def run_epoch(
                 # evidence of miner capability, so it is always excluded from the
                 # signed reward receipt.
                 continue
+            if callable(source_rewardable):
+                try:
+                    allowed = bool(source_rewardable(task.task_id))
+                except Exception:  # noqa: BLE001 - source admission must fail closed
+                    allowed = False
+                if not allowed:
+                    # A private source without a verified miner artifact cannot
+                    # prove the submitted PoC was found from an analyzable task.
+                    # Exclude it from the receipt rather than letting storage hide
+                    # units that the signed arithmetic still claims.
+                    continue
             if not credit_synthetic_tasks and is_synthetic_task(task.task_id):
                 # Graded, never rewarded: the synthetic artifact renders its own
                 # answer, so a solve here is not evidence of capability. Excluded

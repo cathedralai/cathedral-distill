@@ -1,10 +1,12 @@
-"""Run a CyberGym validator over the real corpus, on real hardware.
+"""Run the legacy CyberGym real-corpus dry-run server.
 
-The reference deployment: `ReproTaskSource` (draw real challenges) + the real
+The reference dry-run deployment: `ReproTaskSource` (draw real challenges) + the real
 `docker_reproduce_backend` (verify PoCs against the genuine vul/fix builds) behind
 the production `make_threaded_server`. This is the exact spine proven live on
 `cathedral-challenge-holder`, promoted out of an ops script into the package so it
 is version-controlled and configured from the environment rather than edited in place.
+It has no caller-identity verifier, so it deliberately refuses v2 private manifests;
+those require an authenticated transport adapter around ``CyberGymService``.
 
 Config (all via env):
   PORT                    listen port                       (default 8666)
@@ -37,6 +39,10 @@ from cathedral_distill.corpus_admission import require_admitted_private_manifest
 from cathedral_distill.cybergym_holdout import Holdout
 from cathedral_distill.cybergym_http import make_threaded_server
 from cathedral_distill.cybergym_protocol import CyberGymCorpusStore
+from cathedral_distill.cybergym_private_artifacts import (
+    PrivateChallengeArtifactStore,
+    PrivateReferencePoCStore,
+)
 from cathedral_distill.cybergym_repro import ReproTaskSource, available_tasks
 from cathedral_distill.cybergym_repro_manifest import (
     PrivateReproManifest,
@@ -82,9 +88,16 @@ def _manifest_from_environment() -> PrivateReproManifest:
         raise SystemExit(f"CYBERGYM_CORPUS_MANIFEST is invalid: {exc}") from None
 
 
-def build_service(manifest: PrivateReproManifest, *, private_key: Ed25519PrivateKey, corpus_db: str | None = None,
-                  score_db: str | None = None,
-                  validator_hotkey: str = "cathedral-repro-validator") -> CyberGymService:
+def build_service(
+    manifest: PrivateReproManifest,
+    *,
+    private_key: Ed25519PrivateKey,
+    challenge_artifacts: PrivateChallengeArtifactStore | None = None,
+    reference_pocs: PrivateReferencePoCStore | None = None,
+    corpus_db: str | None = None,
+    score_db: str | None = None,
+    validator_hotkey: str = "cathedral-repro-validator",
+) -> CyberGymService:
     """Wire a `CyberGymService` over the real source + Docker backend. Importable so
     the wiring is testable with an injected backend and per-run temp stores."""
     if corpus_db is None or score_db is None:
@@ -96,7 +109,11 @@ def build_service(manifest: PrivateReproManifest, *, private_key: Ed25519Private
         run_dir = tempfile.mkdtemp(prefix="cybergym-repro-")
         corpus_db = corpus_db or os.path.join(run_dir, "corpus.sqlite")
         score_db = score_db or os.path.join(run_dir, "scores.sqlite")
-    src = ReproTaskSource(manifest)
+    src = ReproTaskSource(
+        manifest,
+        challenge_artifacts=challenge_artifacts,
+        reference_pocs=reference_pocs,
+    )
     # Placeholder chain window; a live validator reads this from the subtensor and
     # only needs it to compose weights, not to run the dispatch/verify/score loop.
     chain = ChainContext(block=100, block_hash="0x" + "cd" * 32, network="finney", netuid=39,
@@ -124,6 +141,12 @@ def main() -> None:
     host = os.environ.get("CYBERGYM_HOST", "127.0.0.1")
     key, ephemeral = _signing_key()
     manifest = _manifest_from_environment()
+    if manifest.reward_ready:
+        raise SystemExit(
+            "v2 private manifests require an authenticated transport adapter; "
+            "this reference server has no caller-identity verifier and must not "
+            "serve private challenge artifacts"
+        )
     ids = available_tasks(manifest)
     if set(ids) != set(task.task_id for task in manifest.tasks):
         raise SystemExit(

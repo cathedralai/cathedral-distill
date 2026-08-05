@@ -10,9 +10,9 @@ challenges from the real corpus.
     It runs the PoC mounted at `/tmp/poc` in a networkless, non-root, capability-free
     read-only container and reports only target-specific crash evidence.
   * `ReproTaskSource` — DISTRIBUTE: a draw-capable source over a validator-held
-    per-epoch private manifest. Its batch evidence digest binds every selected task's
-    metadata and vulnerable/fixed image pair; `artifact()` returns None and
-    `context_provider` serves the level-gated description + sanitizer trace.
+    per-epoch private manifest. A v2 manifest binds a separate miner artifact and
+    validator-only reference PoC; authenticated artifact delivery exposes only the
+    former, never the vulnerable/fixed image pair.
 
 The subprocess runner is injected (`_run`) so the mapping + crash-detection logic is
 unit-tested without Docker; the live differential is proven on the challenge box.
@@ -28,6 +28,10 @@ from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
 
 from cathedral_distill.cybergym_batch import Batch, batch_id_for
+from cathedral_distill.cybergym_private_artifacts import (
+    PrivateChallengeArtifactStore,
+    PrivateReferencePoCStore,
+)
 from cathedral_distill.cybergym_repro_manifest import (
     PrivateReproManifest,
     ReproManifestError,
@@ -269,11 +273,21 @@ class ReproTaskSource:
 
     Same draw/context/artifact/backend interface as `SyntheticTaskSource`, so it
     drops straight into `CyberGymService`. Selection is deterministic in the batch
-    nonce (two validators draw the identical batch); the artifact is the image the
-    miner pulls (no inline source), so `artifact()` returns None.
+    nonce (two validators draw the identical batch). A legacy v1 manifest keeps
+    its verifier images validator-only and is therefore non-rewardable. A v2
+    manifest plus a verified ``PrivateChallengeArtifactStore`` delivers a distinct
+    bounded artifact to the miner without exposing either verifier image or the
+    reference PoC.
     """
 
-    def __init__(self, manifest: PrivateReproManifest, *, backend: Runner = subprocess.run) -> None:
+    def __init__(
+        self,
+        manifest: PrivateReproManifest,
+        *,
+        challenge_artifacts: PrivateChallengeArtifactStore | None = None,
+        reference_pocs: PrivateReferencePoCStore | None = None,
+        backend: Runner = subprocess.run,
+    ) -> None:
         if not isinstance(manifest, PrivateReproManifest):
             raise ReproError(
                 "ReproTaskSource requires a private digest-pinned repro manifest; "
@@ -281,6 +295,37 @@ class ReproTaskSource:
             )
         self.manifest = manifest
         self.ids = [task.task_id for task in manifest.tasks]
+        if challenge_artifacts is not None and not isinstance(
+            challenge_artifacts, PrivateChallengeArtifactStore
+        ):
+            raise ReproError(
+                "challenge artifacts must use PrivateChallengeArtifactStore"
+            )
+        if reference_pocs is not None and not isinstance(
+            reference_pocs, PrivateReferencePoCStore
+        ):
+            raise ReproError("reference PoCs must use PrivateReferencePoCStore")
+        if (
+            challenge_artifacts is not None
+            and challenge_artifacts.manifest_digest != manifest.digest
+        ):
+            raise ReproError(
+                "challenge artifact storage is bound to a different private manifest"
+            )
+        if reference_pocs is not None and reference_pocs.manifest_digest != manifest.digest:
+            raise ReproError(
+                "reference PoC storage is bound to a different private manifest"
+            )
+        if challenge_artifacts is not None and reference_pocs is not None:
+            for task in manifest.tasks:
+                reference = reference_pocs.reference_poc(task.task_id)
+                artifact = challenge_artifacts.artifact(task.task_id)
+                if reference and reference in artifact:
+                    raise ReproError(
+                        f"challenge artifact for {task.task_id!r} contains the reference PoC"
+                    )
+        self._challenge_artifacts = challenge_artifacts
+        self._reference_pocs = reference_pocs
         self._run = backend
 
     def draw(self, *, size: int, nonce: str, as_of=None, cutoff=None) -> Batch:
@@ -322,8 +367,37 @@ class ReproTaskSource:
         except ReproManifestError as exc:
             raise ReproError(str(exc)) from exc
 
-    def artifact(self, task_id: str):
-        return None  # the real repo is the image; the miner fetches it by binary_digest
+    def rewardable_task(self, task_id: str) -> bool:
+        """Whether this task has a verified, separately delivered artifact."""
+        self.manifest.task(task_id)
+        return (
+            self.manifest.reward_ready
+            and self._challenge_artifacts is not None
+            and self._reference_pocs is not None
+        )
+
+    def non_rewardable_reason(self, task_id: str) -> str | None:
+        """Explain why a legacy or incomplete private task cannot earn units."""
+        self.manifest.task(task_id)
+        if not self.manifest.reward_ready:
+            return "legacy_repro_manifest"
+        if self._challenge_artifacts is None:
+            return "missing_challenge_artifact_store"
+        if self._reference_pocs is None:
+            return "missing_validator_reference_poc_store"
+        return None
+
+    def artifact_digest(self, task_id: str) -> str | None:
+        """Pinned digest the miner must receive and bind in its attestation."""
+        task = self.manifest.task(task_id)
+        return task.challenge_artifact_digest if self.rewardable_task(task_id) else None
+
+    def artifact(self, task_id: str) -> bytes | None:
+        """Return only the verifier-approved miner artifact for this task."""
+        if not self.rewardable_task(task_id):
+            return None
+        assert self._challenge_artifacts is not None  # narrowed by rewardable_task
+        return self._challenge_artifacts.artifact(task_id)
 
     def backend(self, task_id: str, poc: bytes, mode: str) -> int:
         return docker_reproduce_backend(

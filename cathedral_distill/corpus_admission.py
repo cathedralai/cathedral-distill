@@ -19,8 +19,8 @@ that can pull the image can read the answer:
 
     docker run --rm --entrypoint cat n132/arvo:<id>-vul /tmp/poc
 
-Sanitising the copy WE hold does not help: the artifact route tells miners to
-fetch builds out of band, so they pull from the public registry, not from us. The
+Even a separately delivered miner artifact does not remedy a publicly pullable
+vulnerable image: anyone can download that image and read its embedded answer. The
 only defence available at admission is to refuse to *score* a task whose upstream
 image is publicly pullable, and treat it as training data instead -- which is what
 the recency split already intends, applied to image availability rather than to
@@ -54,6 +54,7 @@ from cathedral_distill.cybergym_repro import (
     _image_and_command,
     docker_reproduce_backend,
 )
+from cathedral_distill.cybergym_private_artifacts import PrivateReferencePoCStore
 from cathedral_distill.cybergym_repro_manifest import (
     PinnedReproTask,
     PrivateReproManifest,
@@ -367,16 +368,29 @@ def admit(task_id: str, *, docker: str = "docker",
 def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "docker",
                            _run: Runner = subprocess.run,
                            _backend: Backend = docker_reproduce_backend,
-                           controls: Sequence[bytes] = CONTROL_INPUTS) -> tuple[Admission, ...]:
+                           controls: Sequence[bytes] = CONTROL_INPUTS,
+                           reference_pocs: PrivateReferencePoCStore | None = None,
+                           ) -> tuple[Admission, ...]:
     """Run admission over the validator's exact, digest-pinned manifest images.
 
     This is the production entrypoint.  Unlike :func:`admit`, its Docker
     differential receives the same ``PrivateReproManifest`` that
     ``ReproTaskSource`` will later dispatch, so a tag-derived probe cannot approve
-    different bytes from the ones the verifier scores.
+    different bytes from the ones the verifier scores. A v2 reward manifest
+    resolves its reference PoCs from validator-controlled storage, never by
+    reading a file from a miner-retrievable verifier image.
     """
     if not isinstance(manifest, PrivateReproManifest):
         raise ReproManifestError("manifest admission requires a PrivateReproManifest")
+    if manifest.reward_ready:
+        if not isinstance(reference_pocs, PrivateReferencePoCStore):
+            raise ReproManifestError(
+                "reward manifest admission requires validator-held reference PoC storage"
+            )
+        if reference_pocs.manifest_digest != manifest.digest:
+            raise ReproManifestError(
+                "reference PoC storage is bound to a different private manifest"
+            )
 
     admissions: list[Admission] = []
     for task in manifest.tasks:
@@ -388,8 +402,12 @@ def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "doc
 
         admissions.append(_admit(
             task.task_id,
-            reference=lambda task=task: reference_poc_image(
-                task.vulnerable_image, docker=docker, _run=_run),
+            reference=(
+                (lambda task=task: reference_pocs.reference_poc(task.task_id))
+                if manifest.reward_ready else
+                (lambda task=task: reference_poc_image(
+                    task.vulnerable_image, docker=docker, _run=_run))
+            ),
             public_answer=lambda poc, task=task: probe_public_answer_image(
                 task.vulnerable_image, poc=poc, docker=docker, _run=_run),
             backend=backend,

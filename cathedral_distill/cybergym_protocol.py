@@ -75,10 +75,21 @@ class DispatchedTask:
     level: int
     binary_digest: str
     context: Mapping[str, str]  # only the level-appropriate fields, revealed
+    # A private source supplies this separately from ``binary_digest``: the latter
+    # commits the validator-only vul/fix pair, while this commits exactly the
+    # bounded artifact an authenticated miner may retrieve.
+    artifact_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"task_id": self.task_id, "level": self.level,
-                "binary_digest": self.binary_digest, "context": dict(self.context)}
+        document = {
+            "task_id": self.task_id,
+            "level": self.level,
+            "binary_digest": self.binary_digest,
+            "context": dict(self.context),
+        }
+        if self.artifact_digest is not None:
+            document["artifact_digest"] = self.artifact_digest
+        return document
 
 
 @dataclass(frozen=True)
@@ -126,6 +137,7 @@ def dispatch(
     as_of,
     batch_size: int,
     context_provider: Callable[[str], Mapping[str, str]] | None = None,
+    artifact_digest_provider: Callable[[str], str | None] | None = None,
 ) -> DispatchMessage:
     """Draw this miner's sealed batch and serve only its level-appropriate context.
 
@@ -158,6 +170,10 @@ def dispatch(
                 level=int(task.level),
                 binary_digest=task.binary_digest,
                 context=revealed,
+                artifact_digest=(
+                    artifact_digest_provider(task.task_id)
+                    if artifact_digest_provider is not None else None
+                ),
             )
     )
     return DispatchMessage(
@@ -195,6 +211,10 @@ class SubmissionEnvelope:
     poc_base64: str
     trace: Mapping[str, Any]  # a cathedral_trace_submission_v1 document
     attestation: str | None = None  # base64 cathedral_cc_attestation_v1 token
+    # Required when dispatch committed a private miner artifact. It lets both the
+    # validator and the TDX quote reject a submission produced from substituted
+    # challenge bytes.
+    artifact_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         doc: dict[str, Any] = {
@@ -204,6 +224,8 @@ class SubmissionEnvelope:
         }
         if self.attestation is not None:
             doc["attestation"] = self.attestation
+        if self.artifact_digest is not None:
+            doc["artifact_digest"] = self.artifact_digest
         return doc
 
     @classmethod
@@ -222,9 +244,13 @@ class SubmissionEnvelope:
         attestation = doc.get("attestation")
         if attestation is not None and not isinstance(attestation, str):
             raise ProtocolError("submission attestation must be a base64 string")
+        artifact_digest = doc.get("artifact_digest")
+        if artifact_digest is not None and not isinstance(artifact_digest, str):
+            raise ProtocolError("submission artifact_digest must be a string")
         return cls(batch_id=str(doc["batch_id"]), task_id=str(doc["task_id"]),
                    miner_hotkey=str(doc["miner_hotkey"]), poc_base64=str(doc["poc_base64"]),
-                   trace=doc["trace"], attestation=attestation)
+                   trace=doc["trace"], attestation=attestation,
+                   artifact_digest=artifact_digest)
 
 
 def _trace_from_dict(doc: Mapping[str, Any]) -> TraceSubmission:
@@ -309,6 +335,13 @@ def process_submission(
     dt = dispatch_msg.task(envelope.task_id)
     if dt is None:
         raise ProtocolError("submission is for a task not in this batch")
+    if dt.artifact_digest is not None:
+        if envelope.artifact_digest != dt.artifact_digest:
+            raise ProtocolError(
+                "submission artifact_digest does not match the dispatched artifact"
+            )
+    elif envelope.artifact_digest is not None:
+        raise ProtocolError("submission supplies an artifact_digest for a task without one")
 
     try:
         poc_bytes = base64.b64decode(envelope.poc_base64, validate=True)
@@ -344,6 +377,7 @@ def process_submission(
                     poc_sha256=digest, trace_id=submission.trace_id(),
                     miner_hotkey=envelope.miner_hotkey,
                     model_commitment=dispatch_msg.model_commitment,
+                    artifact_digest=dt.artifact_digest,
                     policy=attestation_policy,
                     now=now,
                 )
