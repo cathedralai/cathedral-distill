@@ -8,8 +8,12 @@ import json
 import threading
 import urllib.error
 import urllib.request
+import warnings
+
+import pytest
 
 from cathedral_distill import cybergym_private_v2_server as private_server
+from cathedral_distill.cybergym_attest import CathedralReceiptPolicy
 from cathedral_distill.cybergym_http import make_threaded_server
 
 TASK = "oss-fuzz:10001"
@@ -200,3 +204,57 @@ def test_private_v2_server_requires_a_restart_stable_as_of(tmp_path, monkeypatch
         assert "timezone" in str(exc)
     else:  # pragma: no cover - a naive timestamp is ambiguous across hosts
         raise AssertionError("private-v2 server accepted a naive as_of")
+
+
+# --------------------------------------------------------------------------- #
+# Receipt enforcement wiring (config-driven, OFF by default)
+# --------------------------------------------------------------------------- #
+
+APPROVED_WORKLOAD = "af" * 32  # a 64-hex approved-solver workload_sha256
+
+
+def test_receipt_policy_from_environment_is_off_by_default(monkeypatch):
+    monkeypatch.delenv("CYBERGYM_APPROVED_WORKLOAD_SHA256", raising=False)
+    assert private_server._receipt_policy_from_environment() is None
+
+
+def test_receipt_policy_from_environment_reads_the_approved_workload(monkeypatch):
+    monkeypatch.setenv("CYBERGYM_APPROVED_WORKLOAD_SHA256", APPROVED_WORKLOAD)
+    policy = private_server._receipt_policy_from_environment()
+    assert isinstance(policy, CathedralReceiptPolicy)
+    assert policy.expected_workload_sha256 == APPROVED_WORKLOAD
+
+
+def test_a_malformed_approved_workload_fails_closed(monkeypatch):
+    monkeypatch.setenv("CYBERGYM_APPROVED_WORKLOAD_SHA256", "not-a-sha256")
+    with pytest.raises(SystemExit, match="64-hex sha256"):
+        private_server._receipt_policy_from_environment()
+
+
+def test_the_approved_workload_enforces_the_posture_and_silences_the_warning(
+    tmp_path, monkeypatch
+):
+    _configure_private_v2(tmp_path, monkeypatch)
+    _stub_admission(monkeypatch)
+    monkeypatch.setenv("CYBERGYM_APPROVED_WORKLOAD_SHA256", APPROVED_WORKLOAD)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        service = private_server.build_service_from_environment()
+    # enforced posture, the right approved workload pinned, and NO "never in
+    # production" warning (a CathedralReceiptPolicy IS attestation enforcement).
+    assert service._scores.attestation_posture(21)["enforced"] is True
+    assert service._cathedral_receipt_policy is not None
+    assert service._cathedral_receipt_policy.expected_workload_sha256 == APPROVED_WORKLOAD
+    assert not [w for w in caught if "WITHOUT Intel-TDX" in str(w.message)]
+
+
+def test_the_default_posture_is_unenforced_and_warns(tmp_path, monkeypatch):
+    _configure_private_v2(tmp_path, monkeypatch)
+    _stub_admission(monkeypatch)
+    monkeypatch.delenv("CYBERGYM_APPROVED_WORKLOAD_SHA256", raising=False)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        service = private_server.build_service_from_environment()
+    assert service._cathedral_receipt_policy is None
+    assert service._scores.attestation_posture(21)["enforced"] is False
+    assert [w for w in caught if "WITHOUT Intel-TDX" in str(w.message)]
