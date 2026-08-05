@@ -495,14 +495,17 @@ def _attest_v1_receipt(task_id, poc, trace_id, **over):
     return receipt
 
 
-def _enclave_receipt_and_result(task_id, poc, trace_id, *, verdict="pass", workload="wl-approved"):
+def _enclave_receipt_and_result(task_id, poc, trace_id, *, miner_hotkey, nonce,
+                                verdict="pass", workload="wl-approved"):
     key = Ed25519PrivateKey.generate()
     pd = poc_digest(poc)
     sig = key.sign(enclave_commitment_bytes(
-        task_id=task_id, poc_sha256=pd, trace_id=trace_id, verdict=verdict))
+        task_id=task_id, poc_sha256=pd, trace_id=trace_id,
+        miner_hotkey=miner_hotkey, nonce=nonce, verdict=verdict))
     result = enclave_result_bytes(
         enclave_pubkey_b64=base64.b64encode(key.public_key().public_bytes_raw()).decode(),
-        task_id=task_id, poc_sha256=pd, trace_id=trace_id, verdict=verdict,
+        task_id=task_id, poc_sha256=pd, trace_id=trace_id,
+        miner_hotkey=miner_hotkey, nonce=nonce, verdict=verdict,
         signature_b64=base64.b64encode(sig).decode())
     receipt = {
         "receipt_id": "r-enc", "receipt_status": "ready",
@@ -536,7 +539,7 @@ def test_persistent_enclave_receipt_reaches_the_reward_path():
     source, msg, task_id, poc = _fixture()
     digest = "sha256:" + hashlib.sha256(poc).hexdigest()
     tid = _trace_id_of(task_id, digest)
-    receipt, result = _enclave_receipt_and_result(task_id, poc, tid, workload="wl-approved")
+    receipt, result = _enclave_receipt_and_result(task_id, poc, tid, miner_hotkey=MINER, nonce=msg.nonce, workload="wl-approved")
     att = _receipt_attestation("persistent_enclave", receipt, result)
     env = _envelope(msg.batch_id, task_id, poc, attestation=att)
     policy = CathedralReceiptPolicy(expected_workload_sha256="wl-approved")
@@ -561,7 +564,7 @@ def test_a_persistent_enclave_receipt_needs_the_approved_workload_pin():
     source, msg, task_id, poc = _fixture()
     digest = "sha256:" + hashlib.sha256(poc).hexdigest()
     tid = _trace_id_of(task_id, digest)
-    receipt, result = _enclave_receipt_and_result(task_id, poc, tid, workload="wl-attacker")
+    receipt, result = _enclave_receipt_and_result(task_id, poc, tid, miner_hotkey=MINER, nonce=msg.nonce, workload="wl-attacker")
     att = _receipt_attestation("persistent_enclave", receipt, result)
     env = _envelope(msg.batch_id, task_id, poc, attestation=att)
     # policy pins a DIFFERENT approved workload -> the attacker workload is refused
@@ -592,5 +595,5 @@ def test_verify_submission_receipt_rejects_an_unknown_profile():
         verify_submission_receipt(
             {"profile": "nope", "receipt": receipt}, task_id="arvo:1",
             poc_sha256=poc_digest(b"poc"), trace_id="sha256:" + "cd" * 32,
-            policy=CathedralReceiptPolicy(), now=NOW)
+            miner_hotkey=MINER, nonce="n", policy=CathedralReceiptPolicy(), now=NOW)
     assert "unknown submission attestation profile" in str(exc.value)

@@ -25,7 +25,15 @@ TASK = "arvo:10001"
 POC = b"CGV2-E2E:MANGO/17\n"
 TRACE = "sha256:" + "cd" * 32
 WORKLOAD = "649e90742fe3bdb4f523b57429a51d0f29119011ddae5f86070b191a437519fa"
+MINER = "5SolverMiner"
+NONCE = "cgnonce-sha256:" + "ef" * 32
 NOW = datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
+
+
+def _solve(**kw):
+    kw.setdefault("miner_hotkey", MINER)
+    kw.setdefault("nonce", NONCE)
+    return solve(**kw)
 
 
 def _backend(vul_code: int, fix_code: int):
@@ -53,13 +61,16 @@ def _receipt(envelope: bytes, *, workload: str = WORKLOAD, **overrides):
     return receipt
 
 
-def _verify(envelope, *, task_id=TASK, poc=POC, workload=WORKLOAD, **kw):
+def _verify(envelope, *, task_id=TASK, poc=POC, workload=WORKLOAD,
+            miner_hotkey=MINER, nonce=NONCE, **kw):
     kw.setdefault("now", NOW)
     return verify_persistent_enclave_attestation(
         _receipt(envelope, workload=workload),
         task_id=task_id,
         poc_sha256=poc_digest(poc),
         trace_id=TRACE,
+        miner_hotkey=miner_hotkey,
+        nonce=nonce,
         result_bytes=envelope,
         expected_workload_sha256=workload,
         **kw,
@@ -67,7 +78,7 @@ def _verify(envelope, *, task_id=TASK, poc=POC, workload=WORKLOAD, **kw):
 
 
 def test_a_solved_differential_round_trips_through_the_validator():
-    envelope = solve(task_id=TASK, poc_bytes=POC, trace_id=TRACE, backend=_backend(134, 0))
+    envelope = _solve(task_id=TASK, poc_bytes=POC, trace_id=TRACE, backend=_backend(134, 0))
     a = _verify(envelope, require_verdict=True)
     assert a.attested and a.result_bound and a.workload_bound and a.signature_bound
     assert a.verdict == VERDICT_PASS
@@ -75,23 +86,25 @@ def test_a_solved_differential_round_trips_through_the_validator():
 
 def test_the_verdict_is_derived_from_the_differential_not_asserted():
     # vuln build did not crash -> not solved -> a signed FAIL, still a valid receipt
-    weak = solve(task_id=TASK, poc_bytes=b"not-a-crash", trace_id=TRACE, backend=_backend(0, 0))
+    weak = _solve(task_id=TASK, poc_bytes=b"not-a-crash", trace_id=TRACE, backend=_backend(0, 0))
     a = _verify(weak, poc=b"not-a-crash", require_verdict=True)
     assert a.attested and a.verdict == VERDICT_FAIL
     # the patched build also crashed -> the differential proves nothing -> FAIL
-    both = solve(task_id=TASK, poc_bytes=POC, trace_id=TRACE, backend=_backend(134, 134))
+    both = _solve(task_id=TASK, poc_bytes=POC, trace_id=TRACE, backend=_backend(134, 134))
     a = _verify(both, require_verdict=True)
     assert a.attested and a.verdict == VERDICT_FAIL
 
 
 def test_a_solve_for_one_task_cannot_be_replayed_against_another():
-    envelope = solve(task_id=TASK, poc_bytes=POC, trace_id=TRACE, backend=_backend(134, 0))
+    envelope = _solve(task_id=TASK, poc_bytes=POC, trace_id=TRACE, backend=_backend(134, 0))
     # the validator checks the receipt against a DIFFERENT task than the solve bound
     a = verify_persistent_enclave_attestation(
         _receipt(envelope),
         task_id="arvo:999",
         poc_sha256=poc_digest(POC),
         trace_id=TRACE,
+        miner_hotkey=MINER,
+        nonce=NONCE,
         result_bytes=envelope,
         expected_workload_sha256=WORKLOAD,
         now=NOW,
@@ -102,14 +115,14 @@ def test_a_solve_for_one_task_cannot_be_replayed_against_another():
 def test_the_envelope_is_byte_stable_for_a_fixed_key():
     key = Ed25519PrivateKey.generate()
     kw = dict(task_id=TASK, poc_bytes=POC, trace_id=TRACE, backend=_backend(134, 0))
-    assert solve(signing_key=key, **kw) == solve(signing_key=key, **kw)
+    assert _solve(signing_key=key, **kw) == _solve(signing_key=key, **kw)
 
 
 def test_a_fresh_key_is_generated_when_none_is_supplied():
     kw = dict(task_id=TASK, poc_bytes=POC, trace_id=TRACE, backend=_backend(134, 0))
     # two runs without a supplied key -> different enclave pubkeys, both accepted
-    e1 = solve(**kw)
-    e2 = solve(**kw)
+    e1 = _solve(**kw)
+    e2 = _solve(**kw)
     assert e1 != e2
     assert _verify(e1).attested and _verify(e2).attested
     k1 = _verify(e1).enclave_key_b64
@@ -117,3 +130,13 @@ def test_a_fresh_key_is_generated_when_none_is_supplied():
     assert k1 and k2 and k1 != k2
     # and each pubkey is a real 32-byte Ed25519 key
     assert len(base64.b64decode(k1)) == 32
+
+
+def test_a_solve_for_one_miner_cannot_be_replayed_by_another():
+    # The hole this binding closes (self-review of #104): miner A's genuine result,
+    # verified against a DIFFERENT miner's hotkey, fails — the enclave signed over
+    # A's hotkey, so B cannot resubmit A's receipt under its own batch and earn.
+    envelope = _solve(task_id=TASK, poc_bytes=POC, trace_id=TRACE, backend=_backend(134, 0))
+    assert _verify(envelope).attested                       # the rightful miner
+    assert not _verify(envelope, miner_hotkey="5OtherMiner").attested
+    assert not _verify(envelope, nonce="cgnonce-sha256:" + "00" * 32).attested

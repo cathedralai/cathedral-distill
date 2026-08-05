@@ -235,19 +235,22 @@ def verify_submission_receipt(
     task_id: str,
     poc_sha256: str,
     trace_id: str,
+    miner_hotkey: str,
+    nonce: str,
     policy: CathedralReceiptPolicy,
     now: datetime | None = None,
 ) -> Mapping[str, Any]:
     """Verify a submission that attests with a real Cathedral receipt. Fails closed.
 
-    The receipt binds the SOLVE — `(task, poc, trace[, verdict])` — inside genuine
-    Intel TDX. The submission's `(batch, miner, model_commitment)` binding is NOT in
-    the receipt; it is enforced upstream by the authenticated dispatch (a sealed
-    batch bound to the caller's hotkey, with its model commitment pinned on first
-    dispatch). Attestation proves enclave execution of the solve; the dispatch proves
-    who owns it. (The `cathedral_cc_attestation_v1` path additionally binds miner and
-    model *into the quote*; it is unchanged and stays available for that stronger
-    shape.)
+    The `persistent_enclave` profile binds the SOLVE **and** the dispatched
+    `miner_hotkey` and batch `nonce` into the enclave-signed commitment, so a receipt
+    is valid only for the exact miner and dispatch that produced it — another miner
+    dispatched the same task cannot resubmit it.
+
+    The `attest.v1` profile's `result.txt` commitment is `(task, poc, trace)` only and
+    cannot grow a miner field without changing the Cathedral-side result format, so it
+    does NOT bind the miner here; treat it as dev/synthetic, not a live reward path,
+    until its miner binding comes through `report_data`.
 
     Returns a small verdict mapping on success, or raises `CyberGymAttestError`.
     """
@@ -274,7 +277,7 @@ def verify_submission_receipt(
             raise CyberGymAttestError(f"enclave result_b64 is not valid base64: {exc}") from exc
         result = verify_persistent_enclave_attestation(
             receipt, task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id,
-            result_bytes=result_bytes,
+            miner_hotkey=miner_hotkey, nonce=nonce, result_bytes=result_bytes,
             expected_workload_sha256=policy.expected_workload_sha256,
             now=now, max_age_seconds=policy.max_age_seconds,
             receipt_verifier=policy.receipt_verifier,

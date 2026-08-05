@@ -403,6 +403,8 @@ def process_submission(
                         json.loads(token.decode("utf-8")),
                         task_id=envelope.task_id, poc_sha256=digest,
                         trace_id=submission.trace_id(),
+                        miner_hotkey=envelope.miner_hotkey,
+                        nonce=dispatch_msg.nonce,
                         policy=cathedral_receipt_policy, now=now,
                     )
                 elif attestation_policy is not None:
