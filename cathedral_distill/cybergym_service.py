@@ -135,13 +135,19 @@ class CyberGymService:
                     "attestation_policy=..., or attestation_required=False for the "
                     "hardware-free dev/test path (which credits UNATTESTED solves)."
                 )
-            import warnings
-            warnings.warn(
-                "CyberGymService running WITHOUT Intel-TDX attestation enforcement "
-                "(attestation_required=False): every solved PoC is credited with no "
-                "attestation. Dev/test only — never in production.",
-                stacklevel=2,
-            )
+            # A CathedralReceiptPolicy IS attestation enforcement (a real Cathedral
+            # TDX receipt is required; the posture reads `enforced=True`), so only warn
+            # when NEITHER policy is configured — otherwise the "never in production"
+            # warning fires on exactly the receipt-enforced production path.
+            if cathedral_receipt_policy is None:
+                import warnings
+                warnings.warn(
+                    "CyberGymService running WITHOUT Intel-TDX attestation enforcement "
+                    "(attestation_required=False, no cathedral_receipt_policy): every "
+                    "solved PoC is credited with no attestation. Dev/test only — never "
+                    "in production.",
+                    stacklevel=2,
+                )
         # Fail closed on synthetic credit. A synthetic task's answer is a pure,
         # deterministic function of the batch nonce, and the nonce is derivable from
         # public chain state after the block finalizes: `generate_bug(nonce, i)`
