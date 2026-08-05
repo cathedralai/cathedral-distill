@@ -244,6 +244,11 @@ tested:
   plus a non-mechanically-recoverable challenge delivery path are configured.
 - **[TDX attestation](docs/TDX_ATTESTATION.md)**: the two profiles, what each
   binds, and the production path.
+- **[CyberGym v3 cutover runbook](docs/CYBERGYM_V3_CUTOVER_RUNBOOK.md)**: the
+  sequenced operator procedure for rolling SN39's live allocation from 90/10 to
+  70/30/0. Preconditions as runnable checks, the no-overlap dark gap and why the
+  flip lands inside the chain's weight cooldown, the exact rollback, and the
+  reason not to flip before the sealed corpus is live.
 
 ## Launch and positioning
 
