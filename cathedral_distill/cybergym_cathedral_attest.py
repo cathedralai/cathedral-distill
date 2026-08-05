@@ -37,12 +37,31 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable, Mapping
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 COMMITMENT_SCHEMA = "cathedral_cybergym_tdx_commitment_v1"
+# The persistent-enclave path (#94/#95): the enclave GENERATES its own signing
+# keypair, the boot quote binds that public key, and the enclave signs this
+# commitment over (task, poc, trace[, verdict]). Distinct schema so an `attest.v1`
+# result.txt commitment can never be replayed as an enclave-signed one.
+ENCLAVE_COMMITMENT_SCHEMA = "cathedral_cybergym_tdx_enclave_commitment_v1"
+# The canonical bytes the enclave writes as its *result*. A live Cathedral
+# `attest.v1` receipt (schema `cathedral_customer_receipt_v1`) binds the workload
+# and its result as `workload_sha256` / `result_sha256` under Cathedral's Ed25519
+# signature, verified against Intel's DCAP chain — it does NOT expose a
+# `report_data[0:32] = nonce||pubkey` field. So the enclave key rides in the
+# result (bound by `result_sha256`), exactly the way `attest.v1` already binds its
+# `result.txt` commitment. Confirmed on real hardware 2026-08-05 (workers
+# c776ca65 free / 19ed3639 paid: intel_verified + report_data_match, distinct
+# workload/result digests per command).
+ENCLAVE_RESULT_SCHEMA = "cathedral_cybergym_enclave_result_v1"
 REQUIRED_TEE = "intel_tdx"
 REQUIRED_HARDWARE = "tdx_cpu"
 RESULT_ARTIFACT = "result.txt"
@@ -65,6 +84,54 @@ def commitment_sha256(*, task_id: str, poc_sha256: str, trace_id: str) -> str:
         task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id)).hexdigest()
 
 
+def enclave_commitment_bytes(
+    *, task_id: str, poc_sha256: str, trace_id: str, miner_hotkey: str, nonce: str,
+    verdict: str | None = None,
+) -> bytes:
+    """The canonical bytes the persistent enclave signs with its own key.
+
+    Binds `(task, poc, trace)`, the **miner** it was dispatched to, and the batch
+    **nonce** — so a receipt is valid only for the exact miner and dispatch that
+    produced it. Without the miner and nonce, a second miner dispatched the same
+    task could resubmit another miner's `(poc, trace, receipt)` under its own batch
+    and earn the credit (the receipt binds only the solve, not who ran it). When the
+    differential runs in-enclave (#95) the signed `verdict` is bound too, so an
+    external party confirms PASS/FAIL from the signature alone. `verdict` is omitted
+    from the body (not sent as null) when absent, so the boot-only #94 shape and the
+    verdict-carrying #95 shape are distinct signed messages.
+    """
+    body: dict[str, Any] = {"schema": ENCLAVE_COMMITMENT_SCHEMA, "task_id": task_id,
+                            "poc_sha256": poc_sha256, "trace_id": trace_id,
+                            "miner_hotkey": miner_hotkey, "nonce": nonce}
+    if verdict is not None:
+        body["verdict"] = verdict
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def enclave_result_bytes(
+    *, enclave_pubkey_b64: str, task_id: str, poc_sha256: str, trace_id: str,
+    miner_hotkey: str, nonce: str, verdict: str | None, signature_b64: str,
+) -> bytes:
+    """The exact result an approved enclave workload writes, whose sha256 the
+    Cathedral receipt binds as `result_sha256`.
+
+    It carries the enclave-generated public key, the
+    `(task, poc, trace, miner, nonce[, verdict])` commitment, and the enclave's
+    signature over that commitment. Because the workload that produced it is pinned
+    by `workload_sha256` to the approved solver and the result is bound by
+    `result_sha256`, this envelope could only have been produced by the genuine
+    solver inside the attested enclave — for this miner and this dispatch.
+    """
+    commitment: dict[str, Any] = {"schema": ENCLAVE_COMMITMENT_SCHEMA, "task_id": task_id,
+                                  "poc_sha256": poc_sha256, "trace_id": trace_id,
+                                  "miner_hotkey": miner_hotkey, "nonce": nonce}
+    if verdict is not None:
+        commitment["verdict"] = verdict
+    body = {"schema": ENCLAVE_RESULT_SCHEMA, "enclave_pubkey_b64": enclave_pubkey_b64,
+            "commitment": commitment, "signature_b64": signature_b64}
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
 def tee_kind(receipt: Mapping[str, Any]) -> str:
     """Map Cathedral's quote `kind` (e.g. 'tdx-1.5', 'sev-snp-...') to our canonical
     tee name. An Intel TDX quote → 'intel_tdx'; anything else is refused. Reads the
@@ -76,6 +143,18 @@ def tee_kind(receipt: Mapping[str, Any]) -> str:
     if kind.startswith("sev"):
         return "amd_sev_snp"
     return kind or "unknown"
+
+
+def _receipt_tee(receipt: Mapping[str, Any]) -> str:
+    """Canonical TEE for a live `cathedral_customer_receipt_v1`, which names it as
+    `cpu_tee` (e.g. `intel_tdx`) / `execution_class` (`tdx_cpu`), falling back to the
+    quote-shaped `kind` the other verifiers read."""
+    cpu = str(receipt.get("cpu_tee") or "").lower()
+    if cpu.startswith("intel_tdx") or str(receipt.get("execution_class") or "") == "tdx_cpu":
+        return REQUIRED_TEE
+    if cpu.startswith("amd_sev"):
+        return "amd_sev_snp"
+    return tee_kind(receipt)
 
 
 @dataclass(frozen=True)
@@ -315,6 +394,172 @@ def verify_boot_attestation(
                            rid, True)
 
 
+# receipt_verifier(receipt) -> bool. The seam for the full Cathedral customer
+# receipt signature verification (cathedral-compute's verify_customer_receipt),
+# injected so this module needs no cross-repo import. Omitted -> trusted-issuer.
+ReceiptVerifier = Callable[[Mapping[str, Any]], bool]
+
+
+@dataclass(frozen=True)
+class EnclaveAttestation:
+    """A persistent-enclave (#94) verdict. Result-bound: the approved solver
+    workload ran the solve inside the attested enclave and its `(task, poc,
+    trace[, verdict])` commitment is bound by the receipt's `result_sha256`."""
+    attested: bool
+    tee: str
+    reason: str
+    receipt_id: str = ""
+    result_bound: bool = False     # result_sha256 binds THIS (task, poc, trace)
+    workload_bound: bool = False   # workload_sha256 is the approved solver
+    signature_bound: bool = False  # the enclave signed the commitment (trustless layer)
+    verdict: str | None = None     # #95: the in-enclave PASS/FAIL, inside the result
+    enclave_key_b64: str = ""
+    trustless: bool = False
+
+
+def verify_persistent_enclave_attestation(
+    receipt: Mapping[str, Any], *, task_id: str, poc_sha256: str, trace_id: str,
+    miner_hotkey: str, nonce: str,
+    result_bytes: bytes, expected_workload_sha256: str,
+    require_verdict: bool = False, now: datetime | None = None,
+    max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
+    receipt_verifier: ReceiptVerifier | None = None,
+) -> EnclaveAttestation:
+    """Verify a persistent-enclave real-corpus solve (`docs/TDX_ATTESTATION.md`
+    §*The production real-corpus path*, #94/#95).
+
+    It combines what the two simpler profiles each have half of: a `custom.v1`
+    worker runs the real ~4 GB arvo image, `attest.v1` binds the solve. The approved
+    solver **workload** (pinned by ``expected_workload_sha256``) generates a keypair
+    inside the enclave, runs the reproduction, and writes an ``enclave_result_bytes``
+    envelope — the enclave key, the `(task, poc, trace[, verdict])` commitment, and a
+    signature over it — as its **result**. A live Cathedral ``attest.v1`` receipt
+    (``cathedral_customer_receipt_v1``) then binds ``workload_sha256`` and
+    ``result_sha256`` under Cathedral's signature, verified against Intel's DCAP
+    chain.
+
+    Three bindings make a looked-up PoC unusable:
+      * ``workload_sha256 == expected_workload_sha256`` — only the approved solver
+        ran, so a miner cannot substitute a workload that echoes a looked-up answer;
+      * ``sha256(result_bytes) == result_sha256`` — the attested result IS this
+        envelope, so its committed `(task, poc, trace, verdict)` cannot be swapped;
+      * the enclave signature over the commitment (the trustless-external layer for
+        #95: an outside party confirms the verdict from the signature alone).
+
+    Receipt trust is the same seam shape as ``verify_cathedral_attestation``:
+    trusted-issuer by default (``intel_verified`` + ``report_data_match`` +
+    ``execution_binding_verified``), or independent via ``receipt_verifier``
+    (cathedral-compute's ``verify_customer_receipt``). Fails closed to
+    ``attested=False``; freshness bounds match the sibling verifiers.
+    """
+    rid = str(receipt.get("receipt_id") or receipt.get("worker_id") or "")
+
+    def no(reason: str) -> EnclaveAttestation:
+        return EnclaveAttestation(False, _receipt_tee(receipt), reason, rid)
+
+    if str(receipt.get("receipt_status") or receipt.get("status")) != "ready":
+        return no("enclave receipt not ready")
+    tee = _receipt_tee(receipt)
+    if tee != REQUIRED_TEE:
+        return no(f"CyberGym requires an Intel TDX worker, got tee={tee!r}")
+
+    # Freshness on the receipt's issue time, same bounds as the other verifiers.
+    issued = _iso(receipt.get("issued_at") or receipt.get("started_at"))
+    ref = now or datetime.now(UTC)
+    if issued is None:
+        return no("missing or invalid enclave attestation timestamp")
+    age = (ref - issued).total_seconds()
+    if age > max_age_seconds:
+        return no(f"enclave attestation is stale ({int(age)}s > {max_age_seconds}s)")
+    if age < -300:
+        return no("enclave attestation is from the future")
+
+    # (1) Workload allowlist: only the approved solver may earn. Without this a
+    # miner could run a workload that just prints a looked-up answer and self-signs.
+    if not expected_workload_sha256:
+        return no("no expected_workload_sha256: an unpinned workload could echo a "
+                  "looked-up answer and must never credit a miner")
+    workload_sha = str(receipt.get("workload_sha256", ""))
+    if not workload_sha or not hmac.compare_digest(workload_sha, str(expected_workload_sha256)):
+        return no("receipt workload_sha256 is not the approved solver workload")
+
+    # (2) Result binding: the attested result IS this envelope, byte-for-byte.
+    result_sha = str(receipt.get("result_sha256", ""))
+    got = hashlib.sha256(result_bytes).hexdigest()
+    if not result_sha or got != result_sha:
+        return no("submitted result_bytes do not match the attested result_sha256 "
+                  f"({got[:16]}… != {result_sha[:16]}…)")
+
+    # (3) Receipt trust: trusted-issuer by default, or independently via the seam.
+    trustless = False
+    if receipt_verifier is not None:
+        try:
+            ok = bool(receipt_verifier(receipt))
+        except Exception as exc:  # a verifier that throws is a refusal, never a pass
+            return no(f"receipt verifier failed: {exc}")
+        if not ok:
+            return no("customer receipt failed independent verification")
+        trustless = True
+    else:
+        if receipt.get("intel_verified") is not True:
+            return no("Cathedral did not report intel_verified")
+        if receipt.get("report_data_match") is not True:
+            return no("Cathedral report_data_match is not true")
+        if receipt.get("execution_binding_verified") is not True:
+            return no("Cathedral execution_binding_verified is not true")
+
+    # The result envelope: parse, confirm it commits to THIS solve, and check the
+    # enclave signature over the commitment.
+    try:
+        envelope = json.loads(result_bytes)
+    except (ValueError, TypeError):
+        return no("attested result is not valid JSON")
+    if not isinstance(envelope, dict) or envelope.get("schema") != ENCLAVE_RESULT_SCHEMA:
+        return no("attested result is not an enclave result envelope")
+    commitment = envelope.get("commitment")
+    if not isinstance(commitment, dict):
+        return no("enclave result carries no commitment")
+    verdict = commitment.get("verdict")
+    if verdict is not None and not isinstance(verdict, str):
+        return no("enclave verdict must be a string")
+    if require_verdict and not verdict:
+        return no("enclave commitment carries no verdict (require_verdict)")
+    if (str(commitment.get("task_id")) != task_id
+            or str(commitment.get("poc_sha256")) != poc_sha256
+            or str(commitment.get("trace_id")) != trace_id
+            or str(commitment.get("miner_hotkey")) != miner_hotkey
+            or str(commitment.get("nonce")) != nonce):
+        return no("attested result commits to a different task/poc/trace/miner/nonce")
+
+    enclave_key_b64 = str(envelope.get("enclave_pubkey_b64", ""))
+    sig_b64 = str(envelope.get("signature_b64", ""))
+    if not enclave_key_b64 or not sig_b64:
+        return no("enclave result is missing the pubkey or signature")
+    try:
+        enclave_pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(enclave_key_b64))
+        signature = base64.b64decode(sig_b64)
+    except Exception:
+        return no("enclave pubkey or signature is malformed")
+    # Recompute the signed bytes from the EXPECTED (submission-supplied) miner and
+    # nonce, not the envelope's — so another miner reusing this result verifies its
+    # signature against its own hotkey and fails.
+    signed = enclave_commitment_bytes(
+        task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id,
+        miner_hotkey=miner_hotkey, nonce=nonce, verdict=verdict)
+    try:
+        enclave_pub.verify(signature, signed)
+    except InvalidSignature:
+        return no("enclave signature does not verify over this "
+                  "task/poc/trace/miner/nonce/verdict")
+
+    return EnclaveAttestation(
+        True, REQUIRED_TEE,
+        "attested_intel_tdx_enclave_result_bound" + ("_trustless" if trustless else ""),
+        rid, result_bound=True, workload_bound=True, signature_bound=True,
+        verdict=verdict, enclave_key_b64=enclave_key_b64, trustless=trustless,
+    )
+
+
 def _expected_report_data_hex(receipt: Mapping[str, Any]) -> str | None:
     """Recompute report_data[32:64] from the receipt fields per Cathedral's
     binding_recipe, for a trustless quote check. Returns None if a needed field is
@@ -333,8 +578,11 @@ def _expected_report_data_hex(receipt: Mapping[str, Any]) -> str | None:
 
 
 __all__ = [
-    "COMMITMENT_SCHEMA", "REQUIRED_TEE", "REQUIRED_HARDWARE", "RESULT_ARTIFACT",
-    "commitment_bytes", "commitment_sha256", "tee_kind",
+    "COMMITMENT_SCHEMA", "ENCLAVE_COMMITMENT_SCHEMA", "ENCLAVE_RESULT_SCHEMA",
+    "REQUIRED_TEE", "REQUIRED_HARDWARE", "RESULT_ARTIFACT",
+    "commitment_bytes", "commitment_sha256", "enclave_commitment_bytes",
+    "enclave_result_bytes", "tee_kind",
     "CathedralAttestation", "verify_cathedral_attestation",
     "BootAttestation", "verify_boot_attestation",
+    "EnclaveAttestation", "verify_persistent_enclave_attestation", "ReceiptVerifier",
 ]

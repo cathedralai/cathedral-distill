@@ -35,8 +35,11 @@ from cathedral_distill.cybergym import (
     derived_work_units,
 )
 from cathedral_distill.cybergym_attest import (
+    RECEIPT_ATTESTATION_SCHEMA,
+    CathedralReceiptPolicy,
     CyberGymAttestError,
     verify_submission_attestation,
+    verify_submission_receipt,
 )
 from cathedral_distill.cybergym_batch import TaskPool, derive_epoch_batch_nonce
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
@@ -304,6 +307,18 @@ class SubmissionOutcome:
         return self.solved and self.attested
 
 
+def _attestation_schema(token: bytes) -> str:
+    """The top-level `schema` of an attestation token, or `""` if it is not the
+    JSON receipt envelope. A cc token is also JSON, but it is handed to
+    `verify_submission_attestation` verbatim; only the receipt envelope is routed
+    on this value, so a parse failure is simply "not a receipt envelope"."""
+    try:
+        doc = json.loads(token.decode("utf-8"))
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return ""
+    return str(doc.get("schema", "")) if isinstance(doc, dict) else ""
+
+
 def process_submission(
     envelope: SubmissionEnvelope,
     dispatch_msg: DispatchMessage,
@@ -312,6 +327,7 @@ def process_submission(
     trace_policy: TraceQualityPolicy = TraceQualityPolicy(),
     weights: Mapping[Level, Decimal] = DEFAULT_LEVEL_WEIGHTS,
     attestation_policy: AttestationPolicy | None = None,
+    cathedral_receipt_policy: CathedralReceiptPolicy | None = None,
     now: datetime | None = None,
 ) -> SubmissionOutcome:
     """Verify one submission against the batch it answers, and score it.
@@ -366,21 +382,45 @@ def process_submission(
     # would let an attacker consume verifier capacity without a viable submission.
     attested = True
     attest_reason = ""
-    if attestation_policy is not None:
+    if attestation_policy is not None or cathedral_receipt_policy is not None:
         if not envelope.attestation:
             attested, attest_reason = False, "missing_tdx_attestation"
         else:
             try:
                 token = base64.b64decode(envelope.attestation, validate=True)
-                verify_submission_attestation(
-                    token, batch_id=envelope.batch_id, task_id=envelope.task_id,
-                    poc_sha256=digest, trace_id=submission.trace_id(),
-                    miner_hotkey=envelope.miner_hotkey,
-                    model_commitment=dispatch_msg.model_commitment,
-                    artifact_digest=dt.artifact_digest,
-                    policy=attestation_policy,
-                    now=now,
-                )
+                # One of two shapes, told apart by top-level `schema`: the real
+                # Cathedral receipt (#61) or the report_data-bound cc token. The cc
+                # path is unchanged; the receipt path only fires when a
+                # cathedral_receipt_policy is configured for it.
+                schema = _attestation_schema(token)
+                if schema == RECEIPT_ATTESTATION_SCHEMA:
+                    if cathedral_receipt_policy is None:
+                        raise CyberGymAttestError(
+                            "submission carries a Cathedral receipt but no "
+                            "cathedral_receipt_policy is configured to accept it"
+                        )
+                    verify_submission_receipt(
+                        json.loads(token.decode("utf-8")),
+                        task_id=envelope.task_id, poc_sha256=digest,
+                        trace_id=submission.trace_id(),
+                        miner_hotkey=envelope.miner_hotkey,
+                        nonce=dispatch_msg.nonce,
+                        policy=cathedral_receipt_policy, now=now,
+                    )
+                elif attestation_policy is not None:
+                    verify_submission_attestation(
+                        token, batch_id=envelope.batch_id, task_id=envelope.task_id,
+                        poc_sha256=digest, trace_id=submission.trace_id(),
+                        miner_hotkey=envelope.miner_hotkey,
+                        model_commitment=dispatch_msg.model_commitment,
+                        artifact_digest=dt.artifact_digest,
+                        policy=attestation_policy,
+                        now=now,
+                    )
+                else:
+                    raise CyberGymAttestError(
+                        "no attestation policy accepts this submission's attestation"
+                    )
             except (ValueError, TypeError, CyberGymAttestError) as exc:
                 attested, attest_reason = False, f"tdx_attestation_invalid:{exc}"
 

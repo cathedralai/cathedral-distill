@@ -1,0 +1,47 @@
+# cathedral-cybergym-enclave — the approved, result-bound solver (#94/#95).
+#
+# The persistent real-corpus path's worker. Runs inside the TDX enclave as the
+# admitted workload (WORKLOAD_ADMISSION.md); its image/command is what the
+# validator pins as `expected_workload_sha256`. Unlike cybergym-verify (which
+# prints a plain DifferentialResult), this:
+#   - generates an Ed25519 keypair whose private half never leaves the enclave,
+#   - runs the vul/fix differential on the corpus baked into the image,
+#   - writes a SIGNED `enclave_result_bytes` envelope (pubkey + (task,poc,trace,
+#     verdict) commitment + signature) as its result.
+#
+# A live Cathedral attest.v1 receipt binds that result as sha256(result) =
+# result_sha256 and this image/command as workload_sha256. The validator's
+# verify_persistent_enclave_attestation re-checks the workload allowlist, the
+# result binding, and the signature — so a looked-up PoC signed outside this
+# workload can never be credited.
+#
+# Contract, same as cybergym-verify:
+#   - stdout carries ONLY the canonical enclave result envelope; logs to stderr
+#   - pull by digest, never :latest — admission resolves no tags
+#   - the CyberGym vul/fix builds are baked in (or a read-only mount), pinned by
+#     digest and part of the measured environment
+#   - the platform mounts /input and runs the image
+#
+#   /input/poc.bin            the PoC bytes to solve with (CYBERGYM_POC_PATH)
+#   CYBERGYM_TASK_ID          the dispatched task id
+#   CYBERGYM_TRACE_ID         the reasoning-trace id bound into the commitment
+#   CYBERGYM_CORPUS_MANIFEST  the digest-pinned manifest baked into this worker
+FROM python:3.12-slim@sha256:47b3c7d4b2bbeedcc7477cf9e2f26e69b8f4c9dc23f5d09d769cbde6bb524cd7
+
+RUN useradd --no-create-home --shell /usr/sbin/nologin solver
+RUN python3 -m pip install --no-cache-dir "cryptography>=42"
+COPY cathedral_distill /opt/cathedral/cathedral_distill
+ENV PYTHONPATH=/opt/cathedral PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+
+# The CyberGym reproduce runner + vul/fix builds are provisioned into the image
+# (or a read-only mount) and pinned by digest. Placeholder path; the real corpus
+# is staged at build time and the manifest is the digest-pinned private manifest.
+# attest.v1 (result-bound, no Docker, no uploads): CYBERGYM_REPRODUCE_CMD drives the
+# baked vul/fix BINARIES as sandboxed subprocesses, and the PoC arrives base64 in
+# CYBERGYM_POC_B64 (part of the bound workload) rather than a mounted file. Set
+# CYBERGYM_CORPUS_MANIFEST + CYBERGYM_POC_PATH instead for the Docker/custom.v1 path.
+ENV CYBERGYM_RUN_HW=1
+ENV CYBERGYM_REPRODUCE_CMD="reproduce --mode {mode} --task {task_id}"
+
+USER solver
+ENTRYPOINT ["python3", "-m", "cathedral_distill.cybergym_enclave_solver"]

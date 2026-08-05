@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import dataclasses
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -42,6 +44,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from cathedral_distill.distill_receipt import canonical_bytes  # shared canonical rule
 
 ATTESTATION_SCHEMA = "cathedral_cc_attestation_v1"
+ATTESTATION_POLICY_SCHEMA = "cathedral_attestation_policy_v1"
 MAX_TOKEN_BYTES = 65_536
 DEFAULT_MAX_AGE_SECONDS = 86_400
 
@@ -72,6 +75,115 @@ class AttestationPolicy:
     # Pinned GPU (vBIOS / CC) measurements; None disables the GPU-measurement check.
     allowed_gpu_measurements: frozenset[str] | None = None
     max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS
+
+
+# Every field of `AttestationPolicy` that decides a verdict, and therefore every
+# field `attestation_policy_manifest` must encode. It is stated separately from the
+# dataclass so that ADDING a field to `AttestationPolicy` without teaching the
+# manifest about it is a loud failure rather than a silently unbound policy: a new
+# verdict-changing knob that the digest cannot see would reopen exactly the hole the
+# digest exists to close.
+_POLICY_FIELDS = frozenset(
+    {"trusted_roots", "allowed_measurements", "allowed_gpu_measurements",
+     "max_age_seconds"}
+)
+
+
+def _measurement_pins(values: object, name: str) -> list[str] | None:
+    if values is None:
+        return None
+    if isinstance(values, (str, bytes, bytearray)):
+        raise AttestationError(f"{name} must be a set of measurement strings")
+    try:
+        pins = list(values)
+    except TypeError as exc:
+        raise AttestationError(f"{name} must be a set of measurement strings") from exc
+    for pin in pins:
+        if not isinstance(pin, str):
+            raise AttestationError(f"{name} entries must be strings")
+    return sorted(pins)
+
+
+def attestation_policy_manifest(policy: AttestationPolicy) -> dict[str, Any]:
+    """The verdict-deciding CONTENT of a verifier's policy, in canonical form.
+
+    Whether a policy *exists* is not what decides an attestation; what is *in* it
+    is. Two policies that both "enforce Intel-TDX" accept disjoint sets of quotes if
+    one trusts the Intel DCAP root and the other trusts a key the claimant holds. So
+    a control that pins enforcement has to pin this, or it pins nothing an attacker
+    cares about.
+
+    Every field is normalised to an order-independent form — root ids and their raw
+    public keys as sorted hex, measurement allow-lists as sorted lists — so that a
+    semantically identical policy digests identically no matter how it was built
+    (dict insertion order, frozenset iteration order), while any semantic change
+    (a different root, an added signer, a widened measurement allow-list, a longer
+    freshness window) changes the digest.
+
+    Raises `AttestationError` on a policy this function cannot encode faithfully,
+    including one carrying a field it does not know about. Refusing to digest is the
+    fail-closed answer: a digest that quietly omits a knob is worse than none.
+    """
+    if not isinstance(policy, AttestationPolicy):
+        raise AttestationError("attestation policy must be an AttestationPolicy")
+    present = {f.name for f in dataclasses.fields(policy)}
+    unhandled = sorted(present - _POLICY_FIELDS)
+    if unhandled:
+        raise AttestationError(
+            "AttestationPolicy carries fields this manifest does not bind: "
+            f"{', '.join(unhandled)}. Add them to `_POLICY_FIELDS` and encode them "
+            "here — an unbound field is a verdict the epoch's posture digest cannot "
+            "see change."
+        )
+    missing = sorted(_POLICY_FIELDS - present)
+    if missing:
+        raise AttestationError(
+            f"AttestationPolicy is missing expected fields: {', '.join(missing)}"
+        )
+
+    roots: dict[str, str] = {}
+    if not isinstance(policy.trusted_roots, Mapping):
+        raise AttestationError("trusted_roots must be a mapping of key id -> bytes")
+    for key_id, root in policy.trusted_roots.items():
+        if not isinstance(key_id, str) or not key_id:
+            raise AttestationError("trusted_roots key ids must be non-empty strings")
+        if not isinstance(root, (bytes, bytearray)):
+            raise AttestationError(
+                f"trusted root {key_id!r} must be raw public-key bytes"
+            )
+        roots[key_id] = bytes(root).hex()
+
+    max_age = policy.max_age_seconds
+    if isinstance(max_age, bool) or not isinstance(max_age, int):
+        raise AttestationError("max_age_seconds must be an int")
+
+    return {
+        "schema": ATTESTATION_POLICY_SCHEMA,
+        # Public keys, so binding them in the clear is safe and makes a swapped
+        # root visible to whoever audits the epoch, not merely detectable.
+        "trusted_roots": roots,
+        "allowed_measurements": _measurement_pins(
+            policy.allowed_measurements, "allowed_measurements"
+        ),
+        "allowed_gpu_measurements": _measurement_pins(
+            policy.allowed_gpu_measurements, "allowed_gpu_measurements"
+        ),
+        "max_age_seconds": int(max_age),
+    }
+
+
+def attestation_policy_digest(policy: AttestationPolicy | None) -> str:
+    """`sha256:<hex>` over `attestation_policy_manifest`, or `""` for no policy.
+
+    `""` is the honest answer for "there is no policy" — an unattested run has no
+    trust anchors to bind — and callers must not confuse it with "the policy was
+    never recorded". Both look empty; only one is a claim about enforcement.
+    """
+    if policy is None:
+        return ""
+    return "sha256:" + hashlib.sha256(
+        canonical_bytes(attestation_policy_manifest(policy))
+    ).hexdigest()
 
 
 def _timestamp(value: object, name: str) -> datetime:
@@ -185,7 +297,6 @@ def gpu_attestation_verifier(
     the receipt committed to). The token is verified, its bytes must hash to the
     pinned digest, and its GPU measurement must be allow-listed.
     """
-    import hashlib
 
     def verify(gpu_block: Mapping[str, Any]) -> bool:
         digest = str(gpu_block.get("attestation_report_digest") or "")
@@ -272,5 +383,7 @@ def sign_attestation(unsigned: Mapping[str, Any], root_seed: bytes) -> bytes:
 
 __all__ = [
     "AttestationError", "AttestationPolicy", "ATTESTATION_SCHEMA",
+    "ATTESTATION_POLICY_SCHEMA", "attestation_policy_manifest",
+    "attestation_policy_digest",
     "verify_attestation", "gpu_attestation_verifier", "cpu_quote_verifier", "sign_attestation",
 ]

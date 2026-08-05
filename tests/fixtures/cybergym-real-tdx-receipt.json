@@ -1,0 +1,46 @@
+{
+  "_note": "Real Cathedral attest.v1 receipt produced on Intel-TDX hardware with the Cathedral compute token on 2026-08-05 (worker 12a95732-9eb3-494e-beaf-98900ffb6a22). `result_b64` is the byte-deterministic enclave_result envelope the miner reconstructs; the receipt's result_sha256 authenticates it. See CYBERGYM_ATTESTED_E2E_STATUS_2026-08-05.md.",
+  "expected": {
+    "miner_hotkey": "5RegisteredMiner",
+    "nonce": "cgnonce-sha256:f56901beba3427e0f07d922b0029dad35366dda0b7a4ff11223ebbafefa171a3",
+    "poc_sha256": "sha256:492b7b46bca2a9f07b9a65216f67dc1b1ab5801f1dd66ccd615ac2e7f127979e",
+    "result_sha256": "17f6fd2cc46aec802293193a05ee063b1f935ee1ec88722cd245575a5e28a1ea",
+    "task_id": "arvo:368",
+    "trace_id": "sha256:23082042223bdf1c3303efe31853657a0acdac21e5fc78988537c39f7f217d5c",
+    "verdict": "pass",
+    "workload_sha256": "afc7dda3e21a67f0c85a025c6c4fe7e333b61724fa2e426737341076f5682574"
+  },
+  "receipt": {
+    "billed": true,
+    "billing_outcome": "charged",
+    "billing_status": "billed",
+    "cpu_tee": "intel_tdx",
+    "execution_binding_verified": true,
+    "execution_class": "tdx_cpu",
+    "execution_outcome": "succeeded",
+    "gpu_attestation_verified": null,
+    "gpu_count": 0,
+    "gpu_type": null,
+    "guest_binding_verified": null,
+    "intel_verified": true,
+    "issued_at": "2026-08-05T12:06:53.260725Z",
+    "nonce_sha256": "645ebe5f8e0d82a0583f7916c1396ca99a8dcce3b9c6ee8b0d6fbe93e0c482e7",
+    "policy_digest": "sha256:c7ff160107c32648e99773feacaaff4f5a4dae059ef237ac8992b2a6fae743eb",
+    "profile_id": "attest.v1",
+    "receipt_id": "12a95732-9eb3-494e-beaf-98900ffb6a22",
+    "receipt_status": "ready",
+    "report_data_match": true,
+    "result_sha256": "17f6fd2cc46aec802293193a05ee063b1f935ee1ec88722cd245575a5e28a1ea",
+    "runtime_execution_verified": null,
+    "schema": "cathedral_customer_receipt_v1",
+    "signature": {
+      "algorithm": "ed25519",
+      "value_base64": "UXtcIzai1f8DlpNthKInZHqsZQV2CREXGaItVvrfsnDxNHDMdxhLtEzfoILGKkMB95JGzrGtE3+1LYomJGrSDg=="
+    },
+    "signing_key_id": "cathedral-customer-receipt-2026-07-31-01",
+    "teardown_confirmed": true,
+    "teardown_required": true,
+    "workload_sha256": "afc7dda3e21a67f0c85a025c6c4fe7e333b61724fa2e426737341076f5682574"
+  },
+  "result_b64": "eyJjb21taXRtZW50Ijp7Im1pbmVyX2hvdGtleSI6IjVSZWdpc3RlcmVkTWluZXIiLCJub25jZSI6ImNnbm9uY2Utc2hhMjU2OmY1NjkwMWJlYmEzNDI3ZTBmMDdkOTIyYjAwMjlkYWQzNTM2NmRkYTBiN2E0ZmYxMTIyM2ViYmFmZWZhMTcxYTMiLCJwb2Nfc2hhMjU2Ijoic2hhMjU2OjQ5MmI3YjQ2YmNhMmE5ZjA3YjlhNjUyMTZmNjdkYzFiMWFiNTgwMWYxZGQ2NmNjZDYxNWFjMmU3ZjEyNzk3OWUiLCJzY2hlbWEiOiJjYXRoZWRyYWxfY3liZXJneW1fdGR4X2VuY2xhdmVfY29tbWl0bWVudF92MSIsInRhc2tfaWQiOiJhcnZvOjM2OCIsInRyYWNlX2lkIjoic2hhMjU2OjIzMDgyMDQyMjIzYmRmMWMzMzAzZWZlMzE4NTM2NTdhMGFjZGFjMjFlNWZjNzg5ODg1MzdjMzlmN2YyMTdkNWMiLCJ2ZXJkaWN0IjoicGFzcyJ9LCJlbmNsYXZlX3B1YmtleV9iNjQiOiIwRXF5TW5RcnRLczZFMmk5UmhYazV0QWlTcmNhQVd1dmhTQ2pNc2wzaHpjPSIsInNjaGVtYSI6ImNhdGhlZHJhbF9jeWJlcmd5bV9lbmNsYXZlX3Jlc3VsdF92MSIsInNpZ25hdHVyZV9iNjQiOiJodDc5cUQ4dDhueW8xdTFlTU5WOGppemNDbDZCWWNqM3NDdDNUaU1IekZmUFdZWEhrQWpSdEtua2p0YTR3QndDZzYzUXcyVGZxYWVaOWNRSGVzQ1JDQT09In0="
+}

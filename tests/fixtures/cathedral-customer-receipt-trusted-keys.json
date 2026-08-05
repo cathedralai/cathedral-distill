@@ -1,0 +1,12 @@
+{
+  "schema": "cathedral_customer_receipt_trusted_keys_v1",
+  "keys": {
+    "cathedral-customer-receipt-2026-07-31-01": {
+      "algorithm": "ed25519",
+      "public_key_base64": "ipHC+Kctte0VY8CoJdeaDvzT32a43B2Xx0ETaP0f5t0=",
+      "status": "active",
+      "valid_from": "2026-07-31T00:00:00.000000Z",
+      "valid_until": "2027-08-01T00:00:00.000000Z"
+    }
+  }
+}

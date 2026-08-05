@@ -184,6 +184,74 @@ def report_digest(document: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_report_bytes(document)).hexdigest()
 
 
+def require_attested_epoch(
+    score_store: CyberGymScoreStore, source_epoch: int, *, allow_unattested: bool
+) -> None:
+    """Refuse to turn an unattested epoch into a publishable report.
+
+    This is the boundary where a local SQLite file becomes the document a canonical
+    validator composes weights from, and it is the last point at which the two can
+    still be told apart. The wire contract carries no enforcement field — its
+    semantic key set is pinned by cross-repo tests, so the producer cannot add one
+    unilaterally — and `publish_score_report` is handed frozen bytes and a URL with
+    no database in reach. An unattested epoch therefore has to be stopped here or
+    not at all.
+
+    The exposure this closes is not hypothetical: the loopback E2E verifiers run
+    with no attestation policy on purpose, and the only difference between their
+    export and a production one is the intake URL and the credentials file passed
+    to the next command.
+
+    An epoch whose posture was never recorded is refused too. That covers a
+    database written before postures were stamped and one written by a producer
+    that skipped the record; neither is evidence of attestation, and treating
+    "nobody said" as "yes" is precisely the silence this exists to break.
+
+    So is an epoch that records enforcement without recording WHICH policy was
+    enforced. "Attestation was on" says nothing about which trust roots were in
+    force, and an epoch that cannot name its policy cannot be shown to have refused
+    anything in particular — the same silence, one level down.
+
+    `allow_unattested` is the E2E's explicit acknowledgement. It does not make the
+    resulting bytes safe — they remain indistinguishable on the wire — so it belongs
+    only to a preview against a disposable loopback intake.
+    """
+    posture = score_store.attestation_posture(source_epoch)
+    if posture is not None and posture["enforced"] and posture.get("policy_digest"):
+        return
+    if allow_unattested:
+        return
+    if posture is None:
+        raise CyberGymScoreReportError(
+            f"refusing to export CyberGym epoch {int(source_epoch)}: this score "
+            "database does not record whether Intel-TDX attestation was enforced, so "
+            "its solves cannot be shown to be attested. Re-close the epoch with a "
+            "current build, or pass allow_unattested=True (CLI: "
+            "--allow-unattested-e2e) if this is a loopback preview whose report will "
+            "never reach a production intake."
+        )
+    if posture["enforced"]:
+        raise CyberGymScoreReportError(
+            f"refusing to export CyberGym epoch {int(source_epoch)}: it records that "
+            "Intel-TDX attestation was enforced but not WHICH policy enforced it, so "
+            "nothing here shows which trusted roots or enclave measurements a solve "
+            "had to satisfy — and an epoch that cannot name its policy cannot be "
+            "shown to have been resumed under the same one. Re-run the epoch with a "
+            "current build, or pass allow_unattested=True (CLI: "
+            "--allow-unattested-e2e) if this is a loopback preview whose report will "
+            "never reach a production intake."
+        )
+    raise CyberGymScoreReportError(
+        f"refusing to export CyberGym epoch {int(source_epoch)}: it was scored with "
+        f"NO Intel-TDX attestation enforcement ({posture['detail']}), so every solve "
+        "in it was credited unattested. The exported report carries no field that "
+        "would let a validator tell it apart from an attested epoch, so publishing "
+        "it to a production intake would pay emission for unattested work. Pass "
+        "allow_unattested=True (CLI: --allow-unattested-e2e) only for a loopback "
+        "preview."
+    )
+
+
 def build_score_report(
     score_store: CyberGymScoreStore,
     *,
@@ -191,17 +259,25 @@ def build_score_report(
     netuid: int,
     source_epoch: int,
     producer_hotkey: str,
+    allow_unattested: bool = False,
 ) -> dict[str, Any]:
     """Build one report from the immutable durable close record.
 
     ``generated_at`` is the first persisted close time, not the current clock. A
     delayed retry therefore cannot make an old epoch look fresh, and a repeated
     export produces byte-identical output.
+
+    Refuses an epoch that was not scored under an enforced Intel-TDX attestation
+    policy unless the caller explicitly acknowledges it — see
+    `require_attested_epoch`.
     """
     try:
         score_store.require_closed_epoch(source_epoch)
     except CyberGymScoreError as exc:
         raise CyberGymScoreReportError(str(exc)) from exc
+    require_attested_epoch(
+        score_store, source_epoch, allow_unattested=allow_unattested
+    )
     status = score_store.epoch_status(source_epoch)
     marked_at = status.get("marked_at")
     if not isinstance(marked_at, str) or not marked_at:
@@ -383,4 +459,5 @@ __all__ = [
     "normalize_report",
     "publish_score_report",
     "report_digest",
+    "require_attested_epoch",
 ]

@@ -325,3 +325,188 @@ def test_a_recipe_that_throws_is_a_refusal_never_a_pass():
 def test_trusted_issuer_default_is_unchanged_by_the_seam_fix():
     """No quote_verifier -> trusted-issuer path -> the scalar recipe is irrelevant."""
     assert _ok(_receipt()).attested
+
+
+
+# --------------------------------------------------------------------------- #
+# persistent-enclave path (#94/#95) — result-bound, on the real receipt shape
+# --------------------------------------------------------------------------- #
+import hashlib as _hashlib  # noqa: E402
+
+from cathedral_distill.cybergym_cathedral_attest import (  # noqa: E402
+    EnclaveAttestation,
+    enclave_commitment_bytes,
+    enclave_result_bytes,
+    verify_persistent_enclave_attestation,
+)
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
+    Ed25519PrivateKey,
+)
+
+_ENCLAVE_KEY = Ed25519PrivateKey.generate()
+_OUTSIDE_KEY = Ed25519PrivateKey.generate()
+APPROVED_WORKLOAD = "649e90742fe3bdb4f523b57429a51d0f29119011ddae5f86070b191a437519fa"
+
+
+def _pub_b64(key=_ENCLAVE_KEY):
+    return base64.b64encode(key.public_key().public_bytes_raw()).decode()
+
+
+MINER = "5EnclaveMiner"
+NONCE = "cgnonce-sha256:" + "ab" * 32
+
+
+def _result_and_receipt(*, task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID,
+                        miner_hotkey=MINER, nonce=NONCE,
+                        verdict=None, sign_key=_ENCLAVE_KEY, pub_key=_ENCLAVE_KEY,
+                        workload=APPROVED_WORKLOAD, cpu_tee="intel_tdx",
+                        intel_verified=True, report_data_match=True,
+                        execution_binding_verified=True, status="ready",
+                        issued="2026-07-30T11:59:00Z",
+                        sign_task=None, sign_poc=None, sign_trace=None,
+                        sign_miner=None, sign_nonce=None, sign_verdict=...):
+    """A live-shaped `cathedral_customer_receipt_v1` plus the enclave result whose
+    sha256 it binds. sign_* overrides sign a DIFFERENT commitment than the envelope
+    declares, to prove a tampered/looked-up result is refused."""
+    sig = sign_key.sign(enclave_commitment_bytes(
+        task_id=task_id if sign_task is None else sign_task,
+        poc_sha256=poc_sha256 if sign_poc is None else sign_poc,
+        trace_id=trace_id if sign_trace is None else sign_trace,
+        miner_hotkey=miner_hotkey if sign_miner is None else sign_miner,
+        nonce=nonce if sign_nonce is None else sign_nonce,
+        verdict=verdict if sign_verdict is ... else sign_verdict))
+    result = enclave_result_bytes(
+        enclave_pubkey_b64=_pub_b64(pub_key), task_id=task_id, poc_sha256=poc_sha256,
+        trace_id=trace_id, miner_hotkey=miner_hotkey, nonce=nonce, verdict=verdict,
+        signature_b64=base64.b64encode(sig).decode())
+    receipt = {
+        "receipt_id": "19ed3639-enclave", "receipt_status": status,
+        "schema": "cathedral_customer_receipt_v1", "cpu_tee": cpu_tee,
+        "execution_class": "tdx_cpu" if cpu_tee == "intel_tdx" else "cc_gpu",
+        "issued_at": issued,
+        "workload_sha256": workload,
+        "result_sha256": _hashlib.sha256(result).hexdigest(),
+        "intel_verified": intel_verified, "report_data_match": report_data_match,
+        "execution_binding_verified": execution_binding_verified,
+    }
+    return result, receipt
+
+
+def _verify(result, receipt, *, workload=APPROVED_WORKLOAD, miner_hotkey=MINER,
+            nonce=NONCE, **kw):
+    kw.setdefault("now", NOW)
+    return verify_persistent_enclave_attestation(
+        receipt, task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID,
+        miner_hotkey=miner_hotkey, nonce=nonce,
+        result_bytes=result, expected_workload_sha256=workload, **kw)
+
+
+def test_persistent_enclave_solve_is_result_bound():
+    a = _verify(*_result_and_receipt())
+    assert isinstance(a, EnclaveAttestation)
+    assert a.attested and a.tee == "intel_tdx"
+    assert a.result_bound and a.workload_bound and a.signature_bound
+    assert a.reason == "attested_intel_tdx_enclave_result_bound"
+    assert a.enclave_key_b64 == _pub_b64()
+
+
+def test_a_workload_that_is_not_the_approved_solver_is_refused():
+    # The anti-lookup control: only the approved solver workload may earn. A miner
+    # who runs a "print the looked-up answer" workload has a different workload_sha256.
+    result, receipt = _result_and_receipt(workload="00" * 32)
+    a = _verify(result, receipt)
+    assert not a.attested and "approved solver workload" in a.reason
+    # and an empty expected workload is itself a refusal, never a wildcard
+    result, receipt = _result_and_receipt()
+    a = _verify(result, receipt, workload="")
+    assert not a.attested and "unpinned workload" in a.reason
+
+
+def test_a_swapped_result_breaks_the_result_sha256_binding():
+    # attest a genuine result, then submit different result_bytes: the hash no
+    # longer matches the attested result_sha256.
+    result, receipt = _result_and_receipt(verdict="pass")
+    other, _ = _result_and_receipt(task_id="arvo:999", verdict="pass")
+    a = _verify(other, receipt)
+    assert not a.attested and "do not match the attested result_sha256" in a.reason
+
+
+def test_result_that_commits_to_another_task_is_refused():
+    # a well-formed, correctly-hashed result whose commitment is for another task
+    result, receipt = _result_and_receipt(task_id="arvo:999")
+    a = _verify(result, receipt)  # verifier still checks against TASK
+    assert not a.attested and "different task/poc/trace" in a.reason
+
+
+def test_a_tampered_enclave_signature_is_refused():
+    # envelope declares (task,poc,trace) but the signature is over a different one
+    result, receipt = _result_and_receipt(sign_task="arvo:999")
+    a = _verify(result, receipt)
+    assert not a.attested and "signature does not verify" in a.reason
+
+
+def test_in_enclave_verdict_is_carried_in_the_result():
+    a = _verify(*_result_and_receipt(verdict="pass"), require_verdict=True)
+    assert a.attested and a.result_bound and a.verdict == "pass"
+
+
+def test_a_flipped_verdict_breaks_the_signature():
+    # signed "pass" but the envelope commitment says "fail": recomputed bytes differ
+    result, receipt = _result_and_receipt(verdict="fail", sign_verdict="pass")
+    a = _verify(result, receipt, require_verdict=True)
+    assert not a.attested
+
+
+def test_require_verdict_refuses_a_verdict_less_result():
+    a = _verify(*_result_and_receipt(verdict=None), require_verdict=True)
+    assert not a.attested and "no verdict" in a.reason
+
+
+def test_untrusted_receipt_fields_are_refused():
+    assert not _verify(*_result_and_receipt(intel_verified=False)).attested
+    assert not _verify(*_result_and_receipt(report_data_match=False)).attested
+    assert not _verify(*_result_and_receipt(execution_binding_verified=False)).attested
+
+
+def test_receipt_verifier_seam_gates_and_marks_trustless():
+    ok = _verify(*_result_and_receipt(), receipt_verifier=lambda r: True)
+    assert ok.attested and ok.trustless and ok.result_bound
+    bad = _verify(*_result_and_receipt(), receipt_verifier=lambda r: False)
+    assert not bad.attested and "failed independent verification" in bad.reason
+    boom = _verify(*_result_and_receipt(), receipt_verifier=lambda r: 1 / 0)
+    assert not boom.attested and "receipt verifier failed" in boom.reason
+
+
+def test_enclave_path_freshness_is_bounded():
+    assert not _verify(*_result_and_receipt(issued="2026-07-01T00:00:00Z")).attested   # stale
+    assert not _verify(*_result_and_receipt(issued="2026-08-01T00:00:00Z")).attested   # future
+    result, receipt = _result_and_receipt()
+    receipt.pop("issued_at")
+    assert not _verify(result, receipt).attested
+
+
+def test_enclave_path_refuses_non_tdx():
+    assert not _verify(*_result_and_receipt(cpu_tee="amd_sev_snp")).attested
+
+
+def test_enclave_path_fails_closed_on_malformed_input():
+    # empty receipt / not-ready
+    assert not verify_persistent_enclave_attestation(
+        {}, task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID,
+        miner_hotkey=MINER, nonce=NONCE,
+        result_bytes=b"{}", expected_workload_sha256=APPROVED_WORKLOAD, now=NOW).attested
+    # result bytes that hash-match the receipt but are not an enclave envelope
+    junk = b'{"schema":"nope"}'
+    _, receipt = _result_and_receipt()
+    receipt["result_sha256"] = _hashlib.sha256(junk).hexdigest()
+    a = _verify(junk, receipt)
+    assert not a.attested and "not an enclave result envelope" in a.reason
+
+
+def test_a_result_signed_for_one_miner_is_refused_for_another():
+    # #104 self-review fix: the commitment binds miner_hotkey + nonce, so another
+    # miner (or another dispatch) cannot replay a genuine result and earn credit.
+    result, receipt = _result_and_receipt(verdict="pass")
+    assert _verify(result, receipt, require_verdict=True).attested
+    assert not _verify(result, receipt, miner_hotkey="5OtherMiner").attested
+    assert not _verify(result, receipt, nonce="cgnonce-sha256:" + "99" * 32).attested
