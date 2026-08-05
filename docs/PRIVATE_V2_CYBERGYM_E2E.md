@@ -31,6 +31,11 @@ the configured hotkey; it never trusts the request body's miner field. Every
 dispatch, artifact read, and submission is then bound to that caller's sealed
 batch.
 
+For a private task outside the legacy ARVO subset, its manifest entry must also
+commit `crash_evidence`: the expected sanitizer name plus permitted non-zero
+exit codes and terminating signals. This makes the classifier part of the
+immutable task evidence rather than relying on a task-id-specific server table.
+
 Run the server behind an SSH tunnel:
 
 ```bash
