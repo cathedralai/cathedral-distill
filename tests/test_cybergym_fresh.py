@@ -1,9 +1,11 @@
-"""Fresh sealed challenges are dispatchable and rewardable without static ARVO.
+"""Fresh sealed challenges are dispatchable but never rewardable.
 
 The legacy ``SyntheticTaskSource`` remains a deliberately unpaid oracle.  These
 tests cover the separate fresh source used by the verifier path: it derives new
 task bytes after a finalized epoch nonce, keeps a reference PoC validator-side,
-and delivers an artifact that does not print the answer in plaintext.
+and delivers an artifact that does not print the answer in plaintext. Its
+reversible values still recover that PoC mechanically, so the production reward
+path must always report and sign zero units for these tasks.
 """
 from __future__ import annotations
 
@@ -73,7 +75,42 @@ def _trace(task_id: str, poc: bytes) -> dict:
     }
 
 
-def _service(tmp_path, *, epoch: int = 21):
+def _artifact_only_poc(artifact: str) -> bytes:
+    """Recover the current fresh reference PoC using only the delivered source."""
+    def values(name: str) -> tuple[int, ...]:
+        matched = re.search(
+            rf"static const uint32_t {name}\[4\] = \{{([^}}]+)\}};", artifact
+        )
+        assert matched is not None
+        return tuple(
+            int(value, 16)
+            for value in re.findall(r"0x([0-9a-f]{8})u", matched.group(1))
+        )
+
+    def scalar(name: str) -> int:
+        matched = re.search(
+            rf"static const uint32_t {name} = 0x([0-9a-f]{{8}})u;", artifact
+        )
+        assert matched is not None
+        return int(matched.group(1), 16)
+
+    def wheel(value: int, slot: int) -> int:
+        rotated = ((value ^ 0x9E3779B9) << ((slot + 5) & 31)) | (
+            (value ^ 0x9E3779B9) >> ((32 - ((slot + 5) & 31)) & 31)
+        )
+        return (rotated & 0xFFFFFFFF) ^ ((slot + 1) * 0x45D9F3B)
+
+    guard_words, guard_masks = values("gw"), values("gm")
+    magic = bytes(
+        (wheel(word, slot) ^ mask) & 0xFF
+        for slot, (word, mask) in enumerate(zip(guard_words, guard_masks))
+    )
+    capacity = 16 + ((wheel(scalar("cw"), 5) ^ scalar("cm")) % 96)
+    count = capacity + 1
+    return magic + count.to_bytes(2, "big") + b"A" * count
+
+
+def _service(tmp_path, *, epoch: int = 21, credit_synthetic_tasks: bool = False):
     holdout, backend = fresh_holdout(SEED, levels=(0,))
     service = CyberGymService(
         holdout,
@@ -90,6 +127,7 @@ def _service(tmp_path, *, epoch: int = 21):
         as_of=NOW,
         attestation_required=False,
         gates_required=False,
+        credit_synthetic_tasks=credit_synthetic_tasks,
     )
     return service, holdout.pool
 
@@ -108,7 +146,7 @@ def test_fresh_source_is_distinct_per_epoch_and_stable_on_redispatch():
     assert all(is_fresh_task(task.task_id) for task in a.tasks)
 
 
-def test_fresh_artifact_does_not_print_the_reference_trigger():
+def test_fresh_artifact_only_solver_recovers_the_reference_trigger():
     source = FreshTaskSource(SEED, levels=(0,))
     batch = source.draw(size=1, nonce="cgnonce-sha256:" + "c" * 64)
     task_id = batch.tasks[0].task_id
@@ -118,15 +156,18 @@ def test_fresh_artifact_does_not_print_the_reference_trigger():
     assert artifact is not None
     assert challenge.magic not in artifact.encode()
     assert challenge.reference_poc not in artifact.encode()
-    # The old mechanical two-regex oracle cannot recover either required value.
+    # The old plaintext extractor cannot recover either required value, but the
+    # delivered constants plus `wheel` reconstruct the entire reference PoC.
     assert re.findall(r"\\x([0-9a-f]{2})", artifact) == []
     assert re.search(r"char buf\[(\d+)\]", artifact) is None
-    assert execute(challenge, challenge.reference_poc, patched=False) == CRASH_EXIT
-    assert execute(challenge, challenge.reference_poc, patched=True) != CRASH_EXIT
+    recovered = _artifact_only_poc(artifact)
+    assert recovered == challenge.reference_poc
+    assert execute(challenge, recovered, patched=False) == CRASH_EXIT
+    assert execute(challenge, recovered, patched=True) != CRASH_EXIT
 
 
-def test_service_dispatches_fresh_artifact_and_scores_its_admitted_reference(tmp_path):
-    service, source = _service(tmp_path)
+def test_service_dispatches_fresh_artifact_but_never_pays_its_admitted_reference(tmp_path):
+    service, source = _service(tmp_path, credit_synthetic_tasks=True)
     dispatch = service.dispatch_for("5FreshMiner", MODEL, authenticated_caller="5FreshMiner")
     task = dispatch.tasks[0]
     challenge = source._challenges[task.task_id]  # held by the verifier in production
@@ -149,11 +190,14 @@ def test_service_dispatches_fresh_artifact_and_scores_its_admitted_reference(tmp
         authenticated_caller="5FreshMiner",
     )
     assert outcome.solved and outcome.creditable
-    assert outcome.work_units == Decimal("8")
+    assert outcome.work_units == Decimal("0")
+    assert outcome.reason.endswith("non_rewardable_source:fresh")
+    assert service.rewardable_task(task.task_id) is False
 
     results = service.score_epoch(issued_at="2026-08-04T12:00:00.000000Z")
     assert len(results) == 1
-    assert service._scores.epoch_scores(21)["5FreshMiner"] == Decimal("8")
+    assert results[0].receipt["score"]["work_units"] == "0"
+    assert service._scores.epoch_scores(21)["5FreshMiner"] == Decimal("0")
 
 
 def test_seed_commitment_is_public_but_seed_is_not():
@@ -265,7 +309,7 @@ def test_fresh_close_command_restores_solves_and_closes_epoch(tmp_path, monkeypa
     assert close_fresh_e2e(["--issued-at", "2026-08-04T12:00:00.000000Z"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["state"] == "closed"
-    assert payload["scores"] == {"5FreshMiner": "8"}
+    assert payload["scores"] == {"5FreshMiner": "0"}
 
 
 def test_fresh_close_rejects_bad_timestamp_before_it_is_pinned(tmp_path, monkeypatch):

@@ -53,6 +53,7 @@ from cathedral_distill.cybergym_validator import (
     observed_eligibility_allows_dispatch,
     run_epoch,
 )
+from cathedral_distill.cybergym_fresh import is_fresh_task
 from cathedral_distill.cybergym_synthetic import is_synthetic_task
 from cathedral_distill.lane_feed import Lane, LaneContribution
 from cathedral_distill.trace_submission import TraceQualityPolicy
@@ -219,7 +220,9 @@ class CyberGymService:
         self._gates_required = gates_required
         # Synthetic tasks are graded but not rewarded by default: their artifact
         # renders the answer (see cybergym_synthetic.is_synthetic_task). True is an
-        # explicit unsafe-for-rewards override.
+        # explicit unsafe-for-rewards override. Fresh tasks are also graded, but
+        # always unpaid: their current reversible artifact lets a miner derive the
+        # reference PoC mechanically (see cybergym_fresh.is_fresh_task).
         self._credit_synthetic_tasks = credit_synthetic_tasks
         self._miners: dict[str, _MinerState] = {}
         self._by_batch: dict[str, str] = {}  # batch_id -> miner_hotkey
@@ -449,12 +452,26 @@ class CyberGymService:
         """Whether a solve of this task can earn units under the active policy.
 
         Synthetic-source tasks are graded and not rewarded unless
-        `credit_synthetic_tasks` is set. The wire response has to say so: a miner
-        that is told `work_units: 8` for work the epoch will pay 0 for has been
-        misled, and the task id grammar admits a `synthvuln:` id in a real holdout
-        manifest, so this is reachable without any synthetic source at all.
+        `credit_synthetic_tasks` is set. Fresh-source tasks remain unpaid even
+        with that development-only override: their current artifact contains all
+        values necessary to derive the reference PoC mechanically. The wire
+        response has to say so: a miner that is told `work_units: 8` for work the
+        epoch will pay 0 for has been misled. The task-id grammar admits both
+        source prefixes in a real holdout manifest, so this is reachable without
+        constructing either source locally.
         """
-        return self._credit_synthetic_tasks or not is_synthetic_task(task_id)
+        return not is_fresh_task(task_id) and (
+            self._credit_synthetic_tasks or not is_synthetic_task(task_id)
+        )
+
+    @staticmethod
+    def _non_rewardable_source(task_id: str) -> str | None:
+        """Return the source label that forces a solved task to zero units."""
+        if is_fresh_task(task_id):
+            return "fresh"
+        if is_synthetic_task(task_id):
+            return "synthetic"
+        return None
 
     def _authorize_caller_for_batch(self, *, authenticated_caller: str | None,
                                     batch_id: str, task_id: str,
@@ -505,13 +522,14 @@ class CyberGymService:
             trace_policy=self._trace_policy, weights=self._weights,
             attestation_policy=self._attestation_policy, now=self._attestation_now,
         )
+        source = self._non_rewardable_source(envelope.task_id)
         if outcome.work_units > 0 and not self.rewardable_task(envelope.task_id):
             # Make the wire agree with the emission decision. run_epoch excludes this
             # task from the scored submissions, so promising units here would be a
             # promise the epoch does not keep.
             outcome = replace(
                 outcome, work_units=Decimal(0),
-                reason=f"{outcome.reason}|non_rewardable_source:synthetic",
+                reason=f"{outcome.reason}|non_rewardable_source:{source}",
             )
         self._corpus.record(outcome)
         if outcome.creditable:
