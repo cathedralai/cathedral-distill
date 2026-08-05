@@ -102,24 +102,57 @@ class CyberGymScoreStore:
             "  marked_at TEXT NOT NULL)"
         )
         # Whether the service that produced these scores enforced Intel-TDX
-        # attestation. It lives HERE, beside the scores, because this database is
-        # what leaves the verifier: the exporter is handed a file path and nothing
-        # else, so a posture recorded anywhere else is invisible at the moment the
-        # rows become a publishable wire report. See `record_attestation_posture`.
+        # attestation, and WHICH policy it enforced. Both live HERE, beside the
+        # scores, because this database is what leaves the verifier: the exporter is
+        # handed a file path and nothing else, so a posture recorded anywhere else is
+        # invisible at the moment the rows become a publishable wire report. See
+        # `record_attestation_posture`.
         self._connection.execute(
             "CREATE TABLE IF NOT EXISTS cybergym_epoch_attestation ("
             "  epoch INTEGER PRIMARY KEY,"
             "  enforced INTEGER NOT NULL,"
             "  detail TEXT NOT NULL,"
+            "  policy_digest TEXT NOT NULL DEFAULT '',"
             "  recorded_at TEXT NOT NULL)"
         )
+        self._migrate_attestation_policy_digest()
         self._connection.commit()
+
+    def _migrate_attestation_policy_digest(self) -> None:
+        """Add `policy_digest` to a posture table written before it existed.
+
+        The first posture table recorded only WHETHER a policy was configured. Its
+        rows survive, and they keep an empty digest — which is emphatically NOT the
+        same as "no policy": it means the build that opened the epoch never said
+        which policy it was enforcing. `record_attestation_posture` and
+        `cybergym_score_report.require_attested_epoch` both fail closed on an
+        enforced row with an empty digest, so an epoch opened by the older build
+        cannot be resumed under an arbitrary policy or exported as attested.
+        """
+        try:
+            with self._connection:
+                columns = {
+                    str(row["name"])
+                    for row in self._connection.execute(
+                        "PRAGMA table_info(cybergym_epoch_attestation)"
+                    ).fetchall()
+                }
+                if "policy_digest" in columns:
+                    return
+                self._connection.execute(
+                    "ALTER TABLE cybergym_epoch_attestation "
+                    "ADD COLUMN policy_digest TEXT NOT NULL DEFAULT ''"
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError(
+                "failed to migrate the epoch attestation posture table"
+            ) from exc
 
     # -- attestation posture ----------------------------------------------- #
     def record_attestation_posture(
-        self, epoch: int, *, enforced: bool, detail: str = ""
+        self, epoch: int, *, enforced: bool, detail: str = "", policy_digest: str = ""
     ) -> None:
-        """Record whether this epoch's solves had to be Intel-TDX attested.
+        """Record whether this epoch's solves had to be Intel-TDX attested, and how.
 
         The scores of an unattested development run and the scores of an attested
         production run are the same shape, land in the same table, and export to the
@@ -133,14 +166,43 @@ class CyberGymScoreStore:
         and restarted with the policy dropped would otherwise resume the SAME epoch
         and credit unattested solves alongside attested ones under one signed
         receipt, with nothing downstream able to tell the halves apart.
+
+        `policy_digest` is what makes that guard mean anything. Pinning only the
+        enforcement FLAG pins the existence of a policy, not its content, and the
+        content is what decides verdicts: a restart that kept `enforced=True` while
+        swapping `trusted_roots` from the Intel DCAP root to a key the miner holds
+        admits every receipt the epoch's opening policy refused, and the flag still
+        reads "enforced". So an enforced posture must name its policy
+        (`attestation.attestation_policy_digest`), and a resume under a different
+        one is refused exactly as a flipped flag is. An unattested epoch has no
+        policy and therefore no digest; that empty string is a fact about the run,
+        while an empty digest beside `enforced=True` is a build that never said, and
+        the two are not treated alike.
         """
         from datetime import datetime, timezone
 
         want = 1 if enforced else 0
+        digest = str(policy_digest or "")
+        if want and not digest:
+            # Nothing may claim enforcement without naming what it enforced: that
+            # claim is precisely what the exporter turns into a publishable report.
+            raise CyberGymScoreError(
+                f"refusing to record CyberGym epoch {int(epoch)} as attested without "
+                "an attestation policy digest: 'a policy exists' is not a claim about "
+                "which quotes it accepts. Pass "
+                "policy_digest=attestation_policy_digest(policy)."
+            )
+        if not want and digest:
+            raise CyberGymScoreError(
+                f"refusing to record CyberGym epoch {int(epoch)} as unattested while "
+                "naming an attestation policy: the two disagree about whether solves "
+                "had to carry a verified quote."
+            )
         try:
             with self._connection:
                 row = self._connection.execute(
-                    "SELECT enforced, detail FROM cybergym_epoch_attestation WHERE epoch=?",
+                    "SELECT enforced, detail, policy_digest FROM "
+                    "cybergym_epoch_attestation WHERE epoch=?",
                     (int(epoch),),
                 ).fetchone()
                 if row is not None:
@@ -154,14 +216,37 @@ class CyberGymScoreStore:
                             "its solves would be credited under one receipt that cannot "
                             "distinguish them. Start a new epoch instead."
                         )
+                    pinned = str(row["policy_digest"] or "")
+                    if pinned != digest:
+                        if want and not pinned:
+                            raise CyberGymScoreError(
+                                f"refusing to resume CyberGym epoch {int(epoch)}: it "
+                                "was opened by a build that recorded Intel-TDX "
+                                "enforcement without recording WHICH policy it "
+                                "enforced, so there is nothing to check this run's "
+                                "policy against and no way to tell an unchanged policy "
+                                "from a swapped trust root. Start a new epoch instead."
+                            )
+                        raise CyberGymScoreError(
+                            f"refusing to resume CyberGym epoch {int(epoch)}: the "
+                            "Intel-TDX attestation POLICY changed since the epoch "
+                            f"opened (pinned {pinned}, now {digest}). Enforcement is "
+                            "still on, so the posture flag alone cannot see this: "
+                            "swapping the trusted roots, the pinned measurements, or "
+                            "the freshness window mid-epoch admits solves the opening "
+                            "policy refused and exports them as attested. Start a new "
+                            "epoch instead."
+                        )
                     return
                 self._connection.execute(
                     "INSERT INTO cybergym_epoch_attestation"
-                    "(epoch, enforced, detail, recorded_at) VALUES (?,?,?,?)",
+                    "(epoch, enforced, detail, policy_digest, recorded_at) "
+                    "VALUES (?,?,?,?,?)",
                     (
                         int(epoch),
                         want,
                         str(detail),
+                        digest,
                         datetime.now(timezone.utc).isoformat(),
                     ),
                 )
@@ -177,10 +262,14 @@ class CyberGymScoreStore:
         that way: it means the producer never said, which a database written by an
         older build and a database written by a service that skipped the record
         both look like. Fail closed on it rather than guessing.
+
+        ``policy_digest`` is the third answer, and the same rule applies to it: an
+        ``enforced`` posture with an empty digest names no policy, so it is not
+        evidence that any particular trust root was in force.
         """
         row = self._connection.execute(
-            "SELECT enforced, detail, recorded_at FROM cybergym_epoch_attestation "
-            "WHERE epoch=?",
+            "SELECT enforced, detail, policy_digest, recorded_at FROM "
+            "cybergym_epoch_attestation WHERE epoch=?",
             (int(epoch),),
         ).fetchone()
         if row is None:
@@ -188,6 +277,7 @@ class CyberGymScoreStore:
         return {
             "enforced": bool(int(row["enforced"])),
             "detail": str(row["detail"]),
+            "policy_digest": str(row["policy_digest"] or ""),
             "recorded_at": str(row["recorded_at"]),
         }
 

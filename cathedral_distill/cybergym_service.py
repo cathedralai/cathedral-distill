@@ -26,7 +26,11 @@ from typing import Any, Mapping, Sequence
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from cathedral_distill.attestation import AttestationPolicy
+from cathedral_distill.attestation import (
+    AttestationError,
+    AttestationPolicy,
+    attestation_policy_digest,
+)
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level
 from cathedral_distill.cybergym_holdout import Holdout
 from cathedral_distill.cybergym_protocol import (
@@ -306,16 +310,33 @@ class CyberGymService:
         flag only records that an operator was asked to acknowledge the opt-out,
         while the policy is the thing that actually decides whether a solve must
         carry a verified quote to be credited.
+
+        And the policy's CONTENT is stamped, not merely its presence. A restart that
+        keeps a policy configured but replaces its `trusted_roots` — the Intel DCAP
+        root out, a key the miner holds in — admits every receipt the epoch's opening
+        policy refused, while `enforced` still reads True and the export goes out
+        with no flag and no warning. Binding
+        `attestation.attestation_policy_digest` makes that restart refuse on exactly
+        the terms a dropped policy already does.
         """
+        try:
+            digest = attestation_policy_digest(self._attestation_policy)
+        except AttestationError as exc:
+            raise ProtocolError(
+                "refusing to open the epoch: this Intel-TDX attestation policy "
+                f"cannot be pinned to the score database ({exc}). A policy the "
+                "posture record cannot bind is one a restart could change unseen."
+            ) from exc
         try:
             self._scores.record_attestation_posture(
                 self.chain.source_epoch,
                 enforced=self._attestation_policy is not None,
                 detail=(
-                    "Intel-TDX attestation policy configured"
+                    f"Intel-TDX attestation policy configured ({digest})"
                     if self._attestation_policy is not None
                     else "no Intel-TDX attestation policy: solves are credited unattested"
                 ),
+                policy_digest=digest,
             )
         except CyberGymScoreError as exc:
             raise ProtocolError(str(exc)) from exc

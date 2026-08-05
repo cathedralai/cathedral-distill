@@ -207,12 +207,17 @@ def require_attested_epoch(
     that skipped the record; neither is evidence of attestation, and treating
     "nobody said" as "yes" is precisely the silence this exists to break.
 
+    So is an epoch that records enforcement without recording WHICH policy was
+    enforced. "Attestation was on" says nothing about which trust roots were in
+    force, and an epoch that cannot name its policy cannot be shown to have refused
+    anything in particular — the same silence, one level down.
+
     `allow_unattested` is the E2E's explicit acknowledgement. It does not make the
     resulting bytes safe — they remain indistinguishable on the wire — so it belongs
     only to a preview against a disposable loopback intake.
     """
     posture = score_store.attestation_posture(source_epoch)
-    if posture is not None and posture["enforced"]:
+    if posture is not None and posture["enforced"] and posture.get("policy_digest"):
         return
     if allow_unattested:
         return
@@ -221,6 +226,17 @@ def require_attested_epoch(
             f"refusing to export CyberGym epoch {int(source_epoch)}: this score "
             "database does not record whether Intel-TDX attestation was enforced, so "
             "its solves cannot be shown to be attested. Re-close the epoch with a "
+            "current build, or pass allow_unattested=True (CLI: "
+            "--allow-unattested-e2e) if this is a loopback preview whose report will "
+            "never reach a production intake."
+        )
+    if posture["enforced"]:
+        raise CyberGymScoreReportError(
+            f"refusing to export CyberGym epoch {int(source_epoch)}: it records that "
+            "Intel-TDX attestation was enforced but not WHICH policy enforced it, so "
+            "nothing here shows which trusted roots or enclave measurements a solve "
+            "had to satisfy — and an epoch that cannot name its policy cannot be "
+            "shown to have been resumed under the same one. Re-run the epoch with a "
             "current build, or pass allow_unattested=True (CLI: "
             "--allow-unattested-e2e) if this is a loopback preview whose report will "
             "never reach a production intake."

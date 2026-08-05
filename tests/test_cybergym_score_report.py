@@ -10,6 +10,10 @@ import pytest
 
 from cathedral_distill import cybergym_score_report as report
 from cathedral_distill import cybergym_scores as scores_module
+from cathedral_distill.attestation import (
+    AttestationPolicy,
+    attestation_policy_digest,
+)
 from cathedral_distill.cybergym_evidence_manifest import manifest_digest
 from cathedral_distill.cybergym_scores import (
     EPOCH_CLOSED,
@@ -20,6 +24,16 @@ from cathedral_distill.cybergym_scores import (
 EPOCH = 42
 CLOSED_AT = "2026-08-03T10:11:12.123456+00:00"
 
+# The posture record binds the policy's CONTENT, so a fixture that claims
+# enforcement has to name a policy exactly as a running verifier does.
+DCAP_ROOT = bytes(range(32))
+ATTACKER_ROOT = bytes(range(1, 33))
+POLICY = AttestationPolicy(
+    trusted_roots={"intel-dcap-root-1": DCAP_ROOT},
+    allowed_measurements=frozenset({"tdx-mrtd:" + "ab" * 24}),
+)
+POLICY_DIGEST = attestation_policy_digest(POLICY)
+
 
 def _store(tmp_path, rows=(), *, attested=True):
     store = CyberGymScoreStore(str(tmp_path / "scores.sqlite"))
@@ -27,7 +41,12 @@ def _store(tmp_path, rows=(), *, attested=True):
     # refuses anything it cannot show was attested, so the default here is the
     # production posture and the exceptions say so explicitly.
     if attested:
-        store.record_attestation_posture(EPOCH, enforced=True, detail="policy configured")
+        store.record_attestation_posture(
+            EPOCH,
+            enforced=True,
+            detail="policy configured",
+            policy_digest=POLICY_DIGEST,
+        )
     with store._connection:
         for hotkey, units, receipt_id in rows:
             store._connection.execute(
@@ -292,7 +311,163 @@ def test_attestation_posture_cannot_change_midway_through_an_epoch(tmp_path):
     """
     store = _store(tmp_path, attested=False)
 
-    store.record_attestation_posture(EPOCH, enforced=True, detail="policy configured")
+    store.record_attestation_posture(
+        EPOCH, enforced=True, detail="policy configured", policy_digest=POLICY_DIGEST
+    )
     with pytest.raises(CyberGymScoreError, match="may not change enforcement"):
         store.record_attestation_posture(EPOCH, enforced=False, detail="policy dropped")
     assert store.attestation_posture(EPOCH)["enforced"] is True
+
+
+# --------------------------------------------------------------------------- #
+# The posture must pin the policy's CONTENT, not merely its existence
+# --------------------------------------------------------------------------- #
+
+def test_the_pinned_posture_binds_which_policy_not_merely_that_one_existed(tmp_path):
+    """A swapped trust root is a changed posture, even with enforcement still on.
+
+    Pinning the enforcement FLAG pins the existence of a policy. What decides
+    verdicts is its content: a restart that keeps `enforced=True` while replacing
+    `trusted_roots` with a key the claimant holds admits every quote the epoch's
+    opening policy refused, and the flag reads "enforced" throughout. So the digest
+    over the policy is what the epoch is actually pinned to.
+    """
+    store = _store(tmp_path, attested=False)
+    store.record_attestation_posture(
+        EPOCH, enforced=True, detail="intel root", policy_digest=POLICY_DIGEST
+    )
+
+    swapped = attestation_policy_digest(
+        AttestationPolicy(
+            trusted_roots={
+                "intel-dcap-root-1": DCAP_ROOT,
+                "miners-own-key": ATTACKER_ROOT,
+            },
+            allowed_measurements=POLICY.allowed_measurements,
+        )
+    )
+    with pytest.raises(CyberGymScoreError, match="attestation POLICY changed"):
+        store.record_attestation_posture(
+            EPOCH, enforced=True, detail="swapped root", policy_digest=swapped
+        )
+    assert store.attestation_posture(EPOCH)["policy_digest"] == POLICY_DIGEST
+
+
+def test_an_identical_policy_resumes_the_epoch_without_complaint(tmp_path):
+    """Canonical before digested: an equal policy must not spuriously refuse.
+
+    A guard that fired on dict insertion order or frozenset iteration order would be
+    an outage dressed as a control — the operator's correct restart would look like
+    an attack. The digest is taken over a normalised manifest, so a policy rebuilt
+    from the same material in a different order is the same policy.
+    """
+    store = _store(tmp_path, attested=False)
+    store.record_attestation_posture(
+        EPOCH, enforced=True, detail="intel root", policy_digest=POLICY_DIGEST
+    )
+
+    rebuilt = AttestationPolicy(
+        # Same material, rebuilt as different (but equal) mapping and set objects,
+        # exactly as a restart rebuilds a policy from configuration.
+        trusted_roots=dict({"intel-dcap-root-1": bytes(DCAP_ROOT)}),
+        allowed_measurements=frozenset(sorted(POLICY.allowed_measurements)),
+        allowed_gpu_measurements=None,
+    )
+    store.record_attestation_posture(
+        EPOCH,
+        enforced=True,
+        detail="restarted",
+        policy_digest=attestation_policy_digest(rebuilt),
+    )
+    assert store.attestation_posture(EPOCH)["policy_digest"] == POLICY_DIGEST
+
+
+def test_enforcement_cannot_be_claimed_without_naming_the_policy(tmp_path):
+    """"Attestation was on" is not a claim about which quotes were accepted."""
+    store = _store(tmp_path, attested=False)
+
+    with pytest.raises(CyberGymScoreError, match="without an attestation policy digest"):
+        store.record_attestation_posture(EPOCH, enforced=True, detail="policy configured")
+    assert store.attestation_posture(EPOCH) is None
+
+
+def test_an_epoch_pinned_without_a_policy_digest_cannot_be_resumed_or_exported(tmp_path):
+    """The pre-existing-epoch case fails closed, like an unrecorded posture does.
+
+    The first posture table stored only the flag. Those rows survive an upgrade, and
+    an epoch opened by that build cannot be shown to have been resumed under the
+    same policy — there is nothing to compare against. Treating it as attested would
+    hand the swap back to anyone who could arrange one restart under the old build.
+    """
+    store = _store(tmp_path, [("5Miner", "8", "receipt-a")], attested=False)
+    # Exactly what the older build wrote: enforcement claimed, policy unnamed.
+    with store._connection:
+        store._connection.execute(
+            "INSERT INTO cybergym_epoch_attestation"
+            "(epoch, enforced, detail, policy_digest, recorded_at) VALUES (?,?,?,?,?)",
+            (EPOCH, 1, "policy configured", "", CLOSED_AT),
+        )
+    store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=1, at=CLOSED_AT)
+
+    assert store.attestation_posture(EPOCH)["policy_digest"] == ""
+    with pytest.raises(CyberGymScoreError, match="without recording WHICH policy"):
+        store.record_attestation_posture(
+            EPOCH, enforced=True, detail="resumed", policy_digest=POLICY_DIGEST
+        )
+    with pytest.raises(report.CyberGymScoreReportError, match="not WHICH policy"):
+        _build(store)
+
+    # The loopback acknowledgement is still the only way through, and it is loud.
+    assert report.build_score_report(
+        store,
+        network="finney",
+        netuid=39,
+        source_epoch=EPOCH,
+        producer_hotkey="5Producer",
+        allow_unattested=True,
+    )["scores"] == {"5Miner": 8.0}
+
+
+def test_an_unattested_epoch_may_not_name_a_policy(tmp_path):
+    """The flag and the digest must agree, or the record says two things at once."""
+    store = _store(tmp_path, attested=False)
+
+    with pytest.raises(CyberGymScoreError, match="as unattested while naming"):
+        store.record_attestation_posture(
+            EPOCH, enforced=False, detail="no policy", policy_digest=POLICY_DIGEST
+        )
+
+
+def test_a_posture_table_without_the_digest_column_is_migrated_in_place(tmp_path):
+    """An existing database opens and keeps its rows; the column arrives empty.
+
+    Empty is the fail-closed value, not a silent pass: the row still claims
+    enforcement, and both the resume guard and the exporter refuse it (see
+    `test_an_epoch_pinned_without_a_policy_digest_cannot_be_resumed_or_exported`).
+    """
+    import sqlite3
+
+    path = tmp_path / "legacy.sqlite"
+    legacy = sqlite3.connect(str(path))
+    legacy.execute(
+        "CREATE TABLE cybergym_epoch_attestation ("
+        "  epoch INTEGER PRIMARY KEY, enforced INTEGER NOT NULL,"
+        "  detail TEXT NOT NULL, recorded_at TEXT NOT NULL)"
+    )
+    legacy.execute(
+        "INSERT INTO cybergym_epoch_attestation VALUES (?,?,?,?)",
+        (EPOCH, 1, "policy configured", CLOSED_AT),
+    )
+    legacy.commit()
+    legacy.close()
+
+    store = CyberGymScoreStore(str(path))
+
+    assert store.attestation_posture(EPOCH) == {
+        "enforced": True,
+        "detail": "policy configured",
+        "policy_digest": "",
+        "recorded_at": CLOSED_AT,
+    }
+    # Idempotent: reopening an already-migrated database is a no-op.
+    assert CyberGymScoreStore(str(path)).attestation_posture(EPOCH)["policy_digest"] == ""

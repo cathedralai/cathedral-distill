@@ -164,3 +164,88 @@ def test_gpu_receipt_with_a_swapped_token_is_refused():
     with pytest.raises(cr.ComputeReceiptError, match="GPU attestation did not verify"):
         cr.verify_receipt(receipt, KEYREG, now_iso=NOW_ISO, source_epoch=EPOCH,
                           gpu_attestation_verifier=verifier)
+
+
+# --------------------------------------------------------------------------- #
+# The policy's own content, made checkable (`attestation_policy_digest`)
+# --------------------------------------------------------------------------- #
+
+def test_the_policy_digest_is_stable_across_equal_policies():
+    """Canonical before digested, or a correct restart looks like an attack.
+
+    Trusted roots arrive as a dict and measurements as a frozenset, neither of which
+    has a defined iteration order. If the digest inherited that order, an operator
+    restarting a verifier from unchanged configuration would be refused at random —
+    and the first fix anyone reaches for is to turn the control off.
+    """
+    other = att.AttestationPolicy(
+        trusted_roots=dict({"nvidia-nras-root-1": bytes(ROOT_PUB)}),
+        allowed_measurements=frozenset([SEV_MEAS]),
+        allowed_gpu_measurements=frozenset([GPU_MEAS]),
+    )
+    assert att.attestation_policy_digest(_policy()) == att.attestation_policy_digest(other)
+    assert att.attestation_policy_digest(None) == ""
+    assert att.attestation_policy_digest(_policy()).startswith("sha256:")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        # An added signer: the swap that admits a claimant's own key while the
+        # enforcement flag still reads "on".
+        {"trusted_roots": {"nvidia-nras-root-1": ROOT_PUB, "miners-own": b"\x02" * 32}},
+        # A replaced signer.
+        {"trusted_roots": {"nvidia-nras-root-1": b"\x03" * 32}},
+        # A renamed signer, same key material.
+        {"trusted_roots": {"some-other-root": ROOT_PUB}},
+        # A widened enclave allow-list (SEC-TDX-1).
+        {"allowed_measurements": frozenset(
+            {SEV_MEAS, "sev-snp-measurement-sha384:" + "11" * 48}
+        )},
+        # Turning the GPU-measurement check off entirely.
+        {"allowed_gpu_measurements": None},
+        # A longer freshness window admits staler quotes.
+        {"max_age_seconds": att.DEFAULT_MAX_AGE_SECONDS * 2},
+    ],
+)
+def test_every_verdict_changing_field_changes_the_digest(change):
+    """Each knob that can admit a quote the old policy refused must be visible."""
+    assert att.attestation_policy_digest(
+        _policy(**change)
+    ) != att.attestation_policy_digest(_policy())
+
+
+def test_a_policy_field_the_manifest_cannot_bind_is_refused_rather_than_dropped():
+    """A new knob must break this loudly instead of silently escaping the digest.
+
+    The whole failure being fixed is a verdict-deciding input that the posture
+    record could not see change. Adding a field to `AttestationPolicy` without
+    encoding it here would recreate that exactly, one field smaller, so the manifest
+    checks its own completeness against the dataclass.
+    """
+    import dataclasses
+
+    @dataclasses.dataclass(frozen=True)
+    class _Grown(att.AttestationPolicy):
+        require_debug_disabled: bool = True
+
+    grown = _Grown(trusted_roots={"nvidia-nras-root-1": ROOT_PUB},
+                   allowed_measurements=frozenset({SEV_MEAS}))
+    with pytest.raises(att.AttestationError, match="does not bind"):
+        att.attestation_policy_digest(grown)
+
+
+@pytest.mark.parametrize(
+    "policy,match",
+    [
+        (dict(trusted_roots={"root": "not-bytes"}), "raw public-key bytes"),
+        (dict(trusted_roots={"": ROOT_PUB}), "non-empty strings"),
+        (dict(allowed_measurements=SEV_MEAS), "set of measurement strings"),
+        (dict(allowed_measurements=frozenset({7})), "entries must be strings"),
+        (dict(max_age_seconds="3600"), "max_age_seconds must be an int"),
+    ],
+)
+def test_a_policy_that_cannot_be_encoded_faithfully_refuses_to_digest(policy, match):
+    """Refusing to digest is fail-closed: a partial digest binds a partial policy."""
+    with pytest.raises(att.AttestationError, match=match):
+        att.attestation_policy_digest(_policy(**policy))

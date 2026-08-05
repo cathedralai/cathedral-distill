@@ -60,6 +60,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cathedral_distill.attestation import (  # noqa: E402
     ATTESTATION_SCHEMA,
     AttestationPolicy,
+    attestation_policy_digest,
     sign_attestation,
 )
 from cathedral_distill.cybergym_attest import submission_report_data  # noqa: E402
@@ -654,7 +655,12 @@ def test_the_running_service_records_its_attestation_posture_beside_the_scores(
     service.submit(_receipt(_dispatch(service)), authenticated_caller=MINER)
     service.score_epoch(issued_at="2026-07-29T12:00:00.000000Z")
 
-    assert service._scores.attestation_posture(EPOCH)["enforced"] is True
+    posture = service._scores.attestation_posture(EPOCH)
+    assert posture["enforced"] is True
+    # And it says WHICH policy — see the swapped-root regression below.
+    assert posture["policy_digest"] == attestation_policy_digest(
+        _policy(trusted={DCAP_ROOT_ID: DCAP_ROOT_PUB, SYNTHETIC_KEY_ID: SYNTHETIC_PUB})
+    )
     document = build_score_report(
         service._scores,
         network="finney",
@@ -663,6 +669,154 @@ def test_the_running_service_records_its_attestation_posture_beside_the_scores(
         producer_hotkey=VALIDATOR,
     )
     assert document["scores"][MINER] > 0
+
+
+def test_a_swapped_trust_root_cannot_resume_the_epoch_it_did_not_open(tmp_path):
+    """The reviewer's bypass, reproduced and refused.
+
+    Pinning "a policy exists" pins nothing an attacker wants. The demonstrated
+    sequence was: open epoch N under the Intel DCAP root, watch it refuse a receipt,
+    then restart the SAME epoch on the SAME score database with `trusted_roots`
+    swapped to the miner's own key. The previously-refused receipt was admitted and
+    credited, the posture still read ``enforced=True`` because a policy still
+    existed, and ``build_score_report`` exported the result with no flag and no
+    warning — unattested-in-substance work, indistinguishable on the wire from work
+    an Intel root vouched for.
+
+    The posture now binds the policy's CONTENT, so the swap is refused on exactly
+    the terms a dropped policy already was: at the door, before a receipt can be
+    submitted at all. What the operator gets is a refusal naming both digests, not a
+    silently re-anchored epoch.
+    """
+    from cathedral_distill.cybergym_score_report import (
+        CyberGymScoreReportError,
+        build_score_report,
+    )
+
+    # 1. The epoch opens under the Intel root, and refuses the synthetic receipt.
+    honest = _service(
+        tmp_path, policy=_policy(trusted={DCAP_ROOT_ID: DCAP_ROOT_PUB}), name="swap"
+    )
+    receipt = _receipt(_dispatch(honest))
+    assert honest.submit(receipt, authenticated_caller=MINER).reason == (
+        UNTRUSTED_SIGNER_REFUSAL
+    )
+    opened_with = honest._scores.attestation_posture(EPOCH)["policy_digest"]
+    assert opened_with
+
+    # 2. The same epoch, the same databases, the miner's own key now trusted.
+    with pytest.raises(ProtocolError) as raised:
+        _service(
+            tmp_path,
+            policy=_policy(
+                trusted={DCAP_ROOT_ID: DCAP_ROOT_PUB, SYNTHETIC_KEY_ID: SYNTHETIC_PUB}
+            ),
+            name="swap",
+        )
+    assert "attestation POLICY changed" in str(raised.value)
+    assert opened_with in str(raised.value)
+
+    # 3. The receipt is still refused, and the epoch was never re-anchored.
+    assert honest.submit(receipt, authenticated_caller=MINER).reason == (
+        UNTRUSTED_SIGNER_REFUSAL
+    )
+    assert honest._scores.attestation_posture(EPOCH)["policy_digest"] == opened_with
+    assert honest._scores.epoch_scores(EPOCH) == {}
+
+    # 4. And the export is empty: the swap produced no credited solve to publish.
+    #    Before this, the identical sequence exported ``{MINER: 2.0}`` under a
+    #    posture that read "enforced", with no flag and no warning.
+    honest.score_epoch(issued_at="2026-07-29T12:00:00.000000Z")
+    assert build_score_report(
+        honest._scores,
+        network="finney",
+        netuid=39,
+        source_epoch=EPOCH,
+        producer_hotkey=VALIDATOR,
+    )["scores"] == {}
+
+
+def test_an_unchanged_policy_resumes_the_same_epoch_cleanly(tmp_path):
+    """The other half of a usable control: a correct restart must not be an outage.
+
+    A guard that refused whenever a policy object was rebuilt would make every
+    legitimate restart look like the attack above, and the first operator to hit it
+    would reach for the opt-out. The digest is taken over a canonical manifest, so a
+    policy reconstructed from the same configuration — different dict, different
+    frozenset, different order — resumes without complaint, and the receipt that was
+    refused before is refused again for the same reason.
+    """
+    first = _service(
+        tmp_path, policy=_policy(trusted={DCAP_ROOT_ID: DCAP_ROOT_PUB}), name="resume"
+    )
+    receipt = _receipt(_dispatch(first))
+    assert first.submit(receipt, authenticated_caller=MINER).reason == (
+        UNTRUSTED_SIGNER_REFUSAL
+    )
+    opened_with = first._scores.attestation_posture(EPOCH)["policy_digest"]
+
+    resumed = _service(
+        tmp_path,
+        policy=AttestationPolicy(
+            trusted_roots=dict({DCAP_ROOT_ID: bytes(DCAP_ROOT_PUB)}),
+            allowed_measurements=frozenset(sorted({MEASURE})),
+            allowed_gpu_measurements=None,
+        ),
+        name="resume",
+    )
+    assert resumed._scores.attestation_posture(EPOCH)["policy_digest"] == opened_with
+    # The sealed batch is drawn from the chain-anchored nonce, so the resumed
+    # process re-dispatches the identical batch and the same receipt answers it.
+    assert _dispatch(resumed).batch_id == receipt.batch_id
+    assert resumed.submit(receipt, authenticated_caller=MINER).reason == (
+        UNTRUSTED_SIGNER_REFUSAL
+    )
+
+
+def test_an_epoch_opened_without_a_recorded_policy_digest_fails_closed(tmp_path):
+    """The pre-existing-epoch case: unnamed policy, no resume, no export.
+
+    A score database written by the build that stamped only the enforcement flag
+    claims attestation but cannot say what it enforced, so there is nothing for a
+    restart to be checked against. Admitting it would hand the swap back to anyone
+    who could arrange one run under the older build, so it is refused exactly as an
+    unrecorded posture is.
+    """
+    from cathedral_distill.cybergym_score_report import (
+        CyberGymScoreReportError,
+        build_score_report,
+    )
+
+    root = tmp_path / "legacy"
+    root.mkdir(parents=True, exist_ok=True)
+    store = CyberGymScoreStore(str(root / "scores.sqlite"))
+    with store._connection:
+        store._connection.execute(
+            "INSERT INTO cybergym_epoch_attestation"
+            "(epoch, enforced, detail, policy_digest, recorded_at) VALUES (?,?,?,?,?)",
+            (EPOCH, 1, "Intel-TDX attestation policy configured", "", ISSUED),
+        )
+    store.close()
+
+    with pytest.raises(ProtocolError, match="without recording WHICH policy"):
+        _service(
+            tmp_path,
+            policy=_policy(trusted={DCAP_ROOT_ID: DCAP_ROOT_PUB}),
+            name="legacy",
+        )
+
+    reopened = CyberGymScoreStore(str(root / "scores.sqlite"))
+    reopened.mark_epoch(
+        EPOCH, state="closed", scored_miners=0, at="2026-07-29T12:00:00.000000+00:00"
+    )
+    with pytest.raises(CyberGymScoreReportError, match="not WHICH policy"):
+        build_score_report(
+            reopened,
+            network="finney",
+            netuid=39,
+            source_epoch=EPOCH,
+            producer_hotkey=VALIDATOR,
+        )
 
 
 def test_an_unattested_e2e_epoch_cannot_be_exported_by_accident(tmp_path):
