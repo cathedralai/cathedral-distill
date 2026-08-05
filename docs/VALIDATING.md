@@ -156,14 +156,21 @@ so `CyberGymService` runs identically, but wired to the genuine corpus:
   differential. It executes the task's immutable vulnerable/fixed
   `repository@sha256:...` references, never a mutable tag, and accepts only the
   configured sanitizer plus expected process-death evidence.
-- **`ReproTaskSource(manifest)`** — draws a nonce-sealed batch from a private
-  per-epoch manifest. Its evidence digest commits task metadata and both image
-  identities; `artifact()` remains `None` and `context_provider` serves level-gated
-  context.
+- **`ReproTaskSource(manifest, challenge_artifacts=...)`** — draws a nonce-sealed
+  batch from a private per-epoch manifest. A legacy v1 manifest has only the
+  validator image pair and is always non-rewardable. A v2 manifest additionally
+  pins a bounded miner-artifact digest and validator-only reference-PoC digest;
+  `PrivateChallengeArtifactStore` delivers only the former to an authenticated,
+  batch-bound miner, while `PrivateReferencePoCStore` supplies the latter to
+  admission. The evidence digest commits both blobs and the immutable verifier pair.
 - **`available_tasks(manifest)`** — verifies that every exact pinned image needed
   by a manifest is local before the server starts.
 
-Serve it with the production spine — a `ThreadingHTTPServer` (connections thread so
+Use a v1 manifest only for the reference dry-run server below. A v2 manifest is
+deliberately refused by that entrypoint because it has no caller-identity verifier;
+wire the source through an authenticated transport adapter instead.
+
+Serve the authenticated integration with the production spine — a `ThreadingHTTPServer` (connections thread so
 a slow verify never refuses sockets), serialised stateful handlers (one Docker
 differential at a time), and a lock-free `GET /healthz`:
 
@@ -260,6 +267,11 @@ Both default to off on the loopback-only development path. The server helpers no
 refuse a non-loopback bind unless `require_authentication=True`; an authenticator
 that raises is treated as "no identity" rather than a 500, so a broken verifier
 fails closed.
+
+For a v2 private repro manifest, authentication is mandatory even on loopback:
+`/cybergym/artifact` requires the authenticated miner's own sealed `batch_id` and
+returns only the digest-pinned challenge bytes. It never returns the vulnerable or
+fixed verifier image or the validator-held reference PoC.
 
 **The identity mechanism is deliberately not chosen here.** A Bittensor axon's
 verified `dendrite.hotkey`, a bearer per miner, or a signature over the canonical

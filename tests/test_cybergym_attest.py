@@ -171,6 +171,31 @@ def test_report_data_requires_all_fields():
         )
 
 
+def test_private_artifact_digest_is_bound_into_the_tdx_report_data():
+    base = {
+        "batch_id": "b",
+        "task_id": "t",
+        "poc_sha256": "sha256:" + "a" * 64,
+        "trace_id": "sha256:" + "b" * 64,
+        "miner_hotkey": "m",
+        "model_commitment": "sha256:" + "c" * 64,
+        "artifact_digest": "sha256:" + "d" * 64,
+    }
+    report_data = submission_report_data(**base)
+    assert report_data != submission_report_data(**(base | {
+        "artifact_digest": "sha256:" + "e" * 64,
+    }))
+    token = _make_token(report_data=report_data)
+    assert verify_submission_attestation(token, policy=POLICY, now=NOW, **base)["tee"] == "intel_tdx"
+    with pytest.raises(CyberGymAttestError, match="report_data"):
+        verify_submission_attestation(
+            token,
+            policy=POLICY,
+            now=NOW,
+            **(base | {"artifact_digest": "sha256:" + "e" * 64}),
+        )
+
+
 # --------------------------------------------------------------------------- #
 # process_submission: attested solve earns
 # --------------------------------------------------------------------------- #

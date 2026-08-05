@@ -411,11 +411,15 @@ class CyberGymService:
                 f"{self.chain.source_epoch} to {previous.model_commitment}; a "
                 f"different commitment ({model_commitment}) conflicts with the "
                 "frozen eligibility evidence, so it is refused for the rest of the epoch")
+        artifact_digest_provider = getattr(self.holdout.pool, "artifact_digest", None)
+        if not callable(artifact_digest_provider):
+            artifact_digest_provider = None
         message = dispatch(
             self.holdout.pool, self.chain,
             miner_hotkey=miner_hotkey, model_commitment=model_commitment,
             cutoff=self._cutoff, as_of=self._as_of, batch_size=self._batch_size,
             context_provider=self.holdout.context_provider,
+            artifact_digest_provider=artifact_digest_provider,
         )
         # A repeat dispatch must not silently erase accepted solves. Same committed
         # model -> same nonce -> same batch, so the solves already accepted this
@@ -460,17 +464,38 @@ class CyberGymService:
         source prefixes in a real holdout manifest, so this is reachable without
         constructing either source locally.
         """
-        return not is_fresh_task(task_id) and (
-            self._credit_synthetic_tasks or not is_synthetic_task(task_id)
+        return (
+            not is_fresh_task(task_id)
+            and (self._credit_synthetic_tasks or not is_synthetic_task(task_id))
+            and self._source_rewardable_task(task_id)
         )
 
-    @staticmethod
-    def _non_rewardable_source(task_id: str) -> str | None:
+    def _source_rewardable_task(self, task_id: str) -> bool:
+        """Honor a task source's own fail-closed reward-admission decision."""
+        policy = getattr(self.holdout.pool, "rewardable_task", None)
+        if not callable(policy):
+            return True
+        try:
+            return bool(policy(task_id))
+        except Exception:  # noqa: BLE001 - source policy failures must not pay
+            return False
+
+    def _non_rewardable_source(self, task_id: str) -> str | None:
         """Return the source label that forces a solved task to zero units."""
         if is_fresh_task(task_id):
             return "fresh"
         if is_synthetic_task(task_id):
             return "synthetic"
+        if not self._source_rewardable_task(task_id):
+            reason = getattr(self.holdout.pool, "non_rewardable_reason", None)
+            if callable(reason):
+                try:
+                    detail = reason(task_id)
+                except Exception:  # noqa: BLE001 - preserve fail-closed policy
+                    detail = None
+                if isinstance(detail, str) and detail:
+                    return detail
+            return "source"
         return None
 
     def _authorize_caller_for_batch(self, *, authenticated_caller: str | None,
@@ -488,9 +513,6 @@ class CyberGymService:
             return
         if claimed_miner_hotkey is not None and claimed_miner_hotkey != authenticated_caller:
             raise ProtocolError("authenticated caller does not match submission miner_hotkey")
-        owner = self._by_batch.get(batch_id)
-        if owner != authenticated_caller:
-            raise ProtocolError("authenticated caller does not own this batch")
         state = self._miners.get(authenticated_caller)
         if state is None or state.dispatch is None or state.dispatch.batch_id != batch_id:
             raise ProtocolError("authenticated caller has no active sealed batch")
@@ -511,7 +533,7 @@ class CyberGymService:
             task_id=envelope.task_id,
             claimed_miner_hotkey=envelope.miner_hotkey,
         )
-        miner_hotkey = self._by_batch.get(envelope.batch_id)
+        miner_hotkey = authenticated_caller or self._by_batch.get(envelope.batch_id)
         if miner_hotkey is None:
             raise ProtocolError("submission references an unknown or expired batch")
         if envelope.miner_hotkey != miner_hotkey:
@@ -555,8 +577,18 @@ class CyberGymService:
         return outcome
 
     # -- artifact (validator -> miner): the vulnerable program to analyse --- #
+    def _artifact_digest_for(self, task_id: str) -> str | None:
+        """Return a source-pinned miner-artifact digest, if this source uses one."""
+        provider = getattr(self.holdout.pool, "artifact_digest", None)
+        if not callable(provider):
+            return None
+        digest = provider(task_id)
+        if digest is not None and (not isinstance(digest, str) or not digest):
+            raise ProtocolError("task source returned an invalid artifact digest")
+        return digest
+
     def artifact_for(self, task_id: str, *, batch_id: str | None = None,
-                     authenticated_caller: str | None = None) -> str:
+                     authenticated_caller: str | None = None) -> str | bytes:
         """Return the vulnerable program a miner must analyse for a dispatched task.
 
         This is the 'binary'/'repo' a CyberGym miner needs — over the wire a miner
@@ -564,10 +596,14 @@ class CyberGymService:
         it. Guarded to tasks THIS service actually dispatched: the holdout is
         secret, so the service must never generate-and-reveal a program for a task
         it did not draw (that would turn the artifact route into a holdout oracle).
-        For a synthetic task the artifact is the generated source; for a real
-        corpus task it is fetched out of band by `binary_digest` (not inline), so
-        this raises directing the miner there.
+        For a synthetic task the artifact is the generated source. A private repro
+        task instead returns its separately pinned challenge bytes, and only after
+        the caller is authenticated for the sealed batch; verifier images and
+        reference PoCs never cross this route.
         """
+        artifact_digest = self._artifact_digest_for(task_id)
+        if artifact_digest is not None and authenticated_caller is None:
+            raise ProtocolError("private challenge artifact requires an authenticated caller")
         if authenticated_caller is not None:
             if not batch_id:
                 raise ProtocolError("authenticated artifact request requires batch_id")
@@ -581,15 +617,24 @@ class CyberGymService:
         provider = getattr(self.holdout.pool, "artifact", None)
         program = provider(task_id) if provider is not None else None
         if program is None:
+            # Preserve the legacy public-corpus contract: those sources have no
+            # private-artifact commitment and miners may resolve their documented
+            # binary by digest elsewhere. A private repro source exposes an
+            # ``artifact_digest`` policy even when its stores are incomplete, and
+            # must never be represented as an out-of-band downloadable image.
+            if not callable(getattr(self.holdout.pool, "artifact_digest", None)):
+                raise ProtocolError("artifact must be fetched out of band by binary digest")
             raise ProtocolError(
-                "no inline artifact for this task; fetch the build out of band by binary_digest"
+                "no validator-delivered artifact is available for this task"
             )
-        return str(program)
+        if not isinstance(program, (str, bytes)):
+            raise ProtocolError("task source returned an invalid artifact")
+        return program
 
     # -- transport-agnostic handlers --------------------------------------- #
     def handle_artifact(self, request: Mapping[str, Any], *,
                         authenticated_caller: str | None = None) -> dict[str, Any]:
-        """``{task_id, batch_id?}`` -> ``{task_id, program}`` (or ``{error}``).
+        """Return one task artifact, or ``{error}``.
 
         An authenticated caller must supply its sealed ``batch_id``. The optional
         field preserves the loopback development contract, which has no caller
@@ -604,11 +649,21 @@ class CyberGymService:
         if batch_id is not None and (not isinstance(batch_id, str) or not batch_id):
             return {"error": "batch_id must be a non-empty string when provided"}
         try:
-            return {
-                "task_id": task_id,
-                "program": self.artifact_for(
-                    task_id, batch_id=batch_id, authenticated_caller=authenticated_caller),
-            }
+            artifact = self.artifact_for(
+                task_id, batch_id=batch_id, authenticated_caller=authenticated_caller
+            )
+            if isinstance(artifact, bytes):
+                digest = self._artifact_digest_for(task_id)
+                actual = "sha256:" + hashlib.sha256(artifact).hexdigest()
+                if digest is None or actual != digest:
+                    raise ProtocolError("validator challenge artifact digest mismatch")
+                return {
+                    "task_id": task_id,
+                    "artifact_base64": base64.b64encode(artifact).decode("ascii"),
+                    "artifact_digest": digest,
+                    "encoding": "base64",
+                }
+            return {"task_id": task_id, "program": artifact}
         except (ProtocolError, ValueError) as exc:
             return {"error": str(exc)}
 

@@ -18,12 +18,20 @@ from typing import Any, Mapping, Sequence
 
 from cathedral_distill.cybergym import Level, Task
 
+# v1 pins only the validator's vulnerable/fixed image pair. It remains readable
+# for historical/dev manifests but cannot be a reward-bearing task source because
+# it has no separately delivered miner artifact or validator-held PoC commitment.
 MANIFEST_SCHEMA = "cathedral_cybergym_private_repro_manifest_v1"
+# v2 adds the two independent blobs a reward-bearing task needs: the bounded
+# miner artifact and the validator-only reference PoC. Neither blob is embedded
+# in the manifest; only its immutable digest is committed here.
+REWARD_MANIFEST_SCHEMA = "cathedral_cybergym_private_repro_manifest_v2"
 BATCH_EVIDENCE_SCHEMA = "cathedral_cybergym_pinned_batch_evidence_v1"
 MANIFEST_DOMAIN = b"cathedral-cybergym-private-repro-manifest-v1\x00"
 TASK_DOMAIN = b"cathedral-cybergym-repro-image-pair-v1\x00"
 BATCH_DOMAIN = b"cathedral-cybergym-pinned-batch-evidence-v1\x00"
 _PINNED_IMAGE_RE = re.compile(r"\A[^\s@]+@sha256:[0-9a-f]{64}\Z")
+_SHA256_DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 _CONTEXT_FIELDS = frozenset({"description", "sanitizer_trace", "patch"})
 
 
@@ -68,6 +76,12 @@ def _pinned_image(value: Any, *, field: str) -> str:
     return value
 
 
+def _sha256_digest(value: Any, *, field: str) -> str:
+    if not isinstance(value, str) or _SHA256_DIGEST_RE.fullmatch(value) is None:
+        raise ReproManifestError(f"{field} must be sha256:<64 lowercase hex>")
+    return value
+
+
 @dataclass(frozen=True)
 class PinnedReproTask:
     """One undisclosed task plus its exact vulnerable and fixed images."""
@@ -78,6 +92,16 @@ class PinnedReproTask:
     vulnerable_image: str
     fixed_image: str
     context: Mapping[str, str]
+    challenge_artifact_digest: str | None = None
+    reference_poc_digest: str | None = None
+
+    @property
+    def reward_ready(self) -> bool:
+        """Whether this task commits both blobs needed on the reward path."""
+        return (
+            self.challenge_artifact_digest is not None
+            and self.reference_poc_digest is not None
+        )
 
     @property
     def binary_digest(self) -> str:
@@ -98,7 +122,7 @@ class PinnedReproTask:
         )
 
     def evidence(self) -> dict[str, Any]:
-        return {
+        evidence = {
             "task_id": self.task_id,
             "level": int(self.level),
             "disclosed_at": self.disclosed_at.isoformat(),
@@ -106,6 +130,11 @@ class PinnedReproTask:
             "vulnerable_image": self.vulnerable_image,
             "fixed_image": self.fixed_image,
         }
+        if self.challenge_artifact_digest is not None:
+            evidence["challenge_artifact_digest"] = self.challenge_artifact_digest
+        if self.reference_poc_digest is not None:
+            evidence["reference_poc_digest"] = self.reference_poc_digest
+        return evidence
 
 
 @dataclass(frozen=True)
@@ -115,6 +144,14 @@ class PrivateReproManifest:
     source_epoch: int
     tasks: tuple[PinnedReproTask, ...]
     digest: str
+    schema: str = MANIFEST_SCHEMA
+
+    @property
+    def reward_ready(self) -> bool:
+        """Whether every task has the v2 private-artifact commitments."""
+        return self.schema == REWARD_MANIFEST_SCHEMA and all(
+            task.reward_ready for task in self.tasks
+        )
 
     def task(self, task_id: str) -> PinnedReproTask:
         for task in self.tasks:
@@ -141,12 +178,14 @@ class PrivateReproManifest:
         return _digest(BATCH_DOMAIN, self.batch_evidence(task_ids))
 
 
-def _parse_task(value: Any) -> PinnedReproTask:
+def _parse_task(value: Any, *, reward_manifest: bool) -> PinnedReproTask:
     if not isinstance(value, Mapping):
         raise ReproManifestError("each manifest task must be an object")
     expected = {
         "task_id", "level", "disclosed_at", "vulnerable_image", "fixed_image", "context",
     }
+    if reward_manifest:
+        expected |= {"challenge_artifact_digest", "reference_poc_digest"}
     if set(value) != expected:
         missing = sorted(expected - set(value))
         unknown = sorted(set(value) - expected)
@@ -169,6 +208,16 @@ def _parse_task(value: Any) -> PinnedReproTask:
         vulnerable_image=_pinned_image(value["vulnerable_image"], field="vulnerable_image"),
         fixed_image=_pinned_image(value["fixed_image"], field="fixed_image"),
         context={key: str(raw_context[key]) for key in sorted(raw_context)},
+        challenge_artifact_digest=(
+            _sha256_digest(
+                value["challenge_artifact_digest"], field="challenge_artifact_digest"
+            )
+            if reward_manifest else None
+        ),
+        reference_poc_digest=(
+            _sha256_digest(value["reference_poc_digest"], field="reference_poc_digest")
+            if reward_manifest else None
+        ),
     )
     try:
         task.to_task()
@@ -186,23 +235,30 @@ def load_private_repro_manifest(document: Any) -> PrivateReproManifest:
     expected = {"schema", "source_epoch", "tasks"}
     if set(document) != expected:
         raise ReproManifestError("private repro manifest has unknown or missing fields")
-    if document["schema"] != MANIFEST_SCHEMA:
+    schema = document["schema"]
+    if schema not in (MANIFEST_SCHEMA, REWARD_MANIFEST_SCHEMA):
         raise ReproManifestError("unsupported private repro manifest schema")
     source_epoch = _nonnegative_int(document["source_epoch"], field="source_epoch")
     raw_tasks = document["tasks"]
     if not isinstance(raw_tasks, list) or not raw_tasks:
         raise ReproManifestError("private repro manifest tasks must be a non-empty list")
     tasks = tuple(sorted(
-        (_parse_task(value) for value in raw_tasks), key=lambda task: task.task_id
+        (
+            _parse_task(value, reward_manifest=(schema == REWARD_MANIFEST_SCHEMA))
+            for value in raw_tasks
+        ),
+        key=lambda task: task.task_id,
     ))
     if len({task.task_id for task in tasks}) != len(tasks):
         raise ReproManifestError("private repro manifest has duplicate task ids")
     canonical_tasks = [task.evidence() | {"context": dict(task.context)} for task in sorted(tasks, key=lambda item: item.task_id)]
     digest = _digest(
         MANIFEST_DOMAIN,
-        {"schema": MANIFEST_SCHEMA, "source_epoch": source_epoch, "tasks": canonical_tasks},
+        {"schema": schema, "source_epoch": source_epoch, "tasks": canonical_tasks},
     )
-    return PrivateReproManifest(source_epoch=source_epoch, tasks=tasks, digest=digest)
+    return PrivateReproManifest(
+        source_epoch=source_epoch, tasks=tasks, digest=digest, schema=schema
+    )
 
 
 def load_private_repro_manifest_file(path: str) -> PrivateReproManifest:
@@ -220,10 +276,29 @@ def build_private_repro_manifest(
     source_epoch: int,
     disclosed_at: datetime,
     metadata: Mapping[str, Mapping[str, Any]],
+    challenge_artifacts: Mapping[str, bytes] | None = None,
+    reference_pocs: Mapping[str, bytes] | None = None,
 ) -> dict[str, Any]:
-    """Build a manifest after image pull/inspection, for an explicit private epoch."""
+    """Build a private manifest after image pull/inspection.
+
+    Supplying both blob maps creates a v2 reward manifest. The caller writes the
+    exact bytes to validator-controlled artifact/PoC storage; only their digests
+    enter the manifest. Supplying neither preserves the v1 dry-run format.
+    """
     if disclosed_at.tzinfo is None or disclosed_at.utcoffset() is None:
         raise ReproManifestError("disclosed_at must include a UTC offset")
+    if (challenge_artifacts is None) != (reference_pocs is None):
+        raise ReproManifestError(
+            "challenge_artifacts and reference_pocs must be supplied together"
+        )
+    reward_manifest = challenge_artifacts is not None
+    if reward_manifest:
+        assert reference_pocs is not None
+        expected = set(images)
+        if set(challenge_artifacts) != expected or set(reference_pocs) != expected:
+            raise ReproManifestError(
+                "challenge_artifacts and reference_pocs must cover exactly the image task ids"
+            )
     rows = []
     for task_id in sorted(images):
         pair = images[task_id]
@@ -235,8 +310,7 @@ def build_private_repro_manifest(
             fixed_image = str(pair["fix"]["digest"])
         except (KeyError, TypeError) as exc:
             raise ReproManifestError(f"task {task_id!r} has no complete image pair") from exc
-        rows.append(
-            {
+        row = {
                 "task_id": task_id,
                 "level": int(meta["level"]),
                 "disclosed_at": disclosed_at.astimezone(UTC).isoformat(),
@@ -248,8 +322,26 @@ def build_private_repro_manifest(
                     if key in meta
                 },
             }
-        )
-    document = {"schema": MANIFEST_SCHEMA, "source_epoch": source_epoch, "tasks": rows}
+        if reward_manifest:
+            assert challenge_artifacts is not None and reference_pocs is not None
+            artifact = challenge_artifacts[task_id]
+            reference = reference_pocs[task_id]
+            if not isinstance(artifact, bytes) or not artifact:
+                raise ReproManifestError(
+                    f"challenge artifact for {task_id!r} must be non-empty bytes"
+                )
+            if not isinstance(reference, bytes):
+                raise ReproManifestError(
+                    f"reference PoC for {task_id!r} must be bytes"
+                )
+            row["challenge_artifact_digest"] = "sha256:" + hashlib.sha256(artifact).hexdigest()
+            row["reference_poc_digest"] = "sha256:" + hashlib.sha256(reference).hexdigest()
+        rows.append(row)
+    document = {
+        "schema": REWARD_MANIFEST_SCHEMA if reward_manifest else MANIFEST_SCHEMA,
+        "source_epoch": source_epoch,
+        "tasks": rows,
+    }
     # Validate the generated document before an operator writes it.
     load_private_repro_manifest(document)
     return document
@@ -257,6 +349,7 @@ def build_private_repro_manifest(
 
 __all__ = [
     "MANIFEST_SCHEMA",
+    "REWARD_MANIFEST_SCHEMA",
     "BATCH_EVIDENCE_SCHEMA",
     "PinnedReproTask",
     "PrivateReproManifest",
