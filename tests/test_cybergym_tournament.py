@@ -176,25 +176,33 @@ def test_grinding_an_early_hotkey_earns_no_permanent_advantage():
     assert len(set(ranks.values())) > 1  # the early address does not hold a fixed rank
 
 
-def test_a_numeric_merit_tiebreak_orders_numerically_not_lexicographically():
-    # solve-time seconds 9 / 10 / 100: earliest (9) must rank first. String order would
-    # be 10, 100, 9 — the earliest solver ranking LAST, the low-severity bug found.
-    scores = {"5x": [50], "5y": [50], "5z": [50]}
-    sb = build_scoreboard(1, scores, nonce=NONCE, tiebreak={"5x": 9, "5y": 10, "5z": 100})
-    assert [s.miner_hotkey for s in sb.standings] == ["5x", "5y", "5z"]
+def test_source_epoch_also_rotates_the_tiebreak():
+    # The digest keys on source_epoch too, so even a (hypothetically) repeated nonce
+    # cannot freeze the tie order across epochs.
+    hks = ["5Kf", "5Zz", "5Mn", "5Qp", "5Rt", "5Bc", "5Aa"]
+    scores = {h: [50] for h in hks}
+    o21 = [s.miner_hotkey for s in build_scoreboard(21, scores, nonce=b"same").standings]
+    o22 = [s.miner_hotkey for s in build_scoreboard(22, scores, nonce=b"same").standings]
+    assert o21 != o22
 
 
-def test_nonce_is_required():
-    with pytest.raises(TournamentError):
-        build_scoreboard(1, {"5a": [50]}, nonce=b"")
-    with pytest.raises(TournamentError):
-        build_scoreboard(1, {"5a": [50]}, nonce="")
+def test_a_non_string_or_bytes_nonce_is_refused_not_coerced():
+    # HIGH: str(None)=='None' is truthy, so coercing would freeze the tie-break to a
+    # grindable public constant. None / int / bool must all fail closed.
+    for bad in (None, 0, 1, False, True, 3.14, ["x"]):
+        with pytest.raises(TournamentError):
+            build_scoreboard(1, {"5a": [50]}, nonce=bad)
+    # empty bytes/str are non-empty-guarded too
+    for empty in (b"", ""):
+        with pytest.raises(TournamentError):
+            build_scoreboard(1, {"5a": [50]}, nonce=empty)
 
 
-def test_string_tiebreak_values_are_rejected():
-    # A str tiebreak would reintroduce lexicographic comparison; reject it at the door.
-    with pytest.raises(TournamentError):
-        build_scoreboard(1, {"5a": [50]}, nonce=NONCE, tiebreak={"5a": "09"})
+def test_there_is_no_hidden_tiebreak_override():
+    # The ranking is a pure function of scores + nonce + source_epoch (all in the board),
+    # so build_scoreboard accepts no caller tie-break a peer could not see.
+    with pytest.raises(TypeError):
+        build_scoreboard(1, {"5a": [50]}, nonce=NONCE, tiebreak={"5a": 0})  # type: ignore[call-arg]
 
 
 def _canonical(doc: dict) -> bytes:
@@ -220,26 +228,24 @@ def test_zero_score_miners_never_win():
     assert {s.miner_hotkey: s.lane_share for s in sb.standings}["5idle"] == Decimal("0")
 
 
-def test_short_field_renormalises_during_onboarding():
-    sb = build_scoreboard(1, {"5a": [90], "5b": [80]}, nonce=NONCE, renormalize_when_short=True)
+def test_short_field_renormalises_and_lane_burn_matches_compose_vector():
+    # <5 winners: renormalise present ranks to sum to 1 (full lane pays out, burn 0) —
+    # and shares summing to 1 is exactly what compose_vector applies, so the signed
+    # lane_burn=0 is not a false claim. (The mature-field *partial burn* is deferred to
+    # the composer-integration PR; announcing it here would sign a burn the composer
+    # renormalises away.)
+    sb = build_scoreboard(1, {"5a": [90], "5b": [80]}, nonce=NONCE)
     shares = {s.miner_hotkey: s.lane_share for s in sb.standings}
-    # 0.65 and 0.14 renormalised to sum to 1 -> full lane pays out, no burn
     assert shares["5a"] == Decimal("0.822785")   # 0.65 / 0.79
     assert shares["5b"] == Decimal("0.177215")   # 0.14 / 0.79
     assert sum(shares.values()) == Decimal("1")
     assert sb.lane_burn == Decimal("0")
 
 
-def test_short_field_burns_unfilled_slots_when_mature():
-    sb = build_scoreboard(1, {"5a": [90], "5b": [80]}, nonce=NONCE, renormalize_when_short=False)
-    shares = {s.miner_hotkey: s.lane_share for s in sb.standings}
-    assert shares["5a"] == Decimal("0.65") and shares["5b"] == Decimal("0.14")
-    # the three unfilled slots' share is forfeited to burn
-    assert sb.lane_burn == Decimal("0.21")
-
-
 def test_no_qualified_miners_burns_the_whole_lane():
-    sb = build_scoreboard(1, {"5idle": [0]}, nonce=NONCE, renormalize_when_short=True)
+    # An EMPTY lane is the one burn compose_vector honours (its allocation -> burn), so
+    # lane_burn=1 here is enforceable and honest.
+    sb = build_scoreboard(1, {"5idle": [0]}, nonce=NONCE)
     assert sb.winners == ()
     assert sb.lane_burn == Decimal("1")
 

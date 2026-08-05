@@ -139,19 +139,24 @@ class Scoreboard:
         }
 
 
-def _nonce_digest(nonce: bytes, hotkey: str) -> str:
+def _nonce_digest(nonce: bytes, source_epoch: int, hotkey: str) -> str:
     """The ungrindable per-epoch ordering value for ``hotkey``.
 
-    ``sha256(nonce ‖ hotkey)`` — deterministic (every validator computes the same) but
-    keyed on the chain-anchored epoch **nonce**, which no miner controls and which
-    changes each epoch. So a miner cannot pre-register a hotkey that sorts early: which
-    of a set of tied hotkeys wins is pseudo-random per epoch, not a permanent property
-    of the address. Same pattern as ``cybergym_mix.apportion``. (This does not by itself
-    resist Sybil — registering many hotkeys still costs registration + a UID slot each,
-    and each must independently earn the tying score; it removes the *free, permanent,
-    zero-work* advantage of a lexicographically-early address.)
+    ``sha256(nonce ‖ 0x00 ‖ source_epoch ‖ 0x00 ‖ hotkey)`` — deterministic (every
+    validator computes the same) but keyed on BOTH the chain-anchored epoch **nonce**
+    (which no miner controls and which changes each epoch) and the **source_epoch** (so
+    the tie order rotates every epoch even in the impossible case the same nonce
+    recurred, and a frozen nonce cannot freeze the ranking). Domain-separated with
+    ``0x00``. So which of a set of tied hotkeys wins is pseudo-random per epoch, not a
+    permanent property of the address. Same pattern as ``cybergym_mix.apportion``. (Not
+    Sybil resistance — registering many hotkeys still costs registration + a UID slot
+    each and each must earn the tying score; it removes the *free, permanent, zero-work*
+    advantage of a lexicographically-early address.)
     """
-    return hashlib.sha256(nonce + b"\x00" + hotkey.encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        nonce + b"\x00" + str(int(source_epoch)).encode("ascii") + b"\x00"
+        + hotkey.encode("utf-8")
+    ).hexdigest()
 
 
 def build_scoreboard(
@@ -159,8 +164,6 @@ def build_scoreboard(
     per_miner_scores: Mapping[str, Sequence[Decimal | int | str]],
     *,
     nonce: bytes | str,
-    tiebreak: Mapping[str, int] | None = None,
-    renormalize_when_short: bool = True,
 ) -> Scoreboard:
     """Rank every miner by their rolling total and award the top-5 lane shares.
 
@@ -168,36 +171,28 @@ def build_scoreboard(
     (oldest → latest). A **winner** is a top-5 miner with ``T > 0`` (no zero-solve
     earners).
 
-    ``nonce`` is the epoch's chain-anchored nonce (required). Because the top-5 cutoff
-    is payout-decisive and level-weighted scores tie often (a fully-solved batch ties at
-    ``T=100``), ties MUST break in a way no miner can grind. Ties break by the
-    ``nonce``-keyed digest (see ``_nonce_digest``), then hotkey — never by hotkey alone.
-
-    ``tiebreak`` optionally supplies a **typed merit** key per miner (``int``; a *smaller*
-    value ranks first, e.g. earliest-solve sequence). It takes precedence over the nonce
-    digest when present, is validated as ``int`` (compared numerically — not string-
-    coerced, so ``9 < 10 < 100``), and misses fall to the nonce digest. Omit it for the
-    pure ungrindable default.
-
-    ``renormalize_when_short`` controls the < 5-winner case:
-      * ``True`` (onboarding): renormalize the present ranks' shares to sum to 1 so the
-        whole 0.30 lane pays out to the miners that exist — no burning 84% of the lane
-        with two miners;
-      * ``False`` (mature field): keep the fixed shares; the unfilled slots' share
-        (``lane_burn``) is forfeited to burn.
-    When 5+ miners qualify the two are identical (shares already sum to 1, burn 0).
+    ``nonce`` is the epoch's chain-anchored nonce (required, ``bytes``/``bytearray``/
+    ``str``). Because the top-5 cutoff is payout-decisive and level-weighted scores tie
+    often (a fully-solved batch ties at ``T=100``), ties break **solely** by the
+    ungrindable ``sha256(nonce ‖ source_epoch ‖ hotkey)`` digest, then hotkey — never by
+    hotkey alone. There is deliberately no caller-supplied tie-break override: the whole
+    ranking is a pure function of the scores, the nonce, and ``source_epoch``, all of
+    which the signed scoreboard carries — so a peer reproduces it exactly and there is no
+    hidden input a validator could use to move a colluder (a merit tie-break can return
+    only when it is a *disclosed*, in-board signal). A non-string/bytes ``nonce`` is
+    refused rather than coerced: ``str(None)`` is the truthy 4-byte ``"None"``, which
+    would silently freeze the tie-break to a grindable constant.
     """
-    nonce_bytes = bytes(nonce) if isinstance(nonce, (bytes, bytearray)) else str(nonce).encode("utf-8")
+    if not isinstance(nonce, (bytes, bytearray, str)):
+        raise TournamentError(
+            f"nonce must be bytes/bytearray/str (the chain-anchored epoch nonce); got "
+            f"{type(nonce).__name__} — coercing it (e.g. str(None)=='None') would freeze "
+            "the tie-break to a grindable constant")
+    nonce_bytes = bytes(nonce) if isinstance(nonce, (bytes, bytearray)) else nonce.encode("utf-8")
     if not nonce_bytes:
         raise TournamentError(
             "build_scoreboard requires a non-empty epoch nonce: the top-5 cutoff is "
             "payout-decisive and ties are common, so the tie-break must be ungrindable")
-    if tiebreak is not None:
-        for hk, value in tiebreak.items():
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise TournamentError(
-                    f"tiebreak[{hk!r}] must be an int (e.g. solve-time seconds; smaller "
-                    "ranks first) — string values would compare lexicographically")
 
     totals: dict[str, Decimal] = {}
     scores: dict[str, tuple[Decimal, ...]] = {}
@@ -206,16 +201,15 @@ def build_scoreboard(
         scores[hotkey] = window
         totals[hotkey] = rolling_total(epoch_scores)
 
-    # Deterministic AND ungrindable ranking: T desc, then the typed merit key (missing =
-    # +inf so it defers to the shuffle), then the nonce-keyed digest, then hotkey.
-    def _order_key(hk: str) -> tuple[Decimal, float, str, str]:
-        merit: float = 0.0 if tiebreak is None else float(tiebreak.get(hk, float("inf")))
-        return (-totals[hk], merit, _nonce_digest(nonce_bytes, hk), hk)
-
-    ordered = sorted(totals, key=_order_key)
+    # Deterministic AND ungrindable ranking: T desc, then the nonce+epoch-keyed digest,
+    # then hotkey (the final, always-present total-order discriminator).
+    ordered = sorted(
+        totals,
+        key=lambda hk: (-totals[hk], _nonce_digest(nonce_bytes, source_epoch, hk), hk),
+    )
 
     winners = [h for h in ordered if totals[h] > 0][:WINNER_SLOTS]
-    shares = _award_shares(len(winners), renormalize_when_short=renormalize_when_short)
+    shares = _award_shares(len(winners))
     lane_burn = _q(Decimal(1) - sum(shares, Decimal(0)))
     share_by_hotkey = dict(zip(winners, shares))
 
@@ -234,18 +228,33 @@ def build_scoreboard(
         standings=standings,
         winners=tuple(winners),
         lane_burn=lane_burn,
-        tiebreak_nonce=nonce if isinstance(nonce, str) else nonce_bytes.hex(),
+        # Always the hex of the exact digest input, so the recorded value + the scores +
+        # source_epoch fully and unambiguously determine the ranking a peer reproduces.
+        tiebreak_nonce=nonce_bytes.hex(),
     )
 
 
-def _award_shares(n_winners: int, *, renormalize_when_short: bool) -> list[Decimal]:
-    """The lane shares for ``n_winners`` (0..5), in rank order."""
+def _award_shares(n_winners: int) -> list[Decimal]:
+    """The lane shares for ``n_winners`` (0..5), in rank order.
+
+    Fewer than five qualified miners renormalize the present ranks' fixed shares to sum
+    to 1, so the whole 0.30 lane pays out to the miners that exist rather than a windfall
+    to burn. An empty field (0 winners) returns no shares — the lane has no contributions
+    and ``compose_vector`` forfeits its whole allocation to burn (an *empty* lane is the
+    one burn case ``compose_vector`` honours today). The mature-field forfeit-to-burn for
+    a **partial** field is intentionally NOT modelled here: it would require
+    ``compose_vector`` to honour an explicit intra-lane burn (today it renormalizes the
+    shortfall away), so announcing a partial ``lane_burn`` would sign a claim the composer
+    does not enforce. That lands with the composer-integration PR; until then shares
+    always sum to 1 for any non-empty field and ``lane_burn`` is 0 (or 1 for an empty
+    field), which is exactly what ``compose_vector`` does.
+    """
     if n_winners <= 0:
         return []
     if n_winners > WINNER_SLOTS:  # pragma: no cover - winners is sliced to WINNER_SLOTS
         raise TournamentError("more winners than tournament slots")
     fixed = list(TOURNAMENT_SHARES[:n_winners])
-    if n_winners == WINNER_SLOTS or not renormalize_when_short:
+    if n_winners == WINNER_SLOTS:
         return fixed
     total = sum(fixed, Decimal(0))
     return [_q(s / total) for s in fixed]
@@ -254,12 +263,11 @@ def _award_shares(n_winners: int, *, renormalize_when_short: bool) -> list[Decim
 def lane_contributions(scoreboard: Scoreboard) -> list[dict[str, str]]:
     """The winners as CyberGym-lane contributions for ``lane_feed.compose_vector``.
 
-    ``work_units`` is set to the lane share, so ``compose_vector``'s in-lane
-    proportional split reproduces the tournament shares exactly *when they sum to 1*
-    (the ≥5-winner or renormalized case). In the mature < 5-winner **burn** case the
-    lane must forfeit ``scoreboard.lane_burn`` — that needs the lane composer to honour
-    an explicit intra-lane burn rather than renormalizing; wire ``lane_burn`` through
-    at integration. ``receipt_id`` is filled by the caller from the epoch receipt.
+    ``work_units`` is the lane share; the winners' shares always sum to 1 (see
+    ``_award_shares``), so ``compose_vector``'s in-lane proportional split reproduces the
+    tournament shares exactly, and its whole-lane burn (an empty lane) matches
+    ``scoreboard.lane_burn``. ``receipt_id`` is filled by the caller from the epoch
+    receipt.
     """
     return [
         {"miner_hotkey": s.miner_hotkey, "work_units": str(s.lane_share)}
