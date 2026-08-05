@@ -999,3 +999,42 @@ def test_the_receipt_policy_manifest_fails_closed_on_an_unbound_field():
     with pytest.raises(Exception) as exc:
         cathedral_receipt_policy_manifest(Extended(expected_workload_sha256="wl"))
     assert "does not bind" in str(exc.value)
+
+
+def test_the_merged_miner_client_earns_through_the_enforced_gate_and_exports(tmp_path):
+    """The attested loop on our side, end to end: the #106 miner client's submission is
+    credited by the ENFORCED Intel-TDX gate and exported as a signed report — everything
+    real except Cathedral's hardware quote/signature (offline_token stands in). Only
+    cathedral-compute#108 (Cathedral signing the token) remains."""
+    from cathedral_distill.cybergym_miner_attest import (
+        attestation_field, bind, offline_token,
+    )
+    from cathedral_distill.cybergym_protocol import _trace_from_dict
+    from cathedral_distill.cybergym_score_report import build_score_report
+
+    svc = _service(tmp_path, policy=_policy(trusted={DCAP_ROOT_ID: DCAP_ROOT_PUB}),
+                   name="miner-client-e2e")
+    assert svc._scores.attestation_posture(EPOCH)["enforced"] is True
+
+    disp = _dispatch(svc)
+    task = disp.tasks[0]
+    digest = poc_digest(CRASHING)
+    trace = _trace(task.task_id, digest)
+    rd = bind(batch_id=disp.batch_id, task_id=task.task_id, poc_sha256=digest,
+              trace_id=_trace_from_dict(trace).trace_id(), miner_hotkey=MINER,
+              model_commitment=disp.model_commitment, artifact_digest=task.artifact_digest)
+    token = offline_token(report_data=rd, measurement=MEASURE, root_seed=DCAP_ROOT_SEED,
+                          signing_key_id=DCAP_ROOT_ID, issued_at=ISSUED)
+    env = SubmissionEnvelope(
+        batch_id=disp.batch_id, task_id=task.task_id, miner_hotkey=MINER,
+        poc_base64=base64.b64encode(CRASHING).decode(), trace=trace,
+        artifact_digest=task.artifact_digest, attestation=attestation_field(token))
+
+    out = svc.submit(env, authenticated_caller=MINER)
+    assert out.creditable and out.solved  # the ENFORCED gate credited a real attested solve
+
+    svc.score_epoch(issued_at="2026-07-29T12:00:00.000000Z")
+    report = build_score_report(svc._scores, network="finney", netuid=39,
+                                source_epoch=EPOCH, producer_hotkey=VALIDATOR)
+    assert report["scores"] == {MINER: 2.0}
+    assert report["complete"] is True
