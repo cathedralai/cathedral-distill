@@ -247,6 +247,7 @@ def cmd_export_scores(args: argparse.Namespace) -> int:
             netuid=args.netuid,
             source_epoch=args.epoch,
             producer_hotkey=args.producer_hotkey,
+            allow_unattested=bool(getattr(args, "allow_unattested_e2e", False)),
         )
         body = canonical_report_bytes(report)
     except (CyberGymScoreError, CyberGymScoreReportError) as exc:
@@ -259,6 +260,15 @@ def cmd_export_scores(args: argparse.Namespace) -> int:
         f"{action} closed CyberGym epoch {args.epoch} report at {args.out}; "
         f"scores={len(report['scores'])} report_sha256={report_digest(report)}\n"
     )
+    if getattr(args, "allow_unattested_e2e", False):
+        # Loud, and on the command that produced the bytes: once written, nothing
+        # downstream can tell this report from an attested one.
+        sys.stderr.write(
+            "WARNING: this report was exported with --allow-unattested-e2e. Its "
+            "solves were credited with NO Intel-TDX attestation, and the wire "
+            "contract has no field that says so. Publish it ONLY to a disposable "
+            "loopback preview intake.\n"
+        )
     return 0
 
 
@@ -329,6 +339,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_export.add_argument(
         "--out", required=True, help="fresh or byte-identical frozen report path"
+    )
+    p_export.add_argument(
+        "--allow-unattested-e2e",
+        action="store_true",
+        help=(
+            "export an epoch scored with NO Intel-TDX attestation enforcement. "
+            "The resulting report is indistinguishable on the wire from an attested "
+            "one, so it must only ever be published to a disposable loopback preview "
+            "intake, never to a production one"
+        ),
     )
     p_export.set_defaults(func=cmd_export_scores)
 

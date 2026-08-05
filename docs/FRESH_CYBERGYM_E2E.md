@@ -67,8 +67,17 @@ cathedral-cybergym export-scores \
   --score-db /srv/cathedral-fresh-e2e/scores.sqlite \
   --epoch 21 --network finney --netuid 39 \
   --producer-hotkey cathedral-fresh-e2e \
+  --allow-unattested-e2e \
   --out /srv/cathedral-fresh-e2e/epoch-21.json
 ```
+
+`--allow-unattested-e2e` is required here and is not optional politeness. This
+server runs with `CYBERGYM_E2E_ALLOW_UNATTESTED=1` and therefore no Intel-TDX
+policy, so the epoch's stamped posture says its solves were credited unattested
+and the exporter refuses it (exit 2) without the flag. The flag does not make the
+bytes safe: the wire contract has no enforcement field, so the resulting report is
+indistinguishable from an attested one and must only ever reach the disposable
+loopback intake. The command prints that warning on stderr.
 
 The close command restores accepted PoCs from `CYBERGYM_SOLVE_DB`, re-derives
 the sealed task batch, and writes only a durably closed score epoch.  The
@@ -79,10 +88,20 @@ weights or turns this non-reward E2E verifier into a production authority.
 The close command validates it before the durable first-write-wins pin.  If a
 pre-validation E2E build already pinned a malformed timestamp, it refuses a
 silent replacement.  After confirming the epoch is still open and has no score
-rows, recover it explicitly with an auditable repair:
+rows, recover it explicitly with an auditable repair.  The repair rebuilds the
+same service, so it needs the same protected environment as the close above —
+without it the command exits before it reaches the repair, with
+`CYBERGYM_E2E_ALLOW_UNATTESTED=1 is required`:
 
 ```bash
-cathedral-cybergym-fresh-e2e-close \
+CYBERGYM_E2E_ALLOW_UNATTESTED=1 \
+CYBERGYM_FRESH_SEED="$(< /srv/cathedral-fresh-e2e/fresh.seed)" \
+CYBERGYM_SIGNING_SEED="$(< /srv/cathedral-fresh-e2e/signing.seed)" \
+CYBERGYM_CORPUS_DB=/srv/cathedral-fresh-e2e/corpus.sqlite \
+CYBERGYM_SCORE_DB=/srv/cathedral-fresh-e2e/scores.sqlite \
+CYBERGYM_SOLVE_DB=/srv/cathedral-fresh-e2e/solves.sqlite \
+CYBERGYM_E2E_AS_OF=2026-08-04T12:00:00+00:00 \
+  cathedral-cybergym-fresh-e2e-close \
   --issued-at 2026-08-04T13:00:00.000000Z \
   --repair-invalid-issued-at \
   --repair-reason 'pre-validation E2E timestamp pin'

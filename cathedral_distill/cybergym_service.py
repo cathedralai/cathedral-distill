@@ -26,7 +26,11 @@ from typing import Any, Mapping, Sequence
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from cathedral_distill.attestation import AttestationPolicy
+from cathedral_distill.attestation import (
+    AttestationError,
+    AttestationPolicy,
+    attestation_policy_digest,
+)
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level
 from cathedral_distill.cybergym_holdout import Holdout
 from cathedral_distill.cybergym_protocol import (
@@ -232,6 +236,7 @@ class CyberGymService:
         self._scoring_pass_ran = False         # whether score_epoch ran in this process
         # miner_hotkey -> why its durable solves cannot be scored this epoch
         self._unscorable: dict[str, str] = {}
+        self._pin_attestation_posture()
         self._pin_epoch_manifest()
         self._restore_solves()
 
@@ -287,6 +292,54 @@ class CyberGymService:
         if not isinstance(manifest, Mapping):
             raise ProtocolError("task source epoch_manifest must return an object")
         return dict(manifest)
+
+    def _pin_attestation_posture(self) -> None:
+        """Record, in the score database, whether this epoch enforces Intel-TDX.
+
+        The epoch manifest already pins every input that decides what an epoch
+        draws and what it signs, but it lives in the SOLVE store and it is not what
+        travels: the exporter is handed a score-database path and turns its rows
+        into the wire report a validator composes weights from. Nothing in that
+        report says whether the solves behind it were attested, so an unattested
+        development epoch and an attested production epoch are indistinguishable by
+        the time they reach an intake. Stamping the posture beside the scores is
+        what lets the exporter refuse (see
+        `cybergym_score_report.build_score_report`).
+
+        Posture is read off the POLICY, not the `attestation_required` flag: the
+        flag only records that an operator was asked to acknowledge the opt-out,
+        while the policy is the thing that actually decides whether a solve must
+        carry a verified quote to be credited.
+
+        And the policy's CONTENT is stamped, not merely its presence. A restart that
+        keeps a policy configured but replaces its `trusted_roots` — the Intel DCAP
+        root out, a key the miner holds in — admits every receipt the epoch's opening
+        policy refused, while `enforced` still reads True and the export goes out
+        with no flag and no warning. Binding
+        `attestation.attestation_policy_digest` makes that restart refuse on exactly
+        the terms a dropped policy already does.
+        """
+        try:
+            digest = attestation_policy_digest(self._attestation_policy)
+        except AttestationError as exc:
+            raise ProtocolError(
+                "refusing to open the epoch: this Intel-TDX attestation policy "
+                f"cannot be pinned to the score database ({exc}). A policy the "
+                "posture record cannot bind is one a restart could change unseen."
+            ) from exc
+        try:
+            self._scores.record_attestation_posture(
+                self.chain.source_epoch,
+                enforced=self._attestation_policy is not None,
+                detail=(
+                    f"Intel-TDX attestation policy configured ({digest})"
+                    if self._attestation_policy is not None
+                    else "no Intel-TDX attestation policy: solves are credited unattested"
+                ),
+                policy_digest=digest,
+            )
+        except CyberGymScoreError as exc:
+            raise ProtocolError(str(exc)) from exc
 
     def _pin_epoch_manifest(self) -> None:
         """Pin the epoch's inputs on first run; refuse a restart that changed them."""

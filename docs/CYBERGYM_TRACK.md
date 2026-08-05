@@ -112,26 +112,35 @@ transport, and nothing else changes.
    `(miner_hotkey, receipt_id, work_units)` set. A repeated export is therefore
    byte-identical; adding or replacing a score after close is refused.
 
-   Export and publish are deliberately separate operations:
+   Export and publish are deliberately separate operations. This is the
+   production hand-off — the epoch was scored by a service with an enforced
+   Intel-TDX policy, so the export needs no acknowledgement:
 
    ```bash
    cathedral-cybergym export-scores \
-     --score-db ./e2e/cybergym-scores.sqlite \
+     --score-db /srv/cathedral/cybergym-scores.sqlite \
      --epoch 42 --network finney --netuid 39 \
-     --producer-hotkey 5Producer --out ./e2e/epoch-42.json
+     --producer-hotkey 5Producer --out ./epoch-42.json
 
    cathedral-cybergym publish-scores \
-     --report ./e2e/epoch-42.json \
+     --report ./epoch-42.json \
      --url http://127.0.0.1:8000/v1/cybergym/scores \
-     --token-file ./e2e/intake-token \
-     --hmac-secret-file ./e2e/intake-hmac \
-     --proof-out ./e2e/epoch-42.proof.json
+     --token-file ./intake-token \
+     --hmac-secret-file ./intake-hmac \
+     --proof-out ./epoch-42.proof.json
    ```
 
    Both secret files must be owned by the calling user and inaccessible to
    group/other. HTTP is refused except on loopback. Publishing authenticates the
    exact frozen bytes, verifies the intake's returned report digest, and freezes
    the accepted `{body, signature}` proof that `cathedral-validator` consumes.
+
+   A score database produced by one of the loopback E2E verifiers
+   (`CYBERGYM_E2E_ALLOW_UNATTESTED=1`) is a different case: its epoch was scored
+   with no attestation policy, so the export above exits 2 and says so. Add
+   `--allow-unattested-e2e` for that preview, and publish the result only to a
+   disposable loopback intake — see `docs/FRESH_CYBERGYM_E2E.md` and
+   `docs/PRIVATE_V2_CYBERGYM_E2E.md`.
 
 8. **Verify and preview in the pre-launch E2E test.** The canonical
    `cathedral-validator` independently verifies the report HMAC, audience,
@@ -185,13 +194,27 @@ bug-finding agent inside an Intel TDX CPU enclave** and attach a TDX attestation
 every submission; a solve earns work units **only** when that attestation verifies
 and is bound to the exact submission (`cybergym_attest`).
 
-- **Binding.** `report_data = sha256("cathedral-cybergym-attest-v1␀" ‖ batch_id ‖
-  task_id ‖ poc_sha256 ‖ trace_id ‖ miner_hotkey)`. The enclave commits this into
-  the TDX quote; the validator re-derives it and requires the match. Because it
-  binds the batch (→ chain nonce → block + committed model), the task, the PoC,
-  **the trajectory** (`trace_id` content-addresses the trace), and the miner, an
-  attestation cannot be replayed for a different task/PoC, lifted from another
-  miner, reused across epochs, or paired with a fabricated out-of-enclave trace.
+- **Binding.** The enclave commits `report_data` into the TDX quote and the
+  validator re-derives it (`cybergym_attest.submission_report_data`), requiring an
+  exact match. There are two domains, and the fields are `\x00`-joined:
+
+  ```
+  # public-corpus task
+  sha256("cathedral-cybergym-attest-v2\x00" ‖ batch_id ␀ task_id ␀ poc_sha256
+         ␀ trace_id ␀ miner_hotkey ␀ model_commitment)
+  # private task, whose challenge artifact the validator delivered
+  sha256("cathedral-cybergym-attest-v3\x00" ‖ batch_id ␀ task_id ␀ poc_sha256
+         ␀ trace_id ␀ miner_hotkey ␀ model_commitment ␀ artifact_digest)
+  ```
+
+  Because it binds the batch (→ chain nonce → block + committed model), the task,
+  the PoC, **the trajectory** (`trace_id` content-addresses the trace), the miner,
+  the committed model, and — on the private path — the exact artifact dispatched,
+  an attestation cannot be replayed for a different task/PoC, lifted from another
+  miner, reused across epochs, paired with a different committed model or a
+  substituted artifact, or paired with a fabricated out-of-enclave trace. The
+  separate v3 domain is what stops a quote committed under the weaker
+  artifact-free binding from answering a private task at all.
 - **Verification.** `verify_submission_attestation` reuses `attestation.verify_attestation`
   (trusted-root Ed25519 signature, pinned measurement allow-list, `report_data`
   nonce binding, freshness — all fail-closed) and additionally requires
@@ -202,6 +225,26 @@ and is bound to the exact submission (`cybergym_attest`).
   loudly when it does. Only *creditable* (solved ∧ attested) PoCs enter the reward
   pool `run_epoch` scores, so a forgotten kwarg can never silently credit
   unattested work.
+- **The opt-out cannot leave the building.** An unattested epoch and an attested
+  one produce the same score rows, the same close marker, and the same wire
+  report — the intake's semantic key set is pinned cross-repo, so the producer
+  cannot add an enforcement field to it. The posture is therefore stamped in the
+  score database when the service opens the epoch (and may not change halfway
+  through), and `cathedral-cybergym export-scores` refuses an epoch it cannot show
+  was attested. `--allow-unattested-e2e` is the explicit acknowledgement for a
+  loopback preview; it does not make the bytes safe, so such a report must never be
+  published to a production intake.
+- **The posture pins the policy, not the fact that one exists.** Stamping only the
+  enforcement flag would leave the swap that matters wide open: restart the same
+  epoch on the same score database with `trusted_roots` moved from the Intel DCAP
+  root to a key the miner holds, and every receipt the epoch had refused is
+  admitted and credited while the flag still reads "enforced". So the record binds
+  a digest over the policy's verdict-deciding content — trusted roots, pinned
+  enclave and GPU measurement allow-lists, freshness window
+  (`attestation.attestation_policy_digest`, canonical so an unchanged policy
+  resumes cleanly). A restart under a different policy is refused at the door, in
+  the same words a dropped policy is, and an epoch whose digest was never recorded
+  is refused too — enforcement that cannot name what it enforced is not evidence.
 
 The hardware-free reference uses a normalized Ed25519-signed token standing in for
 a real Intel DCAP quote; production ingests Cathedral's live `tee_attestation`

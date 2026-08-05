@@ -59,9 +59,19 @@ with a stable timestamp:
 cathedral-cybergym-private-v2-e2e-close --issued-at 2026-08-05T00:00:00.000000Z
 cathedral-cybergym export-scores --score-db "$CYBERGYM_SCORE_DB" --epoch 21 \
   --network finney --netuid 39 --producer-hotkey "$CYBERGYM_VALIDATOR_HOTKEY" \
-  --out private-v2-epoch.json
+  --allow-unattested-e2e --out private-v2-epoch.json
 ```
 
-The resulting canonical report and signed receipts are the inputs to the
-validator's configured CyberGym intake. This entrypoint never opens a chain
-client or calls `set_weights`.
+Both commands need the same protected environment as the server; the close
+process rebuilds the service and must reproduce the pinned epoch manifest.
+
+`--allow-unattested-e2e` is required, not optional. This entrypoint runs with
+`CYBERGYM_E2E_ALLOW_UNATTESTED=1` and therefore no Intel-TDX policy, so the
+posture stamped beside the scores says the epoch's solves were credited
+unattested and the exporter refuses it (exit 2) without the flag.
+
+The resulting canonical report and signed receipts are shaped exactly like a
+production hand-off — the wire contract has no enforcement field — so they are
+inputs to a **disposable loopback preview** intake only, never to the validator's
+production CyberGym intake. This entrypoint never opens a chain client or calls
+`set_weights`.
