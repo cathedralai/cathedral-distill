@@ -1,4 +1,4 @@
-"""Fresh, sealed CyberGym challenges for the reward-bearing verifier path.
+"""Fresh, sealed CyberGym challenges for non-reward-bearing E2E validation.
 
 ``cybergym_synthetic`` proves the mechanics of nonce-generated tasks but is
 intentionally unpaid: its source contains the exact magic guard and buffer
@@ -15,6 +15,12 @@ The source is deterministic for one validator-held seed plus the finalized
 nonce.  Therefore a repeated dispatch or a process restart with the same seed
 recreates identical task bytes, while a new finalized epoch derives a new task
 set.  The public epoch manifest commits to the seed without revealing it.
+
+The present artifact scheme is intentionally *not rewardable*: its visible
+constants plus the rendered reversible mixer allow an artifact-only solver to
+recover the exact trigger. It remains useful for E2E transport and differential
+verification, but must contribute zero units until a miner-safe challenge
+delivery scheme replaces it.
 
 This is a fresh-task source, not a replacement for the transport, Intel-TDX, or
 emission gates.  Production still must run it behind authenticated artifact
@@ -65,9 +71,9 @@ def _wheel(value: int, slot: int) -> int:
     """The small reversible mixer rendered into every miner artifact.
 
     It prevents an artifact from containing a plaintext magic guard or a literal
-    buffer length.  It is deliberately inspectable: a miner is meant to analyse
-    the program, while a static public corpus or a two-regex source extractor
-    cannot look up or copy an answer.
+    buffer length, but it is reversible and therefore does *not* protect the
+    trigger from artifact-only recovery. It is retained solely for the fresh E2E
+    path, which is non-reward-bearing.
     """
     return _rotl32(value ^ 0x9E3779B9, slot + 5) ^ ((slot + 1) * 0x45D9F3B)
 

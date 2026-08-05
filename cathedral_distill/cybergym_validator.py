@@ -34,6 +34,7 @@ from cathedral_distill.cybergym_batch import (
 )
 from cathedral_distill.cybergym_eligibility import EligibilitySnapshot
 from cathedral_distill.cybergym_scores import CyberGymScoreStore
+from cathedral_distill.cybergym_fresh import is_fresh_task
 from cathedral_distill.cybergym_synthetic import is_synthetic_task
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
 from cathedral_distill.receipt_keys import ReceiptKeyRegistry
@@ -578,6 +579,12 @@ def run_epoch(
     unsafe-for-rewards override: it pays for a challenge that answers itself, and
     it changes the derived `items_root`, so every validator in a deployment must
     agree on it exactly as they must agree on `level_weights`.
+
+    Fresh tasks are also graded but always unpaid. Their current artifacts omit
+    plaintext trigger bytes, but expose the reversible values and decoder needed
+    to reconstruct those bytes. No development override may pay for that
+    artifact-only computation; fresh tasks need a non-mechanically-recoverable
+    delivery design before they can be admitted to a reward-bearing pool.
     """
     if gate_policy is None:
         if gates_required:
@@ -622,6 +629,12 @@ def run_epoch(
             poc = miner.pocs.get(task.task_id)
             if poc is None:
                 continue  # unsubmitted -> scores zero, still committed in items_root
+            if is_fresh_task(task.task_id):
+                # The current fresh artifact renders every value and the reversible
+                # decoder for its reference PoC. It is valid E2E material, but not
+                # evidence of miner capability, so it is always excluded from the
+                # signed reward receipt.
+                continue
             if not credit_synthetic_tasks and is_synthetic_task(task.task_id):
                 # Graded, never rewarded: the synthetic artifact renders its own
                 # answer, so a solve here is not evidence of capability. Excluded
