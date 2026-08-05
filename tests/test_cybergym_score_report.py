@@ -21,8 +21,13 @@ EPOCH = 42
 CLOSED_AT = "2026-08-03T10:11:12.123456+00:00"
 
 
-def _store(tmp_path, rows=()):
+def _store(tmp_path, rows=(), *, attested=True):
     store = CyberGymScoreStore(str(tmp_path / "scores.sqlite"))
+    # A producer stamps its Intel-TDX posture when it opens the epoch; an export
+    # refuses anything it cannot show was attested, so the default here is the
+    # production posture and the exceptions say so explicitly.
+    if attested:
+        store.record_attestation_posture(EPOCH, enforced=True, detail="policy configured")
     with store._connection:
         for hotkey, units, receipt_id in rows:
             store._connection.execute(
@@ -227,3 +232,67 @@ def test_publish_refuses_cleartext_non_loopback(tmp_path):
             bearer_token="token",
             hmac_secret="secret",
         )
+
+
+# --------------------------------------------------------------------------- #
+# The Intel-TDX posture gate: what may become a publishable report at all
+# --------------------------------------------------------------------------- #
+
+def test_an_unattested_epoch_is_not_exportable_without_an_explicit_acknowledgement(
+    tmp_path,
+):
+    """The loopback E2E's scores must not become production-shaped bytes by default.
+
+    An unattested run and an attested run produce the same table, the same close
+    marker, and the same wire report — the contract has no enforcement field and
+    cannot grow one without the intake. So the difference has to stop something
+    here, at the only place both halves are still visible, or it stops nothing.
+    """
+    store = _store(tmp_path, [("5Miner", "8", "receipt-a")], attested=False)
+    store.record_attestation_posture(
+        EPOCH, enforced=False, detail="no Intel-TDX attestation policy"
+    )
+    store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=1, at=CLOSED_AT)
+
+    with pytest.raises(report.CyberGymScoreReportError, match="NO Intel-TDX"):
+        _build(store)
+
+    acknowledged = report.build_score_report(
+        store,
+        network="finney",
+        netuid=39,
+        source_epoch=EPOCH,
+        producer_hotkey="5Producer",
+        allow_unattested=True,
+    )
+    assert acknowledged["scores"] == {"5Miner": 8.0}
+
+
+def test_an_unrecorded_posture_is_refused_rather_than_assumed_attested(tmp_path):
+    """"Nobody said" is not evidence of attestation.
+
+    A database written before postures were stamped looks exactly like one written
+    by a producer that skipped the record. Neither shows enforcement, so both fail
+    closed and the operator is told which of the two answers is missing.
+    """
+    store = _store(tmp_path, [("5Miner", "8", "receipt-a")], attested=False)
+    store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=1, at=CLOSED_AT)
+
+    assert store.attestation_posture(EPOCH) is None
+    with pytest.raises(report.CyberGymScoreReportError, match="does not record"):
+        _build(store)
+
+
+def test_attestation_posture_cannot_change_midway_through_an_epoch(tmp_path):
+    """A restart may not downgrade enforcement and keep scoring the same epoch.
+
+    Half-attested and half-unattested solves would be credited under one signed
+    receipt with nothing able to separate them, so the second, disagreeing open
+    refuses instead.
+    """
+    store = _store(tmp_path, attested=False)
+
+    store.record_attestation_posture(EPOCH, enforced=True, detail="policy configured")
+    with pytest.raises(CyberGymScoreError, match="may not change enforcement"):
+        store.record_attestation_posture(EPOCH, enforced=False, detail="policy dropped")
+    assert store.attestation_posture(EPOCH)["enforced"] is True

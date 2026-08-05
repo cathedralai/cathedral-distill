@@ -202,6 +202,15 @@ and is bound to the exact submission (`cybergym_attest`).
   loudly when it does. Only *creditable* (solved ∧ attested) PoCs enter the reward
   pool `run_epoch` scores, so a forgotten kwarg can never silently credit
   unattested work.
+- **The opt-out cannot leave the building.** An unattested epoch and an attested
+  one produce the same score rows, the same close marker, and the same wire
+  report — the intake's semantic key set is pinned cross-repo, so the producer
+  cannot add an enforcement field to it. The posture is therefore stamped in the
+  score database when the service opens the epoch (and may not change halfway
+  through), and `cathedral-cybergym export-scores` refuses an epoch it cannot show
+  was attested. `--allow-unattested-e2e` is the explicit acknowledgement for a
+  loopback preview; it does not make the bytes safe, so such a report must never be
+  published to a production intake.
 
 The hardware-free reference uses a normalized Ed25519-signed token standing in for
 a real Intel DCAP quote; production ingests Cathedral's live `tee_attestation`

@@ -128,6 +128,7 @@ def test_wrong_schema_and_short_seed_fail_closed(tmp_path):
 def test_export_scores_freezes_and_reuses_one_closed_epoch(tmp_path):
     db = tmp_path / "scores.sqlite"
     store = CyberGymScoreStore(str(db))
+    store.record_attestation_posture(42, enforced=True, detail="policy configured")
     store.mark_epoch(
         42, state=EPOCH_CLOSED, scored_miners=0,
         at="2026-08-03T10:11:12.123456+00:00",

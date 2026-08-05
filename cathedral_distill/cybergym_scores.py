@@ -101,7 +101,95 @@ class CyberGymScoreStore:
             "  scored_miners INTEGER NOT NULL,"
             "  marked_at TEXT NOT NULL)"
         )
+        # Whether the service that produced these scores enforced Intel-TDX
+        # attestation. It lives HERE, beside the scores, because this database is
+        # what leaves the verifier: the exporter is handed a file path and nothing
+        # else, so a posture recorded anywhere else is invisible at the moment the
+        # rows become a publishable wire report. See `record_attestation_posture`.
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS cybergym_epoch_attestation ("
+            "  epoch INTEGER PRIMARY KEY,"
+            "  enforced INTEGER NOT NULL,"
+            "  detail TEXT NOT NULL,"
+            "  recorded_at TEXT NOT NULL)"
+        )
         self._connection.commit()
+
+    # -- attestation posture ----------------------------------------------- #
+    def record_attestation_posture(
+        self, epoch: int, *, enforced: bool, detail: str = ""
+    ) -> None:
+        """Record whether this epoch's solves had to be Intel-TDX attested.
+
+        The scores of an unattested development run and the scores of an attested
+        production run are the same shape, land in the same table, and export to the
+        same wire contract — which has no field for enforcement and cannot grow one
+        unilaterally, because the intake pins its semantic key set cross-repo. The
+        only place the difference can be preserved is the producer's own database,
+        so it is written here, once, by whichever service opened the epoch.
+
+        First write wins and a later disagreement raises. Enforcement is not a
+        property an epoch may change halfway through: a validator killed mid-epoch
+        and restarted with the policy dropped would otherwise resume the SAME epoch
+        and credit unattested solves alongside attested ones under one signed
+        receipt, with nothing downstream able to tell the halves apart.
+        """
+        from datetime import datetime, timezone
+
+        want = 1 if enforced else 0
+        try:
+            with self._connection:
+                row = self._connection.execute(
+                    "SELECT enforced, detail FROM cybergym_epoch_attestation WHERE epoch=?",
+                    (int(epoch),),
+                ).fetchone()
+                if row is not None:
+                    if int(row["enforced"]) != want:
+                        was = "enforced" if int(row["enforced"]) else "NOT enforced"
+                        now = "enforced" if want else "NOT enforced"
+                        raise CyberGymScoreError(
+                            f"refusing to resume CyberGym epoch {int(epoch)}: Intel-TDX "
+                            f"attestation was {was} when the epoch opened and is {now} "
+                            "now. An epoch may not change enforcement halfway through — "
+                            "its solves would be credited under one receipt that cannot "
+                            "distinguish them. Start a new epoch instead."
+                        )
+                    return
+                self._connection.execute(
+                    "INSERT INTO cybergym_epoch_attestation"
+                    "(epoch, enforced, detail, recorded_at) VALUES (?,?,?,?)",
+                    (
+                        int(epoch),
+                        want,
+                        str(detail),
+                        datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError(
+                "failed to record the epoch attestation posture"
+            ) from exc
+
+    def attestation_posture(self, epoch: int) -> dict[str, object] | None:
+        """This epoch's recorded enforcement posture, or ``None`` if unrecorded.
+
+        ``None`` is a distinct answer from "unattested" and callers must treat it
+        that way: it means the producer never said, which a database written by an
+        older build and a database written by a service that skipped the record
+        both look like. Fail closed on it rather than guessing.
+        """
+        row = self._connection.execute(
+            "SELECT enforced, detail, recorded_at FROM cybergym_epoch_attestation "
+            "WHERE epoch=?",
+            (int(epoch),),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "enforced": bool(int(row["enforced"])),
+            "detail": str(row["detail"]),
+            "recorded_at": str(row["recorded_at"]),
+        }
 
     # -- epoch lifecycle --------------------------------------------------- #
     def mark_epoch(

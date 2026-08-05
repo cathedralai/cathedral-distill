@@ -242,17 +242,8 @@ tested:
   durable fresh-task path for miner/verifier testing. It is explicitly
   non-reward-bearing until the production identity, TDX, and emission controls
   plus a non-mechanically-recoverable challenge delivery path are configured.
-- **[CyberGym score intake runbook](docs/CYBERGYM_SCORE_INTAKE_RUNBOOK.md)**: the
-  operator path for wiring a real producer identity and the authenticated
-  transport to the canonical validator. Which strings must match, what the HMAC
-  covers, the order the switches may be thrown, and what each refusal means.
 - **[TDX attestation](docs/TDX_ATTESTATION.md)**: the two profiles, what each
   binds, and the production path.
-- **[CyberGym v3 cutover runbook](docs/CYBERGYM_V3_CUTOVER_RUNBOOK.md)**: the
-  sequenced operator procedure for rolling SN39's live allocation from 90/10 to
-  70/30/0. Preconditions as runnable checks, the no-overlap dark gap and why the
-  flip lands inside the chain's weight cooldown, the exact rollback, and the
-  reason not to flip before the sealed corpus is live.
 
 ## Launch and positioning
 
@@ -275,7 +266,7 @@ pip install -e '.[dev]'
 pytest
 ```
 
-The suite collects 970 tests, all hardware-free: the verifier backend is
+The suite collects 969 tests, all hardware-free: the verifier backend is
 injected, so the full mechanism is exercised without the CyberGym binary corpus.
 How many of them *run* depends on the machine, which is why no passing total is
 claimed here. `tests/test_cybergym_hw.py` skips without `CYBERGYM_RUN_HW=1` and
