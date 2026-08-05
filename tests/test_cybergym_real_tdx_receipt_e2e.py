@@ -171,10 +171,21 @@ def test_the_receipt_signature_verifies_against_cathedrals_published_key():
     Ed25519 signature over the canonical receipt bytes against the pinned trusted-keys
     registry, so a forged receipt with the right flags fails here. Runs unconditionally
     now that the trust file is pinned (was gated on an env var before it was located).
+
+    It enforces the same *key-validity* contract `verify_customer_receipt` does, not
+    just the raw signature: a receipt signed by a **retired** key, or issued **outside**
+    the key's validity window, must not verify even if the Ed25519 math checks out.
     """
     keys = json.loads(Path(TRUST_FILE).read_text())["keys"]
     entry = keys[RECEIPT["signing_key_id"]]
     assert entry["algorithm"] == "ed25519"
+    # Key status + validity window, exactly as the production verifier checks them —
+    # a signature alone does not make a retired or not-yet/no-longer-valid key trusted.
+    assert entry["status"] == "active"
+    issued = datetime.fromisoformat(RECEIPT["issued_at"].replace("Z", "+00:00"))
+    valid_from = datetime.fromisoformat(entry["valid_from"].replace("Z", "+00:00"))
+    valid_until = datetime.fromisoformat(entry["valid_until"].replace("Z", "+00:00"))
+    assert valid_from <= issued <= valid_until, "receipt issued outside the key's validity window"
     public_key = Ed25519PublicKey.from_public_bytes(
         base64.b64decode(entry["public_key_base64"], validate=True)
     )
