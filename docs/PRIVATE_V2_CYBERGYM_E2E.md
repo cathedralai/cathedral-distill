@@ -14,6 +14,7 @@ The manifest must pass corpus admission before the server opens its socket.
 CYBERGYM_HOST=127.0.0.1
 PORT=8668
 CYBERGYM_E2E_ALLOW_UNATTESTED=1
+CYBERGYM_E2E_AS_OF=<restart-stable timezone-aware ISO-8601, e.g. 2026-08-05T00:00:00Z>
 CYBERGYM_E2E_MINER_HOTKEY=<registered test hotkey>
 CYBERGYM_E2E_BEARER_TOKEN_FILE=<mode-0600 bearer token file>
 CYBERGYM_SIGNING_SEED=<64 hex characters; protect the service-manager environment>
@@ -30,6 +31,13 @@ The bearer file must be owner-readable only. The server maps a valid bearer to
 the configured hotkey; it never trusts the request body's miner field. Every
 dispatch, artifact read, and submission is then bound to that caller's sealed
 batch.
+
+`CYBERGYM_E2E_AS_OF` must be the SAME value for the server and the later close
+command. It is the epoch's draw timestamp, pinned into the durable epoch manifest
+on the first run; the close process rebuilds the service and must reproduce that
+manifest exactly, so a wall-clock default would make the epoch unclosable across
+processes (and its exported report impossible to reproduce byte-for-byte). Set it
+once in the shared service-manager environment.
 
 For a private task outside the legacy ARVO subset, its manifest entry must also
 commit `crash_evidence`: the expected sanitizer name plus permitted non-zero

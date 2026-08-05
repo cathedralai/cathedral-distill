@@ -76,6 +76,7 @@ def _configure_private_v2(tmp_path, monkeypatch):
         "CYBERGYM_CORPUS_DB": str(tmp_path / "corpus.sqlite"),
         "CYBERGYM_SCORE_DB": str(tmp_path / "score.sqlite"),
         "CYBERGYM_SOLVE_DB": str(tmp_path / "solve.sqlite"),
+        "CYBERGYM_E2E_AS_OF": "2026-08-05T00:00:00+00:00",
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -144,3 +145,58 @@ def test_private_v2_server_refuses_a_group_readable_bearer_file(tmp_path, monkey
         assert "group- or world-readable" in str(exc)
     else:  # pragma: no cover - an insecure deployment must never authenticate
         raise AssertionError("private-v2 server accepted an insecure bearer file")
+
+
+def _stub_admission(monkeypatch):
+    monkeypatch.setattr(private_server, "available_tasks", lambda _manifest: [TASK])
+    monkeypatch.setattr(
+        private_server,
+        "require_admitted_private_manifest",
+        lambda _manifest, *, reference_pocs: (),
+    )
+
+
+def test_private_v2_server_and_close_resume_the_same_pinned_epoch(tmp_path, monkeypatch):
+    """The server pins the epoch; the separate close process must reopen it.
+
+    Regression for the two-process bug: ``as_of`` used to be ``datetime.now()`` at
+    each ``build_service_from_environment`` call, so the server and the
+    ``...-close`` command pinned different epoch manifests and the second refused to
+    resume on ``as_of`` alone (the same class of failure #72 fixed for the fresh
+    E2E). Both entrypoints now take a restart-stable ``CYBERGYM_E2E_AS_OF``, so a
+    fresh service reproduces the pinned manifest byte-for-byte and resumes.
+    """
+    _configure_private_v2(tmp_path, monkeypatch)
+    _stub_admission(monkeypatch)
+
+    # First build == the server: it pins the epoch manifest into the solve store.
+    server_service = private_server.build_service_from_environment()
+    pinned = server_service.epoch_manifest()
+
+    # Second build == the separate close process, same protected environment.
+    close_service = private_server.build_service_from_environment()
+    # It reproduces the identical manifest and resumes without a ProtocolError.
+    assert close_service.epoch_manifest() == pinned
+    assert close_service.epoch_manifest()["as_of"] == "2026-08-05T00:00:00+00:00"
+
+
+def test_private_v2_server_requires_a_restart_stable_as_of(tmp_path, monkeypatch):
+    """A missing or naive ``CYBERGYM_E2E_AS_OF`` is a refused deployment, not now()."""
+    _configure_private_v2(tmp_path, monkeypatch)
+    _stub_admission(monkeypatch)
+
+    monkeypatch.delenv("CYBERGYM_E2E_AS_OF", raising=False)
+    try:
+        private_server.build_service_from_environment()
+    except SystemExit as exc:
+        assert "CYBERGYM_E2E_AS_OF" in str(exc)
+    else:  # pragma: no cover - a wall-clock draw stamp breaks cross-process close
+        raise AssertionError("private-v2 server accepted a missing as_of")
+
+    monkeypatch.setenv("CYBERGYM_E2E_AS_OF", "2026-08-05T00:00:00")
+    try:
+        private_server.build_service_from_environment()
+    except SystemExit as exc:
+        assert "timezone" in str(exc)
+    else:  # pragma: no cover - a naive timestamp is ambiguous across hosts
+        raise AssertionError("private-v2 server accepted a naive as_of")
