@@ -165,6 +165,57 @@ def test_crash_detection_requires_expected_death_and_target_sanitizer():
     assert _is_crash("==1==WARNING: MemorySanitizer: use-of-uninitialized-value", 1, task_id="arvo:1065")
 
 
+def test_private_manifest_commits_the_crash_evidence_for_new_task_ids():
+    task_id = "oss-fuzz:10001"
+    document = {
+        "schema": "cathedral_cybergym_private_repro_manifest_v2",
+        "source_epoch": 21,
+        "tasks": [{
+            "task_id": task_id,
+            "level": 2,
+            "disclosed_at": "2026-08-05T00:00:00Z",
+            "vulnerable_image": "registry.test/private-vul@sha256:" + "ab" * 32,
+            "fixed_image": "registry.test/private-fix@sha256:" + "cd" * 32,
+            "context": {"description": "private parser boundary"},
+            "crash_evidence": {
+                "sanitizer": "AddressSanitizer", "exit_codes": [1], "signals": [6, 11],
+            },
+            "challenge_artifact_digest": "sha256:" + hashlib.sha256(MINER_ARTIFACT).hexdigest(),
+            "reference_poc_digest": "sha256:" + hashlib.sha256(CRASHING).hexdigest(),
+        }],
+    }
+    manifest = load_private_repro_manifest(document)
+    assert _is_crash(
+        "==1==ERROR: AddressSanitizer: heap-use-after-free", 1,
+        task_id=task_id, manifest=manifest,
+    )
+    assert docker_reproduce_backend(
+        task_id, CRASHING, "vul", manifest=manifest, _run=FakeDocker(),
+    ) == 1
+    assert not _is_crash(
+        "==1==ERROR: AddressSanitizer: heap-use-after-free", 0,
+        task_id=task_id, manifest=manifest,
+    )
+
+
+def test_private_manifest_rejects_malformed_crash_evidence():
+    document = {
+        "schema": "cathedral_cybergym_private_repro_manifest_v1",
+        "source_epoch": 21,
+        "tasks": [{
+            "task_id": "oss-fuzz:10001",
+            "level": 2,
+            "disclosed_at": "2026-08-05T00:00:00Z",
+            "vulnerable_image": "registry.test/private-vul@sha256:" + "ab" * 32,
+            "fixed_image": "registry.test/private-fix@sha256:" + "cd" * 32,
+            "context": {},
+            "crash_evidence": {"sanitizer": "AddressSanitizer", "exit_codes": [0], "signals": [11]},
+        }],
+    }
+    with pytest.raises(ReproManifestError, match="crash_evidence exit_codes"):
+        load_private_repro_manifest(document)
+
+
 # --------------------------------------------------------------------------- #
 # docker_reproduce_backend — differential + hygiene, no real Docker
 # --------------------------------------------------------------------------- #

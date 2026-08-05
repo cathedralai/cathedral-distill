@@ -33,6 +33,11 @@ BATCH_DOMAIN = b"cathedral-cybergym-pinned-batch-evidence-v1\x00"
 _PINNED_IMAGE_RE = re.compile(r"\A[^\s@]+@sha256:[0-9a-f]{64}\Z")
 _SHA256_DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 _CONTEXT_FIELDS = frozenset({"description", "sanitizer_trace", "patch"})
+_CRASH_EVIDENCE_FIELDS = frozenset({"sanitizer", "exit_codes", "signals"})
+_SANITIZERS = frozenset({
+    "AddressSanitizer", "MemorySanitizer", "ThreadSanitizer", "LeakSanitizer",
+    "UndefinedBehaviorSanitizer", "HWAddressSanitizer",
+})
 
 
 class ReproManifestError(ValueError):
@@ -82,6 +87,36 @@ def _sha256_digest(value: Any, *, field: str) -> str:
     return value
 
 
+def _crash_evidence(value: Any) -> Mapping[str, Any]:
+    """Validate the immutable execution rule for a non-legacy private task."""
+    if not isinstance(value, Mapping) or set(value) != _CRASH_EVIDENCE_FIELDS:
+        raise ReproManifestError(
+            "crash_evidence must contain exactly sanitizer, exit_codes, and signals"
+        )
+    sanitizer = value["sanitizer"]
+    exit_codes = value["exit_codes"]
+    signals = value["signals"]
+    if not isinstance(sanitizer, str) or sanitizer not in _SANITIZERS:
+        raise ReproManifestError("crash_evidence sanitizer is unsupported")
+    for field, values, upper in (
+        ("exit_codes", exit_codes, 255),
+        ("signals", signals, 64),
+    ):
+        if (
+            not isinstance(values, list) or not values
+            or any(isinstance(item, bool) or not isinstance(item, int) or not 1 <= item <= upper for item in values)
+            or len(set(values)) != len(values)
+        ):
+            raise ReproManifestError(
+                f"crash_evidence {field} must be a unique non-empty integer list"
+            )
+    return {
+        "sanitizer": sanitizer,
+        "exit_codes": list(exit_codes),
+        "signals": list(signals),
+    }
+
+
 @dataclass(frozen=True)
 class PinnedReproTask:
     """One undisclosed task plus its exact vulnerable and fixed images."""
@@ -92,6 +127,7 @@ class PinnedReproTask:
     vulnerable_image: str
     fixed_image: str
     context: Mapping[str, str]
+    crash_evidence: Mapping[str, Any] | None = None
     challenge_artifact_digest: str | None = None
     reference_poc_digest: str | None = None
 
@@ -130,6 +166,8 @@ class PinnedReproTask:
             "vulnerable_image": self.vulnerable_image,
             "fixed_image": self.fixed_image,
         }
+        if self.crash_evidence is not None:
+            evidence["crash_evidence"] = dict(self.crash_evidence)
         if self.challenge_artifact_digest is not None:
             evidence["challenge_artifact_digest"] = self.challenge_artifact_digest
         if self.reference_poc_digest is not None:
@@ -186,9 +224,10 @@ def _parse_task(value: Any, *, reward_manifest: bool) -> PinnedReproTask:
     }
     if reward_manifest:
         expected |= {"challenge_artifact_digest", "reference_poc_digest"}
-    if set(value) != expected:
+    allowed = expected | {"crash_evidence"}
+    if set(value) - allowed or expected - set(value):
         missing = sorted(expected - set(value))
-        unknown = sorted(set(value) - expected)
+        unknown = sorted(set(value) - allowed)
         detail = []
         if missing:
             detail.append("missing " + ", ".join(missing))
@@ -208,6 +247,10 @@ def _parse_task(value: Any, *, reward_manifest: bool) -> PinnedReproTask:
         vulnerable_image=_pinned_image(value["vulnerable_image"], field="vulnerable_image"),
         fixed_image=_pinned_image(value["fixed_image"], field="fixed_image"),
         context={key: str(raw_context[key]) for key in sorted(raw_context)},
+        crash_evidence=(
+            _crash_evidence(value["crash_evidence"])
+            if "crash_evidence" in value else None
+        ),
         challenge_artifact_digest=(
             _sha256_digest(
                 value["challenge_artifact_digest"], field="challenge_artifact_digest"
@@ -320,8 +363,10 @@ def build_private_repro_manifest(
                     key: str(meta[key])
                     for key in ("description", "sanitizer_trace", "patch")
                     if key in meta
-                },
-            }
+            },
+        }
+        if "crash_evidence" in meta:
+            row["crash_evidence"] = dict(meta["crash_evidence"])
         if reward_manifest:
             assert challenge_artifacts is not None and reference_pocs is not None
             artifact = challenge_artifacts[task_id]

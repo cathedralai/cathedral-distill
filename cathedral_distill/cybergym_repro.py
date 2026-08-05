@@ -146,10 +146,18 @@ class _CrashEvidenceRule:
     signals: frozenset[int]
 
 
-def _crash_evidence_rule(task_id: str) -> _CrashEvidenceRule:
-    """Load and validate the task's fail-closed crash classifier configuration."""
-    meta = REPRO_SUBSET.get(task_id)
-    evidence = meta.get("crash_evidence") if isinstance(meta, Mapping) else None
+def _crash_evidence_rule(task_id: str, *,
+                         manifest: PrivateReproManifest | None = None) -> _CrashEvidenceRule:
+    """Load the task's committed rule, with a legacy-subset compatibility fallback."""
+    evidence = None
+    if manifest is not None:
+        try:
+            evidence = manifest.task(task_id).crash_evidence
+        except ReproManifestError as exc:
+            raise ReproError(str(exc)) from exc
+    if evidence is None:
+        meta = REPRO_SUBSET.get(task_id)
+        evidence = meta.get("crash_evidence") if isinstance(meta, Mapping) else None
     if not isinstance(evidence, Mapping):
         raise ReproError(f"task {task_id!r} has no crash evidence rule")
     sanitizer = evidence.get("sanitizer")
@@ -174,7 +182,8 @@ def _crash_evidence_rule(task_id: str) -> _CrashEvidenceRule:
     return _CrashEvidenceRule(sanitizer, frozenset(exit_codes), frozenset(signals))
 
 
-def _is_crash(output: str, returncode: int, *, task_id: str) -> bool:
+def _is_crash(output: str, returncode: int, *, task_id: str,
+              manifest: PrivateReproManifest | None = None) -> bool:
     """Require target-specific sanitizer evidence *and* an expected process death.
 
     A marker in target output is not execution evidence: an input can reflect
@@ -185,7 +194,7 @@ def _is_crash(output: str, returncode: int, *, task_id: str) -> bool:
     """
     if isinstance(returncode, bool) or not isinstance(returncode, int):
         return False
-    rule = _crash_evidence_rule(task_id)
+    rule = _crash_evidence_rule(task_id, manifest=manifest)
     died_as_expected = (
         (-returncode in rule.signals) if returncode < 0 else (returncode in rule.exit_codes)
     )
@@ -233,7 +242,8 @@ def docker_reproduce_backend(task_id: str, poc: bytes, mode: str, *,
             return 0
         out = (r.stdout or b"") + (r.stderr or b"")
         return 1 if _is_crash(
-            out.decode("utf-8", "replace"), r.returncode, task_id=task_id
+            out.decode("utf-8", "replace"), r.returncode, task_id=task_id,
+            manifest=manifest,
         ) else 0
     finally:
         try:
