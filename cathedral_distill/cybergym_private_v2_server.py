@@ -116,6 +116,29 @@ def authenticated_miner_from_environment() -> Callable[
     return authenticate
 
 
+def _as_of_from_environment() -> datetime:
+    """Read a restart-stable E2E draw timestamp from the protected environment.
+
+    The server and the separate ``...-close`` command each build their own
+    service, so ``as_of`` must not come from the wall clock: it is pinned into the
+    durable epoch manifest on the first run, and a second process computing a fresh
+    ``datetime.now()`` would fail the manifest-resume check on ``as_of`` alone and
+    make the exported report impossible to reproduce byte-for-byte. This mirrors
+    ``cybergym_fresh_server._as_of_from_environment`` so both E2E entrypoints are
+    restartable and closable across processes.
+    """
+    raw = _required("CYBERGYM_E2E_AS_OF")
+    try:
+        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise SystemExit(
+            "CYBERGYM_E2E_AS_OF must be a timezone-aware ISO-8601 timestamp"
+        ) from None
+    if value.tzinfo is None:
+        raise SystemExit("CYBERGYM_E2E_AS_OF must include a timezone")
+    return value.astimezone(UTC)
+
+
 def build_service(
     manifest: PrivateReproManifest,
     *,
@@ -126,6 +149,7 @@ def build_service(
     score_db: str,
     solve_db: str,
     validator_hotkey: str,
+    as_of: datetime,
 ) -> CyberGymService:
     """Build the durable private-v2 verifier used by the server and close command."""
     if not manifest.reward_ready:
@@ -161,7 +185,7 @@ def build_service(
         signing_key_id="cybergym-private-v2-e2e-1",
         batch_size=1,
         cutoff=None,
-        as_of=datetime.now(UTC),
+        as_of=as_of,
         # The explicit environment opt-in in build_service_from_environment
         # confines these two disabled policies to the loopback E2E deployment.
         attestation_required=False,
@@ -204,6 +228,7 @@ def build_service_from_environment() -> CyberGymService:
         validator_hotkey=os.environ.get(
             "CYBERGYM_VALIDATOR_HOTKEY", "cathedral-private-v2-e2e"
         ),
+        as_of=_as_of_from_environment(),
     )
 
 
