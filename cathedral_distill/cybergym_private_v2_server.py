@@ -24,6 +24,7 @@ from typing import Callable, Mapping
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from cathedral_distill.corpus_admission import require_admitted_private_manifest
+from cathedral_distill.cybergym_attest import CathedralReceiptPolicy
 from cathedral_distill.cybergym_holdout import Holdout
 from cathedral_distill.cybergym_http import make_threaded_server
 from cathedral_distill.cybergym_private_artifacts import (
@@ -45,6 +46,10 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _E2E_OPT_IN_ENV = "CYBERGYM_E2E_ALLOW_UNATTESTED"
 _MINER_ENV = "CYBERGYM_E2E_MINER_HOTKEY"
 _TOKEN_FILE_ENV = "CYBERGYM_E2E_BEARER_TOKEN_FILE"
+# Set to the approved solver's `workload_sha256` to ENFORCE the Cathedral-receipt
+# path (a real Intel-TDX receipt bound to that workload is required to credit).
+# Unset (default) keeps the loopback dev/test posture that credits unattested solves.
+_APPROVED_WORKLOAD_ENV = "CYBERGYM_APPROVED_WORKLOAD_SHA256"
 
 
 def _required(name: str) -> str:
@@ -52,6 +57,26 @@ def _required(name: str) -> str:
     if not value:
         raise SystemExit(f"{name} is required")
     return value
+
+
+def _receipt_policy_from_environment() -> CathedralReceiptPolicy | None:
+    """Build the receipt-enforcement policy from the approved-workload env, or None.
+
+    OFF by default: with `CYBERGYM_APPROVED_WORKLOAD_SHA256` unset the verifier keeps
+    its current unattested loopback posture. When set, the value is the approved
+    solver's `workload_sha256` a live Cathedral `attest.v1` receipt must pin — so a
+    workload that merely echoes a looked-up answer can never credit. Fails closed on a
+    malformed digest rather than silently running unenforced.
+    """
+    raw = os.environ.get(_APPROVED_WORKLOAD_ENV, "").strip().lower()
+    if not raw:
+        return None
+    if len(raw) != 64 or any(c not in "0123456789abcdef" for c in raw):
+        raise SystemExit(
+            f"{_APPROVED_WORKLOAD_ENV} must be a 64-hex sha256 (the approved solver's "
+            f"workload_sha256); got {raw!r}"
+        )
+    return CathedralReceiptPolicy(expected_workload_sha256=raw)
 
 
 def _private_manifest_from_environment() -> PrivateReproManifest:
@@ -150,8 +175,14 @@ def build_service(
     solve_db: str,
     validator_hotkey: str,
     as_of: datetime,
+    cathedral_receipt_policy: CathedralReceiptPolicy | None = None,
 ) -> CyberGymService:
-    """Build the durable private-v2 verifier used by the server and close command."""
+    """Build the durable private-v2 verifier used by the server and close command.
+
+    When ``cathedral_receipt_policy`` is set the receipt path is ENFORCED (posture
+    reads ``enforced=True``; only a real Cathedral TDX receipt bound to the approved
+    workload credits). None keeps the loopback dev/test posture.
+    """
     if not manifest.reward_ready:
         raise ReproManifestError("private-v2 verifier requires a reward-ready manifest")
     chain = ChainContext(
@@ -186,9 +217,13 @@ def build_service(
         batch_size=1,
         cutoff=None,
         as_of=as_of,
-        # The explicit environment opt-in in build_service_from_environment
-        # confines these two disabled policies to the loopback E2E deployment.
+        # `attestation_required=False` because this path has no full TDX
+        # AttestationPolicy; enforcement, when on, comes from the receipt policy (a
+        # CathedralReceiptPolicy makes the posture `enforced=True` and requires a real
+        # receipt in process_submission). The env opt-in confines the *unenforced*
+        # posture (both None) to the loopback E2E deployment.
         attestation_required=False,
+        cathedral_receipt_policy=cathedral_receipt_policy,
         gates_required=False,
     )
 
@@ -229,6 +264,7 @@ def build_service_from_environment() -> CyberGymService:
             "CYBERGYM_VALIDATOR_HOTKEY", "cathedral-private-v2-e2e"
         ),
         as_of=_as_of_from_environment(),
+        cathedral_receipt_policy=_receipt_policy_from_environment(),
     )
 
 
