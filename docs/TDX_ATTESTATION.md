@@ -107,7 +107,13 @@ verifier then requires three bindings:
 Receipt trust is the same seam as `verify_cathedral_attestation`: trusted-issuer by default
 (`intel_verified` + `report_data_match` + `execution_binding_verified`), or independent via
 `receipt_verifier` (cathedral-compute's `verify_customer_receipt`). `result_bound=True` only
-when all three hold, on the same freshness bounds as `attest.v1`. What remains is the enclave
-**worker** itself (a long-lived sealed worker with the corpus baked in that generates the key,
-runs the differential, and writes the signed result) — an infrastructure build, not a
-verification-code gap.
+when all three hold, on the same freshness bounds as `attest.v1`.
+
+The enclave **worker** is
+[`cybergym_enclave_solver`](../cathedral_distill/cybergym_enclave_solver.py), packaged by
+[`Dockerfile.cybergym-enclave`](../Dockerfile.cybergym-enclave). It generates the keypair,
+runs the same `DifferentialResult.solved` differential the validator would, and writes the
+signed `enclave_result_bytes` envelope as its result — so `solve()`'s output is exactly what
+`verify_persistent_enclave_attestation` accepts (proven by `test_cybergym_enclave_solver`).
+What remains is purely operational: baking the vul/fix corpus into the image and running it as
+a Cathedral persistent worker.
