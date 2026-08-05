@@ -50,6 +50,7 @@ _TOKEN_FILE_ENV = "CYBERGYM_E2E_BEARER_TOKEN_FILE"
 # path (a real Intel-TDX receipt bound to that workload is required to credit).
 # Unset (default) keeps the loopback dev/test posture that credits unattested solves.
 _APPROVED_WORKLOAD_ENV = "CYBERGYM_APPROVED_WORKLOAD_SHA256"
+_BATCH_SIZE_ENV = "CYBERGYM_BATCH_SIZE"
 
 
 def _required(name: str) -> str:
@@ -77,6 +78,29 @@ def _receipt_policy_from_environment() -> CathedralReceiptPolicy | None:
             f"workload_sha256); got {raw!r}"
         )
     return CathedralReceiptPolicy(expected_workload_sha256=raw)
+
+
+def _batch_size_from_environment() -> int:
+    """How many tasks the common frontier draws per miner per epoch (default 1).
+
+    A launch corpus serves several problems an epoch; the loopback E2E default of
+    one keeps existing single-task rigs unchanged. `draw` requires the manifest to
+    hold at least this many eligible tasks, so an over-large value fails closed at
+    dispatch rather than silently serving fewer. Rejects a non-positive or
+    non-integer value rather than defaulting past a typo.
+    """
+    raw = os.environ.get(_BATCH_SIZE_ENV, "").strip()
+    if not raw:
+        return 1
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SystemExit(
+            f"{_BATCH_SIZE_ENV} must be a positive integer; got {raw!r}"
+        ) from None
+    if value < 1:
+        raise SystemExit(f"{_BATCH_SIZE_ENV} must be >= 1; got {value}")
+    return value
 
 
 def _private_manifest_from_environment() -> PrivateReproManifest:
@@ -176,6 +200,7 @@ def build_service(
     validator_hotkey: str,
     as_of: datetime,
     cathedral_receipt_policy: CathedralReceiptPolicy | None = None,
+    batch_size: int = 1,
 ) -> CyberGymService:
     """Build the durable private-v2 verifier used by the server and close command.
 
@@ -214,7 +239,7 @@ def build_service(
         validator_hotkey=validator_hotkey,
         private_key=private_key,
         signing_key_id="cybergym-private-v2-e2e-1",
-        batch_size=1,
+        batch_size=batch_size,
         cutoff=None,
         as_of=as_of,
         # `attestation_required=False` because this path has no full TDX
@@ -265,6 +290,7 @@ def build_service_from_environment() -> CyberGymService:
         ),
         as_of=_as_of_from_environment(),
         cathedral_receipt_policy=_receipt_policy_from_environment(),
+        batch_size=_batch_size_from_environment(),
     )
 
 
