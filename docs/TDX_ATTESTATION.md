@@ -8,7 +8,7 @@ verifies all three, fail-closed.
 | | `attest.v1` — result quote | `custom.v1` — boot quote | `custom.v1` — persistent enclave key |
 |---|---|---|---|
 | **What runs** | one bounded command, stock image + uploaded workspace | a customer image on a sealed worker, SSH access | a persistent worker with the corpus baked in, an enclave-held signing key |
-| **Binds** | the exact `(task, poc, trace)` via `report_data[32:64]` | the machine boot + the customer SSH key | the machine boot + the **enclave** key, which signs `(task, poc, trace[, verdict])` |
+| **Binds** | the exact `(task, poc, trace)` via `report_data[32:64]` | the machine boot + the customer SSH key | `workload_sha256` + `result_sha256` — the approved solver's result envelope signs `(task, poc, trace[, verdict])` |
 | **`workload_result_binding`** | yes | no | **yes** |
 | **Real corpus image?** | no (bounded; can't hold the ~4 GB arvo image) | **yes** — runs `n132/arvo:{id}` in TDX | **yes** — corpus baked into the sealed worker |
 | **Pricing** | $0.20 / completed receipt | ~$0.40 / worker-hour (Sealed CPU Small), from workload-ready | ~$0.40 / worker-hour, amortized across a long-lived worker |
@@ -87,13 +87,27 @@ bound to the attested enclave, and a miner cannot sign a looked-up PoC's commitm
 it. (Binding the *customer's* SSH key, as the plain SSH flow does, does not achieve this —
 the customer holds that private key.)
 
-The **verifier** for this is `verify_persistent_enclave_attestation`: it requires the boot
-quote's `report_data[0:32]` to bind the enclave key (`sha256(nonce || enclave_pubkey_b64)`),
-verifies the enclave's Ed25519 signature over the canonical `(task, poc, trace[, verdict])`
-commitment, and only then reports `result_bound=True`. A commitment signed anywhere but
-inside the attested enclave — or for a different solve — fails the signature check and is
-refused, on the same freshness/replay bounds as `attest.v1`. When the vul/fix differential
-runs in-enclave (#95), the `verdict` is inside that signed commitment, so an external party
-confirms PASS/FAIL from the signature alone. What remains is the enclave **worker** itself
-(a long-lived sealed worker that generates the key at boot and runs the differential) — an
-infrastructure build, not a verification-code gap.
+The **verifier** for this is `verify_persistent_enclave_attestation`. Its binding matches
+what a live Cathedral `attest.v1` receipt actually exposes (`cathedral_customer_receipt_v1`,
+confirmed on real hardware 2026-08-05): the receipt binds `workload_sha256` and
+`result_sha256` under Cathedral's Ed25519 signature, verified against Intel's DCAP chain — it
+does **not** expose a `report_data[0:32] = nonce||pubkey` field. So the enclave key rides in
+the result, exactly the way `attest.v1` already binds its `result.txt` commitment. The
+approved solver writes an `enclave_result_bytes` envelope — its generated public key, the
+`(task, poc, trace[, verdict])` commitment, and a signature over it — as its result. The
+verifier then requires three bindings:
+
+1. `workload_sha256 == expected_workload_sha256` — only the approved solver ran, so a miner
+   cannot substitute a workload that echoes a looked-up answer;
+2. `sha256(result_bytes) == result_sha256` — the attested result IS that envelope, so its
+   committed solve cannot be swapped;
+3. the enclave signature over the commitment — the trustless-external layer (#95): an outside
+   party confirms the verdict from the signature alone, no corpus and no re-execution.
+
+Receipt trust is the same seam as `verify_cathedral_attestation`: trusted-issuer by default
+(`intel_verified` + `report_data_match` + `execution_binding_verified`), or independent via
+`receipt_verifier` (cathedral-compute's `verify_customer_receipt`). `result_bound=True` only
+when all three hold, on the same freshness bounds as `attest.v1`. What remains is the enclave
+**worker** itself (a long-lived sealed worker with the corpus baked in that generates the key,
+runs the differential, and writes the signed result) — an infrastructure build, not a
+verification-code gap.
