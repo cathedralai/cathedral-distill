@@ -258,3 +258,25 @@ def test_the_default_posture_is_unenforced_and_warns(tmp_path, monkeypatch):
     assert service._cathedral_receipt_policy is None
     assert service._scores.attestation_posture(21)["enforced"] is False
     assert [w for w in caught if "WITHOUT Intel-TDX" in str(w.message)]
+
+
+def test_batch_size_defaults_to_one_when_unset(monkeypatch):
+    """An unset CYBERGYM_BATCH_SIZE keeps the single-task loopback default."""
+    monkeypatch.delenv(private_server._BATCH_SIZE_ENV, raising=False)
+    assert private_server._batch_size_from_environment() == 1
+
+
+def test_batch_size_reads_a_positive_integer(monkeypatch):
+    """A launch corpus serving N problems an epoch sets the draw size from the env."""
+    monkeypatch.setenv(private_server._BATCH_SIZE_ENV, "5")
+    assert private_server._batch_size_from_environment() == 5
+
+
+def test_batch_size_rejects_zero_and_non_integer(monkeypatch):
+    """A non-positive or non-integer batch size fails closed, never defaults past a typo."""
+    monkeypatch.setenv(private_server._BATCH_SIZE_ENV, "0")
+    with pytest.raises(SystemExit):
+        private_server._batch_size_from_environment()
+    monkeypatch.setenv(private_server._BATCH_SIZE_ENV, "not-a-number")
+    with pytest.raises(SystemExit):
+        private_server._batch_size_from_environment()
