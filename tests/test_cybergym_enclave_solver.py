@@ -140,3 +140,10 @@ def test_a_solve_for_one_miner_cannot_be_replayed_by_another():
     assert _verify(envelope).attested                       # the rightful miner
     assert not _verify(envelope, miner_hotkey="5OtherMiner").attested
     assert not _verify(envelope, nonce="cgnonce-sha256:" + "00" * 32).attested
+
+
+def test_the_poc_is_read_from_b64_env_when_no_upload_is_possible(monkeypatch):
+    # attest.v1 takes no uploaded files, so the PoC arrives base64 in the bound env.
+    from cathedral_distill.cybergym_enclave_solver import _poc_from_environment
+    monkeypatch.setenv("CYBERGYM_POC_B64", base64.b64encode(POC).decode())
+    assert _poc_from_environment() == POC

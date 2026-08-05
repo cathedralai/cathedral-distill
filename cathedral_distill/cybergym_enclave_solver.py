@@ -87,13 +87,28 @@ def solve(
     )
 
 
-def _docker_backend_from_environment() -> VerifierBackend:
-    """The production differential backend over the corpus baked into this worker.
+def _backend_from_environment() -> VerifierBackend:
+    """The differential backend over the corpus baked into this worker.
 
-    Reads the digest-pinned private manifest the image ships with and runs the
-    sealed vul/fix images via Docker, network-isolated. Imported lazily so the
-    hardware-free path (and this module's tests) never require Docker.
+    Two shapes, so the same solver runs on either Cathedral profile:
+
+      * a **result-bound `attest.v1`** job — no Docker, no egress, no uploaded
+        files, a 60s ceiling: set `CYBERGYM_REPRODUCE_CMD` and the sealed vul/fix
+        BINARIES are baked in and driven as sandboxed subprocesses (the
+        `cybergym-verify` contract). This is the profile whose receipt binds
+        `result_sha256`, so it is the one the persistent-enclave verifier accepts;
+      * a **persistent `custom.v1`** worker — set `CYBERGYM_CORPUS_MANIFEST` and the
+        sealed vul/fix IMAGES run via Docker.
+
+    Imported lazily so the hardware-free path (and this module's tests) never need
+    Docker or the binaries.
     """
+    reproduce_cmd = os.environ.get("CYBERGYM_REPRODUCE_CMD", "").strip()
+    if reproduce_cmd:
+        from cathedral_distill.cybergym_verifier import sandboxed_subprocess_backend
+
+        return sandboxed_subprocess_backend(reproduce_cmd)
+
     from cathedral_distill.cybergym_repro import docker_reproduce_backend
     from cathedral_distill.cybergym_repro_manifest import load_private_repro_manifest_file
 
@@ -112,35 +127,44 @@ def _required(name: str) -> str:
     return value
 
 
+def _poc_from_environment() -> bytes:
+    """The miner's PoC. An `attest.v1` job cannot take an uploaded file, so the PoC
+    arrives base64 in `CYBERGYM_POC_B64` (part of the bound workload); the Docker
+    path may instead mount it at `CYBERGYM_POC_PATH`."""
+    b64 = os.environ.get("CYBERGYM_POC_B64", "").strip()
+    if b64:
+        import base64 as _b64
+
+        return _b64.b64decode(b64, validate=True)
+    with open(_required("CYBERGYM_POC_PATH"), "rb") as handle:
+        return handle.read()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Enclave entrypoint: read the dispatched task/poc/trace, solve, emit the result.
 
-    Inputs come from the protected environment and a mounted PoC file, never from
-    stdin the caller controls after dispatch:
+    Inputs come from the protected, bound environment (never stdin the caller
+    controls after dispatch):
 
         CYBERGYM_TASK_ID          the dispatched task id
-        CYBERGYM_POC_PATH         path to the miner's PoC bytes
+        CYBERGYM_POC_B64          the miner's PoC, base64 (attest.v1: no uploads)
+        CYBERGYM_POC_PATH         or a mounted PoC file (Docker/custom.v1 path)
         CYBERGYM_TRACE_ID         the reasoning-trace id bound into the commitment
         CYBERGYM_MINER_HOTKEY     the dispatched miner, bound into the commitment
         CYBERGYM_NONCE            the batch nonce, bound into the commitment
-        CYBERGYM_CORPUS_MANIFEST  the digest-pinned manifest baked into this worker
+        CYBERGYM_REPRODUCE_CMD    the baked-binary differential (attest.v1), or
+        CYBERGYM_CORPUS_MANIFEST  the digest-pinned image manifest (Docker path)
 
     The signed envelope is written to stdout — its sha256 is what the Cathedral
     receipt binds as `result_sha256`.
     """
-    task_id = _required("CYBERGYM_TASK_ID")
-    trace_id = _required("CYBERGYM_TRACE_ID")
-    miner_hotkey = _required("CYBERGYM_MINER_HOTKEY")
-    nonce = _required("CYBERGYM_NONCE")
-    with open(_required("CYBERGYM_POC_PATH"), "rb") as handle:
-        poc_bytes = handle.read()
     envelope = solve(
-        task_id=task_id,
-        poc_bytes=poc_bytes,
-        trace_id=trace_id,
-        miner_hotkey=miner_hotkey,
-        nonce=nonce,
-        backend=_docker_backend_from_environment(),
+        task_id=_required("CYBERGYM_TASK_ID"),
+        poc_bytes=_poc_from_environment(),
+        trace_id=_required("CYBERGYM_TRACE_ID"),
+        miner_hotkey=_required("CYBERGYM_MINER_HOTKEY"),
+        nonce=_required("CYBERGYM_NONCE"),
+        backend=_backend_from_environment(),
     )
     sys.stdout.buffer.write(envelope)
     sys.stdout.buffer.flush()
