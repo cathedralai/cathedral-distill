@@ -42,7 +42,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Callable, Mapping
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 COMMITMENT_SCHEMA = "cathedral_cybergym_tdx_commitment_v1"
+# The persistent-enclave path (#94/#95): the enclave GENERATES its own signing
+# keypair, the boot quote binds that public key, and the enclave signs this
+# commitment over (task, poc, trace[, verdict]). Distinct schema so an `attest.v1`
+# result.txt commitment can never be replayed as an enclave-signed one.
+ENCLAVE_COMMITMENT_SCHEMA = "cathedral_cybergym_tdx_enclave_commitment_v1"
 REQUIRED_TEE = "intel_tdx"
 REQUIRED_HARDWARE = "tdx_cpu"
 RESULT_ARTIFACT = "result.txt"
@@ -63,6 +71,24 @@ def commitment_bytes(*, task_id: str, poc_sha256: str, trace_id: str) -> bytes:
 def commitment_sha256(*, task_id: str, poc_sha256: str, trace_id: str) -> str:
     return hashlib.sha256(commitment_bytes(
         task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id)).hexdigest()
+
+
+def enclave_commitment_bytes(
+    *, task_id: str, poc_sha256: str, trace_id: str, verdict: str | None = None
+) -> bytes:
+    """The canonical bytes the persistent enclave signs with its own key.
+
+    Binds `(task, poc, trace)` and, when the differential runs in-enclave (#95),
+    the signed `verdict` — so an external party confirms PASS/FAIL from the
+    signature alone, with no corpus and no re-execution. `verdict` is omitted from
+    the body (not sent as null) when absent, so the boot-only #94 shape and the
+    verdict-carrying #95 shape are distinct signed messages.
+    """
+    body: dict[str, Any] = {"schema": ENCLAVE_COMMITMENT_SCHEMA, "task_id": task_id,
+                            "poc_sha256": poc_sha256, "trace_id": trace_id}
+    if verdict is not None:
+        body["verdict"] = verdict
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def tee_kind(receipt: Mapping[str, Any]) -> str:
@@ -315,6 +341,135 @@ def verify_boot_attestation(
                            rid, True)
 
 
+@dataclass(frozen=True)
+class EnclaveAttestation:
+    """A persistent-enclave (#94) verdict. Unlike a boot quote, this IS result-bound:
+    the enclave-held key that the boot quote attests also signed the exact
+    `(task, poc, trace[, verdict])`."""
+    attested: bool
+    tee: str
+    reason: str
+    receipt_id: str = ""
+    result_bound: bool = False     # the enclave key signed THIS (task, poc, trace)
+    key_bound: bool = False        # the boot quote binds that enclave key
+    verdict: str | None = None     # #95: the in-enclave PASS/FAIL, inside the signature
+    enclave_key_b64: str = ""
+    trustless: bool = False
+
+
+def verify_persistent_enclave_attestation(
+    receipt: Mapping[str, Any], *, task_id: str, poc_sha256: str, trace_id: str,
+    require_verdict: bool = False, now: datetime | None = None,
+    max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
+    quote_verifier: QuoteVerifier | None = None,
+) -> EnclaveAttestation:
+    """Verify a persistent `custom.v1` worker whose ENCLAVE holds the signing key.
+
+    This is the production real-corpus path (`docs/TDX_ATTESTATION.md` §*The
+    production real-corpus path*, #94). It combines what the two simpler profiles
+    each have half of: `custom.v1` runs the real ~4 GB arvo image, `attest.v1`
+    binds `(task, poc, trace)`. The enclave generates its own keypair (the private
+    half never leaves), the **boot quote binds that enclave public key** — not the
+    customer SSH key — and the enclave **signs a commitment over the solve**. So a
+    valid signature can only have come from inside the attested enclave: a miner
+    cannot pair a looked-up PoC with a boot quote, because they cannot produce the
+    enclave key's signature over it. `result_bound` is therefore True here.
+
+    #95: if the vul/fix differential runs in-enclave, the enclave includes the
+    `verdict` in the signed commitment; pass `require_verdict=True` to refuse a
+    commitment that omits it, and the signed verdict is returned for an external
+    party to trust from the signature alone.
+
+    Fails closed to `attested=False` (never raises on a malformed receipt), like
+    the sibling verifiers. Trusted-issuer by default; a `quote_verifier` checks the
+    raw Intel-DCAP quote. Freshness/replay bounds match `verify_cathedral_attestation`.
+    """
+    rid = str(receipt.get("receipt_id") or receipt.get("worker_id") or "")
+
+    def no(reason: str) -> EnclaveAttestation:
+        return EnclaveAttestation(False, tee_kind(receipt), reason, rid)
+
+    if str(receipt.get("receipt_status") or receipt.get("status")) != "ready":
+        return no("enclave receipt not ready")
+    tee = tee_kind(receipt)
+    if tee != REQUIRED_TEE:
+        return no(f"CyberGym requires an Intel TDX worker, got tee={tee!r}")
+
+    # Freshness, identical bounds to the other verifiers: a missing/unparseable
+    # timestamp fails closed, else a genuine receipt could be replayed forever.
+    started = _iso(receipt.get("started_at"))
+    ref = now or datetime.now(UTC)
+    if started is None:
+        return no("missing or invalid enclave attestation timestamp")
+    age = (ref - started).total_seconds()
+    if age > max_age_seconds:
+        return no(f"enclave attestation is stale ({int(age)}s > {max_age_seconds}s)")
+    if age < -300:
+        return no("enclave attestation is from the future")
+
+    # The enclave-generated public key, and the boot quote that binds it. This is
+    # the pivot vs `verify_boot_attestation`: report_data[0:32] must bind the
+    # ENCLAVE key (sha256(nonce || enclave_pubkey_b64)), not the customer SSH key.
+    enclave_key_b64 = str(receipt.get("enclave_pubkey_b64", ""))
+    if not enclave_key_b64:
+        return no("receipt carries no enclave public key")
+    try:
+        enclave_pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(enclave_key_b64))
+    except Exception:
+        return no("enclave public key is not a valid Ed25519 key")
+    nonce = str(receipt.get("nonce", ""))
+    rd = str(receipt.get("report_data", ""))
+    expect = hashlib.sha256((nonce + enclave_key_b64).encode()).hexdigest()
+    if not rd or not rd.startswith(expect):
+        return no("boot quote report_data does not bind the enclave public key")
+
+    # The raw quote: trusted-issuer by default, or independently via quote_verifier.
+    trustless = False
+    if quote_verifier is not None:
+        q = str(receipt.get("quote_b64", ""))
+        if not q or not quote_verifier(q, rd):
+            return no("raw enclave boot quote failed independent verification")
+        trustless = True
+    else:
+        if receipt.get("intel_verified") is not True and str(receipt.get("intel_status")) != "verified":
+            return no("Cathedral did not report intel_verified")
+        if receipt.get("binding_verified") is not True:
+            return no("enclave key binding not verified")
+
+    # The signature over the solve. The verdict (#95) is carried in the signed
+    # message, so we read the CLAIMED verdict, fold it into the recomputed bytes,
+    # and let the signature decide: a flipped verdict simply fails to verify.
+    verdict = receipt.get("verdict")
+    if verdict is not None and not isinstance(verdict, str):
+        return no("enclave verdict must be a string")
+    if require_verdict and not verdict:
+        return no("enclave commitment carries no verdict (require_verdict)")
+    sig_b64 = str(receipt.get("enclave_signature_b64", ""))
+    if not sig_b64:
+        return no("receipt carries no enclave commitment signature")
+    try:
+        signature = base64.b64decode(sig_b64)
+    except Exception:
+        return no("enclave signature is not valid base64")
+    signed = enclave_commitment_bytes(
+        task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id, verdict=verdict)
+    try:
+        enclave_pub.verify(signature, signed)
+    except InvalidSignature:
+        # The exact rejection #94 requires: a commitment signed anywhere but inside
+        # the attested enclave — or for a different (task, poc, trace, verdict) —
+        # does not verify against the boot-quote-bound key.
+        return no("commitment is not signed by the attested enclave key "
+                  "(or does not bind this task/poc/trace/verdict)")
+
+    return EnclaveAttestation(
+        True, REQUIRED_TEE,
+        "attested_intel_tdx_enclave_result_bound" + ("_trustless" if trustless else ""),
+        rid, result_bound=True, key_bound=True, verdict=verdict,
+        enclave_key_b64=enclave_key_b64, trustless=trustless,
+    )
+
+
 def _expected_report_data_hex(receipt: Mapping[str, Any]) -> str | None:
     """Recompute report_data[32:64] from the receipt fields per Cathedral's
     binding_recipe, for a trustless quote check. Returns None if a needed field is
@@ -333,8 +488,10 @@ def _expected_report_data_hex(receipt: Mapping[str, Any]) -> str | None:
 
 
 __all__ = [
-    "COMMITMENT_SCHEMA", "REQUIRED_TEE", "REQUIRED_HARDWARE", "RESULT_ARTIFACT",
-    "commitment_bytes", "commitment_sha256", "tee_kind",
+    "COMMITMENT_SCHEMA", "ENCLAVE_COMMITMENT_SCHEMA", "REQUIRED_TEE",
+    "REQUIRED_HARDWARE", "RESULT_ARTIFACT",
+    "commitment_bytes", "commitment_sha256", "enclave_commitment_bytes", "tee_kind",
     "CathedralAttestation", "verify_cathedral_attestation",
     "BootAttestation", "verify_boot_attestation",
+    "EnclaveAttestation", "verify_persistent_enclave_attestation",
 ]

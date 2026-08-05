@@ -325,3 +325,150 @@ def test_a_recipe_that_throws_is_a_refusal_never_a_pass():
 def test_trusted_issuer_default_is_unchanged_by_the_seam_fix():
     """No quote_verifier -> trusted-issuer path -> the scalar recipe is irrelevant."""
     assert _ok(_receipt()).attested
+
+
+# --------------------------------------------------------------------------- #
+# persistent-enclave path (#94/#95) — the enclave holds the signing key
+# --------------------------------------------------------------------------- #
+from cathedral_distill.cybergym_cathedral_attest import (  # noqa: E402
+    EnclaveAttestation,
+    enclave_commitment_bytes,
+    verify_persistent_enclave_attestation,
+)
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (  # noqa: E402
+    Ed25519PrivateKey,
+)
+
+_ENCLAVE_KEY = Ed25519PrivateKey.generate()
+_OUTSIDE_KEY = Ed25519PrivateKey.generate()
+
+
+def _enclave_pub_b64(key=_ENCLAVE_KEY):
+    return base64.b64encode(key.public_key().public_bytes_raw()).decode()
+
+
+def _enclave_receipt(*, task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID,
+                     verdict=None, sign_key=_ENCLAVE_KEY, pub_key=_ENCLAVE_KEY,
+                     kind="tdx-1.5", intel_verified=True, binding_verified=True,
+                     status="ready", nonce="9c99da63", started="2026-07-30T11:59:00Z",
+                     sign_task=None, sign_poc=None, sign_trace=None, sign_verdict=...):
+    """A persistent-enclave receipt: report_data binds the ENCLAVE public key and the
+    enclave signs the (task, poc, trace[, verdict]) commitment with its own key.
+
+    The sign_* overrides let a test sign a DIFFERENT message than the one the
+    verifier will recompute, to prove a mismatched/looked-up commitment is refused.
+    """
+    pub_b64 = _enclave_pub_b64(pub_key)
+    rd = hashlib.sha256((nonce + pub_b64).encode()).hexdigest()
+    signed = enclave_commitment_bytes(
+        task_id=task_id if sign_task is None else sign_task,
+        poc_sha256=poc_sha256 if sign_poc is None else sign_poc,
+        trace_id=trace_id if sign_trace is None else sign_trace,
+        verdict=verdict if sign_verdict is ... else sign_verdict,
+    )
+    receipt = {
+        "receipt_id": "e1c1a5e0-enclave", "receipt_status": status, "kind": kind,
+        "intel_verified": intel_verified,
+        "intel_status": "verified" if intel_verified else "failed",
+        "binding_verified": binding_verified, "nonce": nonce,
+        "enclave_pubkey_b64": pub_b64, "report_data": rd, "quote_b64": "BAACAIEA…",
+        "started_at": started,
+        "enclave_signature_b64": base64.b64encode(sign_key.sign(signed)).decode(),
+    }
+    if verdict is not None:
+        receipt["verdict"] = verdict
+    return receipt
+
+
+def _enclave(receipt, **kw):
+    kw.setdefault("now", NOW)
+    return verify_persistent_enclave_attestation(
+        receipt, task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID, **kw)
+
+
+def test_persistent_enclave_solve_is_result_bound():
+    a = _enclave(_enclave_receipt())
+    assert isinstance(a, EnclaveAttestation)
+    assert a.attested and a.tee == "intel_tdx"
+    assert a.key_bound is True
+    # the property the two simpler profiles cannot give together: real corpus AND
+    # a signature that binds the exact solve.
+    assert a.result_bound is True
+    assert a.reason == "attested_intel_tdx_enclave_result_bound"
+    assert a.enclave_key_b64 == _enclave_pub_b64()
+
+
+def test_a_looked_up_poc_signed_outside_the_enclave_is_refused():
+    # The whole point of #94: a miner with a valid boot quote but a PoC obtained
+    # anywhere cannot produce the enclave key's signature over it. Signing with a
+    # key other than the one the boot quote binds must fail closed.
+    a = _enclave(_enclave_receipt(sign_key=_OUTSIDE_KEY))
+    assert not a.attested and not a.result_bound
+    assert "not signed by the attested enclave key" in a.reason
+
+
+def test_report_data_must_bind_the_enclave_key_not_some_other_key():
+    # boot quote binds a DIFFERENT public key than the signer/claimed key
+    r = _enclave_receipt()
+    r["report_data"] = hashlib.sha256(("9c99da63" + _enclave_pub_b64(_OUTSIDE_KEY)).encode()).hexdigest()
+    a = _enclave(r)
+    assert not a.attested and "does not bind the enclave public key" in a.reason
+
+
+def test_commitment_cannot_be_replayed_for_another_task_or_poc():
+    # signed for a different task than the verifier checks -> signature mismatch
+    assert not _enclave(_enclave_receipt(sign_task="arvo:999")).attested
+    assert not _enclave(_enclave_receipt(sign_poc="sha256:" + "00" * 32)).attested
+    assert not _enclave(_enclave_receipt(sign_trace="sha256:" + "11" * 32)).attested
+
+
+def test_in_enclave_verdict_is_carried_inside_the_signature():
+    # #95: the differential runs in-enclave and the verdict is part of the signed
+    # commitment, so an external party trusts PASS/FAIL from the signature alone.
+    a = _enclave(_enclave_receipt(verdict="pass"), require_verdict=True)
+    assert a.attested and a.result_bound and a.verdict == "pass"
+
+
+def test_a_flipped_verdict_breaks_the_signature():
+    # the enclave signed "pass"; the receipt claims "fail" -> recomputed bytes differ
+    r = _enclave_receipt(verdict="pass", sign_verdict="pass")
+    r["verdict"] = "fail"
+    a = _enclave(r, require_verdict=True)
+    assert not a.attested and not a.result_bound
+
+
+def test_require_verdict_refuses_a_boot_only_commitment():
+    # #95 mode demands the verdict be in the signature; a #94-shape commitment
+    # (no verdict) is refused when the caller requires one.
+    a = _enclave(_enclave_receipt(verdict=None), require_verdict=True)
+    assert not a.attested and "no verdict" in a.reason
+
+
+def test_enclave_path_is_stale_future_and_missing_timestamp_checked():
+    assert not _enclave(_enclave_receipt(started="2026-07-01T00:00:00Z")).attested   # stale
+    assert not _enclave(_enclave_receipt(started="2026-08-01T00:00:00Z")).attested   # future
+    r = _enclave_receipt()
+    r.pop("started_at")
+    assert not _enclave(r).attested
+
+
+def test_enclave_path_refuses_non_tdx_and_unverified():
+    assert not _enclave(_enclave_receipt(kind="sev-snp-1")).attested
+    assert not _enclave(_enclave_receipt(intel_verified=False)).attested
+    assert not _enclave(_enclave_receipt(binding_verified=False)).attested
+
+
+def test_enclave_path_fails_closed_on_a_malformed_receipt():
+    assert not verify_persistent_enclave_attestation(
+        {}, task_id=TASK, poc_sha256=POC_SHA, trace_id=TRACE_ID, now=NOW).attested
+    # a non-Ed25519 enclave key is refused, not crashed
+    r = _enclave_receipt()
+    r["enclave_pubkey_b64"] = base64.b64encode(b"tooshort").decode()
+    assert not _enclave(r).attested
+
+
+def test_enclave_trustless_mode_checks_the_raw_quote():
+    ok = _enclave(_enclave_receipt(), quote_verifier=lambda q, rd: True)
+    assert ok.attested and ok.trustless and ok.result_bound
+    bad = _enclave(_enclave_receipt(), quote_verifier=lambda q, rd: False)
+    assert not bad.attested and "failed independent verification" in bad.reason
