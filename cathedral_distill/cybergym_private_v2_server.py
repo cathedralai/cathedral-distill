@@ -1,0 +1,236 @@
+"""Serve an authenticated, loopback-only private-v2 CyberGym E2E verifier.
+
+This deployment entrypoint is intentionally narrower than a production axon. It
+uses one configured miner identity plus a bearer secret so an operator can run
+the complete private-artifact path through an SSH tunnel before wiring the
+network's real hotkey-authentication transport. It refuses a public bind,
+requires durable corpus/solve/score stores, and requires an explicit opt-in to
+the unattested and gate-free E2E configuration.
+
+It is suitable for a live infrastructure E2E, never for a reward authority.
+Production must supply a transport identity adapter, Intel-TDX policy, and the
+normal emission gate policy instead of this entrypoint.
+"""
+
+from __future__ import annotations
+
+import hmac
+import os
+import stat
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Callable, Mapping
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from cathedral_distill.corpus_admission import require_admitted_private_manifest
+from cathedral_distill.cybergym_holdout import Holdout
+from cathedral_distill.cybergym_http import make_threaded_server
+from cathedral_distill.cybergym_private_artifacts import (
+    PrivateChallengeArtifactStore,
+    PrivateReferencePoCStore,
+)
+from cathedral_distill.cybergym_protocol import CyberGymCorpusStore
+from cathedral_distill.cybergym_repro import ReproTaskSource, available_tasks
+from cathedral_distill.cybergym_repro_manifest import (
+    PrivateReproManifest,
+    ReproManifestError,
+    load_private_repro_manifest_file,
+)
+from cathedral_distill.cybergym_scores import CyberGymScoreStore, CyberGymSolveStore
+from cathedral_distill.cybergym_service import CYBERGYM_LANE, CyberGymService
+from cathedral_distill.cybergym_validator import ChainContext
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_E2E_OPT_IN_ENV = "CYBERGYM_E2E_ALLOW_UNATTESTED"
+_MINER_ENV = "CYBERGYM_E2E_MINER_HOTKEY"
+_TOKEN_FILE_ENV = "CYBERGYM_E2E_BEARER_TOKEN_FILE"
+
+
+def _required(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise SystemExit(f"{name} is required")
+    return value
+
+
+def _private_manifest_from_environment() -> PrivateReproManifest:
+    try:
+        manifest = load_private_repro_manifest_file(
+            _required("CYBERGYM_CORPUS_MANIFEST")
+        )
+    except ReproManifestError as exc:
+        raise SystemExit(f"CYBERGYM_CORPUS_MANIFEST is invalid: {exc}") from None
+    if not manifest.reward_ready:
+        raise SystemExit(
+            "private-v2 E2E verifier requires a v2 manifest with digest-pinned "
+            "miner artifacts and validator-held reference PoCs"
+        )
+    return manifest
+
+
+def _signing_key_from_environment() -> Ed25519PrivateKey:
+    text = _required("CYBERGYM_SIGNING_SEED")
+    try:
+        raw = bytes.fromhex(text)
+    except ValueError:
+        raise SystemExit(
+            "CYBERGYM_SIGNING_SEED must be 64 hexadecimal characters"
+        ) from None
+    if len(raw) != 32:
+        raise SystemExit("CYBERGYM_SIGNING_SEED must contain exactly 32 bytes")
+    return Ed25519PrivateKey.from_private_bytes(raw)
+
+
+def _private_file(name: str) -> bytes:
+    path = Path(_required(name))
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o077:
+            raise SystemExit(f"{name} must not be group- or world-readable")
+        value = path.read_bytes().strip()
+    except OSError as exc:
+        raise SystemExit(f"{name} cannot be read: {exc}") from None
+    if not value:
+        raise SystemExit(f"{name} is empty")
+    return value
+
+
+def authenticated_miner_from_environment() -> Callable[
+    [Mapping[str, str], bytes], str | None
+]:
+    """Return the loopback E2E identity adapter.
+
+    The bearer secret is intentionally deployment-local and the returned hotkey is
+    configured, rather than trusted from a request body. ``CyberGymService`` then
+    binds every dispatch, artifact read, and submit to that exact sealed batch.
+    """
+    miner = _required(_MINER_ENV)
+    token = _private_file(_TOKEN_FILE_ENV).decode("utf-8")
+    expected = f"Bearer {token}"
+
+    def authenticate(headers: Mapping[str, str], _body: bytes) -> str | None:
+        actual = headers.get("Authorization", "")
+        return miner if hmac.compare_digest(actual, expected) else None
+
+    return authenticate
+
+
+def build_service(
+    manifest: PrivateReproManifest,
+    *,
+    private_key: Ed25519PrivateKey,
+    challenge_artifacts: PrivateChallengeArtifactStore,
+    reference_pocs: PrivateReferencePoCStore,
+    corpus_db: str,
+    score_db: str,
+    solve_db: str,
+    validator_hotkey: str,
+) -> CyberGymService:
+    """Build the durable private-v2 verifier used by the server and close command."""
+    if not manifest.reward_ready:
+        raise ReproManifestError("private-v2 verifier requires a reward-ready manifest")
+    chain = ChainContext(
+        block=100,
+        block_hash="0x" + "cd" * 32,
+        network="finney",
+        netuid=39,
+        source_epoch=21,
+        valid_from_block=100,
+        valid_until_block=460,
+    )
+    if manifest.source_epoch != chain.source_epoch:
+        raise ReproManifestError(
+            f"manifest source_epoch {manifest.source_epoch} does not match "
+            f"the E2E chain epoch {chain.source_epoch}"
+        )
+    source = ReproTaskSource(
+        manifest,
+        challenge_artifacts=challenge_artifacts,
+        reference_pocs=reference_pocs,
+    )
+    return CyberGymService(
+        Holdout(pool=source, _context={}),
+        chain,
+        backend=source.backend,
+        corpus_store=CyberGymCorpusStore(corpus_db),
+        score_store=CyberGymScoreStore(score_db),
+        solve_store=CyberGymSolveStore(solve_db),
+        validator_hotkey=validator_hotkey,
+        private_key=private_key,
+        signing_key_id="cybergym-private-v2-e2e-1",
+        batch_size=1,
+        cutoff=None,
+        as_of=datetime.now(UTC),
+        # The explicit environment opt-in in build_service_from_environment
+        # confines these two disabled policies to the loopback E2E deployment.
+        attestation_required=False,
+        gates_required=False,
+    )
+
+
+def build_service_from_environment() -> CyberGymService:
+    """Load an admitted private-v2 verifier from protected deployment inputs."""
+    if os.environ.get(_E2E_OPT_IN_ENV) != "1":
+        raise SystemExit(
+            f"{_E2E_OPT_IN_ENV}=1 is required: this verifier has no TDX or "
+            "emission-gate policy"
+        )
+    manifest = _private_manifest_from_environment()
+    artifacts = PrivateChallengeArtifactStore.from_directory(
+        manifest, _required("CYBERGYM_CHALLENGE_ARTIFACT_DIR")
+    )
+    references = PrivateReferencePoCStore.from_directory(
+        manifest, _required("CYBERGYM_REFERENCE_POC_DIR")
+    )
+    available = available_tasks(manifest)
+    if set(available) != {task.task_id for task in manifest.tasks}:
+        raise SystemExit(
+            "every digest-pinned manifest image must be available locally before "
+            "the private-v2 verifier serves a task"
+        )
+    try:
+        require_admitted_private_manifest(manifest, reference_pocs=references)
+    except ReproManifestError as exc:
+        raise SystemExit(f"CYBERGYM_CORPUS_MANIFEST is not scoreable: {exc}") from None
+    return build_service(
+        manifest,
+        private_key=_signing_key_from_environment(),
+        challenge_artifacts=artifacts,
+        reference_pocs=references,
+        corpus_db=_required("CYBERGYM_CORPUS_DB"),
+        score_db=_required("CYBERGYM_SCORE_DB"),
+        solve_db=_required("CYBERGYM_SOLVE_DB"),
+        validator_hotkey=os.environ.get(
+            "CYBERGYM_VALIDATOR_HOTKEY", "cathedral-private-v2-e2e"
+        ),
+    )
+
+
+def main() -> None:
+    host = os.environ.get("CYBERGYM_HOST", "127.0.0.1").strip()
+    if host not in _LOOPBACK_HOSTS:
+        raise SystemExit("private-v2 E2E verifier may bind only a loopback host")
+    port = int(os.environ.get("PORT", "8668"))
+    service = build_service_from_environment()
+    server = make_threaded_server(
+        service,
+        host=host,
+        port=port,
+        authenticator=authenticated_miner_from_environment(),
+        require_authentication=True,
+        healthz={
+            "status": "ok",
+            "task_source": "private-v2",
+            "lane": CYBERGYM_LANE,
+        },
+    )
+    print(f"CyberGym private-v2 E2E verifier serving on {host}:{port}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

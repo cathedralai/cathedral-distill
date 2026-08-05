@@ -82,7 +82,7 @@ binary run. It is a witness in the exact sense SAT uses.
 
 ## What is built vs. what is to build
 
-**Built and tested** (940 tests, hardware-free — the crash backend is
+**Built and tested** (942 tests, hardware-free — the crash backend is
 injected):
 
 - Differential-crash scoring, level weights, re-derivable work units
