@@ -241,7 +241,7 @@ tested:
 - **[Fresh CyberGym verifier E2E](docs/FRESH_CYBERGYM_E2E.md)**: a loopback-only,
   durable fresh-task path for miner/verifier testing. It is explicitly
   non-reward-bearing until the production identity, TDX, and emission controls
-  are configured.
+  plus a non-mechanically-recoverable challenge delivery path are configured.
 - **[TDX attestation](docs/TDX_ATTESTATION.md)**: the two profiles, what each
   binds, and the production path.
 

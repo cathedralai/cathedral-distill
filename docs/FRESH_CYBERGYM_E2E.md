@@ -5,10 +5,11 @@ touching the legacy ARVO reference service.  Each finalized epoch nonce and the
 validator-held `CYBERGYM_FRESH_SEED` derive a new, admitted task set.  The seed
 is never dispatched; its commitment is pinned in the durable epoch manifest.
 
-This process is deliberately **loopback-only and non-reward-bearing**.  It
-requires an explicit development acknowledgement because it does not configure
-the production transport identity adapter, Intel-TDX policy, or emission gate
-policy.  Do not expose it publicly and do not use it to submit weights.
+This process is deliberately **loopback-only and non-reward-bearing**. Its
+rendered reversible artifact also allows mechanical recovery of the trigger, so
+the fresh source remains unpaid even if production transport identity, Intel-TDX,
+and emission-gate controls are present. It requires an explicit development
+acknowledgement. Do not expose it publicly and do not use it to submit weights.
 
 ## Start a clean E2E verifier
 
@@ -96,6 +97,7 @@ same epoch manifest.  A changed fresh seed must fail closed rather than silently
 score substituted task bytes.
 
 For a reward-bearing deployment, replace this entrypoint with a configured
-production service: authenticated batch-scoped artifact transport, persistent
-TDX attestation validation, emission gates, and a real fresh challenge builder
-must all be present before any weight path is enabled.
+production service: an artifact delivery design that is not mechanically
+recoverable by the miner, authenticated batch-scoped artifact transport,
+persistent TDX attestation validation, emission gates, and a real fresh
+challenge builder must all be present before any weight path is enabled.

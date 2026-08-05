@@ -13,11 +13,11 @@ be a schema change; instead each mechanism is structured to avoid needing one):
   * **`MixedTaskSource`** — a draw-capable source (same `.draw`/`.context_provider`
     /`.backend` interface a `TaskPool` or `SyntheticTaskSource` exposes) that
     deterministically apportions a batch across several sub-sources by weight, so
-    a validator can run e.g. 75% generated + 25% recent-real. Every task it yields
-    is a legitimate, un-cheatable reward task; the blend changes *which* fresh
-    challenges a miner sees, not how they score. The apportionment and each
-    sub-source's sub-nonce are derived from the batch nonce, so two independent
-    validators draw the byte-identical mixed batch with no coordination.
+    a validator can run e.g. 75% generated + 25% recent-real. A production mix
+    must contain only individually reward-admitted sources; the blend changes
+    *which* challenges a miner sees, not how they score. The apportionment and
+    each sub-source's sub-nonce are derived from the batch nonce, so two
+    independent validators draw the byte-identical mixed batch with no coordination.
 
   * **`probe_liveness`** — the public-canary check. Public CyberGym tasks (whose
     answers are in the public dataset, i.e. lookup-farmable) are dispatched on a
@@ -131,9 +131,10 @@ class MixedTaskSource:
     `MixedTaskSource(specs)` satisfies the same `.draw`/`.context_provider`/
     `.backend` interface as `TaskPool` and `SyntheticTaskSource`, so it drops
     straight into `CyberGymService(holdout=Holdout(pool=mix, ...), backend=mix.backend)`
-    and into `run_epoch(pool=mix, ...)` unchanged. Every sub-source is a
-    reward-bearing, un-cheatable challenge source; the blend only changes the mix
-    of fresh challenges a miner faces.
+    and into `run_epoch(pool=mix, ...)` unchanged. A reward-bearing mix must use
+    only admitted, non-gameable sources; the validator independently excludes
+    synthetic and current fresh task ids from reward receipts. The blend only
+    changes the mix of challenges a miner faces.
 
     Determinism: the per-batch apportionment and every sub-source's sub-nonce are
     derived from the batch nonce alone, so two independent validators drawing for

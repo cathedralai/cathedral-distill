@@ -50,7 +50,9 @@ _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 # development-only generated challenge; freshvuln:<nonce8>:<n> is the sealed,
 # validator-held fresh challenge source.  The two generated prefixes remain
 # distinct because ``synthvuln`` deliberately renders its answer and therefore
-# must never be rewardable, while ``freshvuln`` has a separate admission path.
+# must never be rewardable. ``freshvuln`` is likewise non-rewardable while its
+# rendered reversible artifact allows mechanical trigger recovery; it needs a
+# separate, miner-safe delivery admission path before it can earn emission.
 # ONE definition of what a synthetic nonce may contain. The task-ID grammar and the
 # nonce check below are both built from it, so a caller that validates a nonce and a
 # parser that validates the resulting task id cannot disagree. They did: the agent CLI
