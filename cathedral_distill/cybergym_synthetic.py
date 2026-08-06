@@ -81,6 +81,27 @@ def _stream(nonce: str, index: int) -> bytes:
     return hashlib.sha256(f"cathedral-synthetic-gen-v1\x00{nonce}\x00{index}".encode()).digest()
 
 
+def synthetic_identity(nonce: str, index: int, *, level: int) -> str:
+    """The identity segment of a synthetic task id: a commitment to what it IS.
+
+    Derived from the WHOLE nonce, the index and the level, because those three
+    are exactly what a synthetic challenge is: same triple -> same bug, and any
+    difference in the triple is a different challenge that must not be able to
+    answer to the same name. The id used to be `nonce[-8:]`, which kept 32 bits
+    of a sha256 nonce while the bug was generated from all of it -- so
+    `abatchl0t0` and `zbatchl0t0` produced different bugs under one task id
+    (#118), and `SyntheticTaskSource._bugs` would silently overwrite one with
+    the other. Level is included because it is not an input to `_stream`: the
+    same nonce+index at level 0 and level 3 is one bug carrying two different
+    weights, and a receipt has to say which one was answered.
+
+    Sixteen hex characters, matching `cybergym_fresh`'s identity, and legal
+    under the `[0-9a-z]+` task-id grammar without widening it.
+    """
+    material = f"cathedral-synthetic-id-v1\x00{nonce}\x00{index}\x00{level}".encode()
+    return hashlib.sha256(material).hexdigest()[:16]
+
+
 def generate_bug(nonce: str, index: int, *, level: int) -> SyntheticBug:
     """Deterministically generate challenge `index` from the chain nonce.
 
@@ -97,7 +118,8 @@ def generate_bug(nonce: str, index: int, *, level: int) -> SyntheticBug:
     else:  # off_by_one: vul's check allows n==buf but writes n+1 (a terminator)
         n = buffer_size
     trigger = magic + n.to_bytes(2, "big") + b"A" * n
-    return SyntheticBug(task_id=f"synthvuln:{nonce[-8:]}:{index}", level=level,
+    task_id = f"{SYNTHETIC_TASK_PREFIX}{synthetic_identity(nonce, index, level=level)}:{index}"
+    return SyntheticBug(task_id=task_id, level=level,
                         bug_class=bug_class, magic=magic, buffer_size=buffer_size, trigger=trigger)
 
 
