@@ -194,18 +194,22 @@ if you bridge to real builds.
 Both verifiers default to trusting Cathedral's own `intel_verified` flag; pass a
 `quote_verifier` to check the raw DCAP quote yourself (trustless).
 
-**Your reasoning trace** — worth up to **+30%**, but only if it's real (next section).
+**Your reasoning trace** — what turns a verified solve into open training data, if
+it's real (next section).
 
 ---
 
-## The trace bonus — worth 30%, but only if it's real
+## The reasoning trace — what makes a solve *trainable*
 
-Sharing your agent's reasoning turns your work into training data, and pays for it:
+Sharing your agent's reasoning is what turns a verified solve into training data.
+A solve is *trainable* (corpus-eligible) when two things hold:
 
-```
-+0.20   if you submit a reasoning trace that clears the quality floor
-+0.10   if the run carries a compute seal (model_seal — proves which model produced it)
-```
+- a **reasoning trace** that clears the quality floor (below), and
+- a **compute seal** (`model_seal`) — proving which model produced the run.
+
+These are corpus-quality gates, not a payout multiplier: a verified solve pays its
+work units either way, and a reward for the trace itself is not wired today. Submit a
+real trace because it makes your work usable as open data — the point of this track.
 
 The floor is **structural and model-free**, so you cannot game it by spending compute.
 A valid trace must have:
@@ -214,8 +218,8 @@ A valid trace must have:
 - **≥ ~200 tokens** of reasoning summed across steps (not "I found the bug"),
 - **≥ 2 concrete `file:line` references** (e.g. `vuln.c:5` — you reasoned over source),
 - **no single action repeated more than 3×** (not a padded loop),
-- an explicit reuse **licence**, and — for the seal bonus and to be *trainable* — a
-  `model_seal` binding the model to the run.
+- an explicit reuse **licence**, and — to be *trainable* — a `model_seal`
+  binding the model to the run.
 
 A trace without a licence is refused; the corpus cannot train on what it cannot legally
 reuse. The agent records `list_files`/`read_file` as `read_file`, `run_poc` as
@@ -240,7 +244,7 @@ Every one of these is enforced, not merely discouraged:
 - **Pre-computing from public tasks** — the scored batch is disclosed *after* your
   commit; public ARVO/OSS-Fuzz tasks are for training only, and public canaries earn
   nothing (solving them just proves you're alive).
-- **A padded or unlicensed trace** — it fails the quality floor, no bonus.
+- **A padded or unlicensed trace** — it fails the quality floor, so it is not *trainable*.
 - **A model that scores well but is too slow to serve** — the latency gate.
 - **Re-committing to a different model mid-epoch** — **refused.** Your
   `model_commitment` is pinned for the epoch on your first dispatch, and a later
