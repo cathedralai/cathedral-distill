@@ -127,6 +127,19 @@ class CyberGymScoreStore:
             "  nonce TEXT NOT NULL,"
             "  dispatched_units TEXT NOT NULL)"
         )
+        # A per-(epoch, miner) sample of the exact Intel-TDX receipt + result envelope
+        # a creditable attested solve carried. The exporter picks one representative
+        # from a SCORED miner and puts it in the wire report, so the validator can
+        # independently DCAP-verify at least one genuine receipt bound to the epoch
+        # (the attestation spot-check). First write per miner wins.
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS cybergym_epoch_receipt_sample ("
+            "  epoch INTEGER NOT NULL,"
+            "  miner_hotkey TEXT NOT NULL,"
+            "  receipt_json TEXT NOT NULL,"
+            "  result_b64 TEXT NOT NULL,"
+            "  PRIMARY KEY (epoch, miner_hotkey))"
+        )
         self._migrate_attestation_policy_digest()
         self._connection.commit()
 
@@ -513,6 +526,42 @@ class CyberGymScoreStore:
         return {
             "nonce": str(row["nonce"]),
             "dispatched_units": str(row["dispatched_units"]),
+        }
+
+    def record_attestation_sample(
+        self, epoch: int, miner_hotkey: str, receipt: object, result_b64: str
+    ) -> None:
+        """Keep one attested receipt + result envelope for (epoch, miner).
+
+        First write per miner wins (idempotent for the same receipt); the exporter
+        later picks one representative from a SCORED miner for the report. Stored
+        verbatim as the JSON the miner submitted so the validator re-derives the
+        exact bytes Cathedral signed. Best-effort at the call site — a failure here
+        must never fail a solve.
+        """
+        receipt_text = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+        try:
+            with self._connection:
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO cybergym_epoch_receipt_sample"
+                    "(epoch, miner_hotkey, receipt_json, result_b64) VALUES (?,?,?,?)",
+                    (int(epoch), str(miner_hotkey), receipt_text, str(result_b64)),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError("failed to record the attestation sample") from exc
+
+    def attestation_sample_for(self, epoch: int, miner_hotkey: str) -> dict | None:
+        """The stored ``{receipt, result_b64}`` for (epoch, miner), or None."""
+        row = self._connection.execute(
+            "SELECT receipt_json, result_b64 FROM cybergym_epoch_receipt_sample "
+            "WHERE epoch=? AND miner_hotkey=?",
+            (int(epoch), str(miner_hotkey)),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "receipt": json.loads(row["receipt_json"]),
+            "result_b64": str(row["result_b64"]),
         }
 
     def close(self) -> None:

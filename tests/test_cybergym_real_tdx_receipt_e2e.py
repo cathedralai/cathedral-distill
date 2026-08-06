@@ -250,6 +250,11 @@ def test_the_real_receipt_credits_the_miner_and_composes_the_v3_weight(tmp_path,
     assert outcome.reason == "solved_trainable"
     # The gate admitted it, so the real differential actually ran.
     assert runner.runs != []
+    # The submit path captured the real receipt for the epoch spot-check sample, so
+    # the exported report can hand the validator a genuine receipt to DCAP-verify.
+    sample = service._scores.attestation_sample_for(H.EPOCH, H.MINER)
+    assert sample is not None
+    assert sample["receipt"]["schema"] == "cathedral_customer_receipt_v1"
 
     # Score + close, then export the signed consumer report.
     service.score_epoch(issued_at="2026-08-05T12:15:00.000000Z")

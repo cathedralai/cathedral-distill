@@ -500,3 +500,36 @@ def test_build_score_report_omits_the_frontier_when_absent(tmp_path):
     store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=1, at=CLOSED_AT)
     document = _build(store)
     assert "nonce" not in document and "dispatched_units" not in document
+
+
+# --- attestation spot-check sample (representative receipt in the report) ------
+def test_attestation_sample_first_write_wins(tmp_path):
+    store = _store(tmp_path)
+    store.record_attestation_sample(EPOCH, "5A", {"a": 1}, "eA==")
+    store.record_attestation_sample(EPOCH, "5A", {"a": 2}, "eQ==")  # ignored
+    assert store.attestation_sample_for(EPOCH, "5A") == {"receipt": {"a": 1}, "result_b64": "eA=="}
+    assert store.attestation_sample_for(EPOCH, "5B") is None
+
+
+def test_attestation_receipt_picks_the_top_scored_miner_with_a_sample(tmp_path):
+    store = _store(tmp_path, [("5Low", "2", "r-low"), ("5Top", "8", "r-top")])
+    store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=2, at=CLOSED_AT)
+    store.record_attestation_sample(EPOCH, "5Low", {"schema": "cathedral_customer_receipt_v1", "id": "low"}, "bG93")
+    store.record_attestation_sample(EPOCH, "5Top", {"schema": "cathedral_customer_receipt_v1", "id": "top"}, "dG9w")
+    doc = _build(store)
+    assert doc["attestation_receipt"]["receipt"]["id"] == "top"   # highest score chosen
+    assert doc["attestation_receipt"]["result_b64"] == "dG9w"
+
+
+def test_attestation_receipt_falls_through_to_a_scored_miner_that_has_one(tmp_path):
+    store = _store(tmp_path, [("5Low", "2", "r-low"), ("5Top", "8", "r-top")])
+    store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=2, at=CLOSED_AT)
+    store.record_attestation_sample(EPOCH, "5Low", {"schema": "cathedral_customer_receipt_v1", "id": "low"}, "bG93")
+    doc = _build(store)  # top miner has no sample -> the next scored one with a sample
+    assert doc["attestation_receipt"]["receipt"]["id"] == "low"
+
+
+def test_attestation_receipt_omitted_without_any_sample(tmp_path):
+    store = _store(tmp_path, [("5A", "8", "r-a")])
+    store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=1, at=CLOSED_AT)
+    assert "attestation_receipt" not in _build(store)

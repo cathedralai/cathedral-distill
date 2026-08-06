@@ -18,6 +18,7 @@ or call Bittensor. The canonical validator remains the only weight writer.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -53,6 +54,7 @@ SEMANTIC_KEYS = (
 OPTIONAL_SEMANTIC_KEYS = (
     "nonce",
     "dispatched_units",
+    "attestation_receipt",
 )
 _ALL_SEMANTIC_KEYS = SEMANTIC_KEYS + OPTIONAL_SEMANTIC_KEYS
 
@@ -189,6 +191,30 @@ def normalize_report(document: Any) -> dict[str, Any]:
         if not math.isfinite(dispatched) or dispatched < 0.0:
             raise CyberGymScoreReportError("dispatched_units must be finite and non-negative")
         normalized["dispatched_units"] = dispatched
+    if "attestation_receipt" in document:
+        # The spot-check sample: one {receipt, result_b64} the validator independently
+        # DCAP-verifies. Only its two-key shell is validated here; the receipt object
+        # is carried VERBATIM (the validator re-derives the exact bytes Cathedral
+        # signed), and canonical_report_bytes sort_keys-canonicalizes it recursively
+        # so both sides derive the same digest from the same object.
+        ar = document["attestation_receipt"]
+        if not isinstance(ar, Mapping):
+            raise CyberGymScoreReportError("attestation_receipt must be an object")
+        receipt = ar.get("receipt")
+        result_b64 = ar.get("result_b64")
+        if not isinstance(receipt, Mapping) or not receipt:
+            raise CyberGymScoreReportError("attestation_receipt.receipt must be a non-empty object")
+        if not isinstance(result_b64, str) or not result_b64 or len(result_b64) > 65536:
+            raise CyberGymScoreReportError(
+                "attestation_receipt.result_b64 must be a bounded base64 string"
+            )
+        try:
+            base64.b64decode(result_b64, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise CyberGymScoreReportError(
+                "attestation_receipt.result_b64 is not valid base64"
+            ) from exc
+        normalized["attestation_receipt"] = {"receipt": dict(receipt), "result_b64": result_b64}
     return normalized
 
 
@@ -379,6 +405,16 @@ def build_score_report(
     if frontier is not None:
         document["nonce"] = frontier["nonce"]
         document["dispatched_units"] = float(frontier["dispatched_units"])
+    # Attach one representative Intel-TDX receipt for the validator's spot-check: the
+    # highest-scoring miner (ties by hotkey, deterministic + re-exportable) that has a
+    # captured attested sample. The validator DCAP-verifies it and checks it commits to
+    # this epoch's nonce + a scored miner. Absent any sample the report omits it and the
+    # lane composes as today; the choice is a pure function of the closed scores + samples.
+    for hotkey in sorted(scores, key=lambda h: (-scores[h], h)):
+        sample = score_store.attestation_sample_for(source_epoch, hotkey)
+        if sample is not None:
+            document["attestation_receipt"] = sample
+            break
     return normalize_report(document)
 
 
