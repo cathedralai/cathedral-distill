@@ -103,6 +103,63 @@ def test_synthetic_task_ids_are_identifiable():
 
 
 # --------------------------------------------------------------------------- #
+# Task identity: one name, one challenge (#118)
+# --------------------------------------------------------------------------- #
+
+def test_two_nonces_sharing_a_suffix_do_not_share_a_task_id():
+    """The #118 repro, verbatim: the id was `nonce[-8:]`, the bug was all of it."""
+    left = generate_bug("abatchl0t0", 0, level=0)
+    right = generate_bug("zbatchl0t0", 0, level=0)
+
+    # Different substance -- this is what made a shared id wrong, not a style point.
+    assert (left.magic, left.buffer_size) != (right.magic, right.buffer_size)
+    assert left.binary_digest != right.binary_digest
+    assert left.task_id != right.task_id
+
+    # And a PoC for one must not be creditable against the other under one name.
+    assert execute(left, left.trigger, patched=False) == CRASH_EXIT
+    assert execute(right, left.trigger, patched=False) != CRASH_EXIT
+
+
+def test_the_task_id_commits_to_the_whole_nonce_the_index_and_the_level():
+    base = generate_bug(NONCE, 3, level=0)
+    assert generate_bug(NONCE, 3, level=0).task_id == base.task_id, "must stay deterministic"
+    assert generate_bug(NONCE + "x", 3, level=0).task_id != base.task_id
+    assert generate_bug(NONCE, 4, level=0).task_id != base.task_id
+    # Level is not an input to the bug stream, so without it one bug carries two
+    # different weights under one name and a receipt cannot say which was answered.
+    assert generate_bug(NONCE, 3, level=3).task_id != base.task_id
+
+
+def test_generated_task_ids_are_legal_on_the_wire():
+    from cathedral_distill.cybergym import _TASK_ID_RE
+
+    for index in range(8):
+        for level in (0, 1, 2, 3):
+            task_id = generate_bug(NONCE, index, level=level).task_id
+            assert _TASK_ID_RE.fullmatch(task_id), task_id
+            assert is_synthetic_task(task_id)
+            assert task_id.endswith(f":{index}")
+
+
+def test_one_source_keeps_both_bugs_when_two_nonces_share_a_suffix():
+    """`SyntheticTaskSource._bugs` is keyed by task_id and outlives a draw, so a
+    colliding id used to overwrite an earlier bug: the artifact and the backend
+    then answered for the wrong challenge."""
+    source = SyntheticTaskSource(levels=(0,))
+    first = source.draw(size=1, nonce="abatchl0t0")
+    second = source.draw(size=1, nonce="zbatchl0t0")
+    first_id = first.tasks[0].task_id
+    second_id = second.tasks[0].task_id
+
+    assert first_id != second_id
+    assert source.artifact(first_id) != source.artifact(second_id)
+    for task_id, nonce in ((first_id, "abatchl0t0"), (second_id, "zbatchl0t0")):
+        bug = generate_bug(nonce, 0, level=0)
+        assert source.backend(task_id, bug.trigger, "vul") == CRASH_EXIT
+
+
+# --------------------------------------------------------------------------- #
 # And therefore: solved, graded, unpaid
 # --------------------------------------------------------------------------- #
 

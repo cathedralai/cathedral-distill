@@ -46,11 +46,13 @@ SUBMISSION_DOMAIN = b"cathedral-cybergym-submission-v1\x00"
 CRASH_CLEAN_CODES = frozenset({0, 300})
 
 _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
-# arvo:<n> / oss-fuzz:<n> are the public corpus; synthvuln:<nonce8>:<n> is a
-# development-only generated challenge; freshvuln:<nonce8>:<n> is the sealed,
-# validator-held fresh challenge source.  The two generated prefixes remain
-# distinct because ``synthvuln`` deliberately renders its answer and therefore
-# must never be rewardable. ``freshvuln`` is likewise non-rewardable while its
+# arvo:<n> / oss-fuzz:<n> are the public corpus; synthvuln:<identity>:<n> is a
+# development-only generated challenge; freshvuln:<identity>:<n> is the sealed,
+# validator-held fresh challenge source. Both generated prefixes carry a 16-hex
+# identity derived from the WHOLE nonce (plus index, plus level for synthvuln),
+# never a truncation of it: a task id names one challenge and only one (#118).
+# The two generated prefixes remain distinct because ``synthvuln`` deliberately
+# renders its answer and therefore must never be rewardable. ``freshvuln`` is likewise non-rewardable while its
 # rendered reversible artifact allows mechanical trigger recovery; it needs a
 # separate, miner-safe delivery admission path before it can earn emission.
 # ONE definition of what a synthetic nonce may contain. The task-ID grammar and the
