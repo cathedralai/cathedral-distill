@@ -471,3 +471,32 @@ def test_a_posture_table_without_the_digest_column_is_migrated_in_place(tmp_path
     }
     # Idempotent: reopening an already-migrated database is a no-op.
     assert CyberGymScoreStore(str(path)).attestation_posture(EPOCH)["policy_digest"] == ""
+
+
+# --- epoch frontier (batch nonce + dispatched_units) for the tournament -------
+def test_epoch_frontier_first_write_wins_and_refuses_a_mismatch(tmp_path):
+    store = _store(tmp_path)
+    assert store.epoch_frontier(EPOCH) is None
+    store.record_frontier(EPOCH, "cgnonce-x", "11")
+    assert store.epoch_frontier(EPOCH) == {"nonce": "cgnonce-x", "dispatched_units": "11"}
+    store.record_frontier(EPOCH, "cgnonce-x", "11")  # byte-identical retry is idempotent
+    with pytest.raises(CyberGymScoreError):
+        store.record_frontier(EPOCH, "cgnonce-x", "12")  # a different value refuses
+
+
+def test_build_score_report_emits_the_frontier_when_recorded(tmp_path):
+    store = _store(tmp_path, [("5MinerA", "8", "receipt-a")])
+    store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=1, at=CLOSED_AT)
+    store.record_frontier(EPOCH, "cgnonce-sha256:abc", "11")
+    document = _build(store)
+    assert document["nonce"] == "cgnonce-sha256:abc"
+    # a float, normalized identically to cathedral-validator so the digest agrees
+    assert document["dispatched_units"] == 11.0
+
+
+def test_build_score_report_omits_the_frontier_when_absent(tmp_path):
+    """An epoch scored before the frontier shipped keeps the byte-identical report."""
+    store = _store(tmp_path, [("5MinerA", "8", "receipt-a")])
+    store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=1, at=CLOSED_AT)
+    document = _build(store)
+    assert "nonce" not in document and "dispatched_units" not in document

@@ -115,6 +115,18 @@ class CyberGymScoreStore:
             "  policy_digest TEXT NOT NULL DEFAULT '',"
             "  recorded_at TEXT NOT NULL)"
         )
+        # The epoch's common-frontier context, recorded at scoring time so the
+        # exported report can carry it: the chain-anchored batch `nonce` (the
+        # tournament tie-break key) and `dispatched_units` (the batch's total
+        # difficulty-weight = the base-100 denominator). This database is what leaves
+        # the verifier, so it lives HERE beside the scores. Both are deterministic
+        # from the pinned epoch inputs, so first-write-wins and a re-score reuses them.
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS cybergym_epoch_frontier ("
+            "  epoch INTEGER PRIMARY KEY,"
+            "  nonce TEXT NOT NULL,"
+            "  dispatched_units TEXT NOT NULL)"
+        )
         self._migrate_attestation_policy_digest()
         self._connection.commit()
 
@@ -460,6 +472,48 @@ class CyberGymScoreStore:
                 (epoch,),
             )
         ]
+
+    def record_frontier(self, epoch: int, nonce: str, dispatched_units: object) -> None:
+        """Pin this epoch's frontier context (batch nonce + dispatched_units).
+
+        First write wins; a later score that computed a different value refuses,
+        mirroring the solve store's ``record_manifest`` — both are deterministic from
+        the pinned epoch inputs, so a disagreement means the epoch was drawn under
+        different chain state.
+        """
+        nonce_text = str(nonce)
+        dispatched_text = str(dispatched_units)
+        existing = self.epoch_frontier(epoch)
+        if existing is not None:
+            if (existing["nonce"] == nonce_text
+                    and existing["dispatched_units"] == dispatched_text):
+                return
+            raise CyberGymScoreError(
+                f"epoch {int(epoch)} frontier was already pinned to a different "
+                "(nonce, dispatched_units); refusing to overwrite it"
+            )
+        try:
+            with self._connection:
+                self._connection.execute(
+                    "INSERT INTO cybergym_epoch_frontier"
+                    "(epoch, nonce, dispatched_units) VALUES (?,?,?)",
+                    (int(epoch), nonce_text, dispatched_text),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CyberGymScoreError("failed to record the epoch frontier") from exc
+
+    def epoch_frontier(self, epoch: int) -> dict[str, str] | None:
+        """The pinned ``(nonce, dispatched_units)`` for ``epoch``, or None."""
+        row = self._connection.execute(
+            "SELECT nonce, dispatched_units FROM cybergym_epoch_frontier WHERE epoch=?",
+            (int(epoch),),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "nonce": str(row["nonce"]),
+            "dispatched_units": str(row["dispatched_units"]),
+        }
 
     def close(self) -> None:
         self._connection.close()

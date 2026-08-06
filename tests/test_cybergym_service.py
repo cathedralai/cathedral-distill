@@ -131,6 +131,13 @@ def test_dispatch_submit_score_compose_end_to_end(tmp_path):
     assert len(results) == 1
     assert svc._scores.epoch_scores(SOURCE_EPOCH) == {"5Miner": Decimal("8")}
 
+    # scoring pins the epoch frontier the tournament composer needs: a non-empty
+    # chain-anchored nonce and dispatched_units >= any miner's solved weight (it is
+    # the total difficulty-weight of the common batch = the base-100 denominator).
+    frontier = svc._scores.epoch_frontier(SOURCE_EPOCH)
+    assert frontier is not None and frontier["nonce"]
+    assert Decimal(frontier["dispatched_units"]) >= Decimal("8")
+
     # the persisted score composes into a lane_feed vector
     lane = svc.compose_lane(allocation=Decimal("0.90"))
     assert [c.miner_hotkey for c in lane.contributions] == ["5Miner"]
