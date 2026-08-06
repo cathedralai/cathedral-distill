@@ -9,6 +9,7 @@ import threading
 import urllib.error
 import urllib.request
 import warnings
+from pathlib import Path
 
 import pytest
 
@@ -280,3 +281,48 @@ def test_batch_size_rejects_zero_and_non_integer(monkeypatch):
     monkeypatch.setenv(private_server._BATCH_SIZE_ENV, "not-a-number")
     with pytest.raises(SystemExit):
         private_server._batch_size_from_environment()
+
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+_TRUST_FILE = str(_FIXTURES / "cathedral-customer-receipt-trusted-keys.json")
+
+
+def _real_receipt():
+    return json.loads((_FIXTURES / "cybergym-real-tdx-receipt.json").read_text())["receipt"]
+
+
+def test_receipt_verifier_is_none_without_the_trust_file(monkeypatch):
+    """Unset CATHEDRAL_RECEIPT_TRUSTED_KEYS keeps the trusted-issuer default (no seam)."""
+    monkeypatch.delenv(private_server._TRUSTED_KEYS_ENV, raising=False)
+    assert private_server._receipt_verifier_from_environment() is None
+
+
+def test_receipt_verifier_accepts_the_real_cathedral_receipt(monkeypatch):
+    """A genuine Cathedral receipt verifies against the pinned published key."""
+    monkeypatch.setenv(private_server._TRUSTED_KEYS_ENV, _TRUST_FILE)
+    verify = private_server._receipt_verifier_from_environment()
+    assert verify is not None and verify(_real_receipt()) is True
+
+
+def test_receipt_verifier_rejects_a_tampered_receipt(monkeypatch):
+    """A receipt whose bound bytes were altered fails the Ed25519 signature check."""
+    monkeypatch.setenv(private_server._TRUSTED_KEYS_ENV, _TRUST_FILE)
+    verify = private_server._receipt_verifier_from_environment()
+    receipt = _real_receipt()
+    receipt["result_sha256"] = "00" + receipt["result_sha256"][2:]
+    assert verify(receipt) is False
+
+
+def test_receipt_policy_engages_independent_verification(monkeypatch):
+    """With both envs set, enforcement carries the trustless receipt_verifier seam."""
+    monkeypatch.setenv(private_server._APPROVED_WORKLOAD_ENV, "ab" * 32)
+    monkeypatch.setenv(private_server._TRUSTED_KEYS_ENV, _TRUST_FILE)
+    policy = private_server._receipt_policy_from_environment()
+    assert policy is not None and policy.receipt_verifier is not None
+
+
+def test_receipt_verifier_fails_closed_on_an_unreadable_trust_file(monkeypatch):
+    """A configured-but-unreadable trust file refuses startup, never runs unverified."""
+    monkeypatch.setenv(private_server._TRUSTED_KEYS_ENV, "/no/such/trust-file.json")
+    with pytest.raises(SystemExit):
+        private_server._receipt_verifier_from_environment()
