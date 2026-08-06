@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
@@ -32,6 +33,7 @@ from cathedral_distill.attestation import (
     attestation_policy_digest,
 )
 from cathedral_distill.cybergym_attest import (
+    PROFILE_PERSISTENT_ENCLAVE,
     CathedralReceiptPolicy,
     cathedral_receipt_policy_digest,
 )
@@ -665,6 +667,23 @@ class CyberGymService:
                     model_commitment=state.model_commitment,
                     task_id=envelope.task_id, poc=poc,
                 )
+            # Capture the attested receipt for the epoch's spot-check sample. The
+            # exporter later puts one representative (from a SCORED miner) in the wire
+            # report so the validator can independently DCAP-verify a genuine receipt
+            # bound to this epoch. Best-effort report metadata — never fail a solve.
+            if outcome.attested and envelope.attestation and self._scores is not None:
+                try:
+                    token = json.loads(base64.b64decode(envelope.attestation, validate=True))
+                    if (isinstance(token, dict)
+                            and token.get("profile") == PROFILE_PERSISTENT_ENCLAVE
+                            and isinstance(token.get("receipt"), dict)
+                            and isinstance(token.get("result_b64"), str)):
+                        self._scores.record_attestation_sample(
+                            self.chain.source_epoch, miner_hotkey,
+                            token["receipt"], token["result_b64"],
+                        )
+                except Exception:  # noqa: BLE001 - sample is best-effort metadata
+                    pass
         return outcome
 
     # -- artifact (validator -> miner): the vulnerable program to analyse --- #
