@@ -307,6 +307,44 @@ def require_attested_epoch(
     )
 
 
+_SPOTCHECK_DOMAIN = b"cathedral-cybergym-spotcheck-v1"
+
+
+def _spotcheck_miner(
+    creditable: list[str], *, nonce: str, source_epoch: int
+) -> str | None:
+    """Which miner's attested receipt the report exposes for the validator spot-check.
+
+    Chain-anchored and producer-independent (wallscaler #115 review, finding 2). Picking
+    the *highest-scoring* miner let a producer that fabricates scores also choose which
+    receipt is shown — one genuine attested solve among N fabricated ones would satisfy
+    the check. Instead the miner is the argmin over the creditable-solve set of a
+    domain-separated ``sha256(DOMAIN ‖ nonce ‖ source_epoch ‖ hotkey)`` — the same
+    ungrindable, nonce-keyed shape as ``cybergym_tournament._nonce_digest`` and
+    ``cybergym_mix.apportion``, with its own ``DOMAIN`` so this pick is independent of the
+    tournament tie-break. The nonce is the chain-anchored batch nonce (#114), which no
+    producer controls, so the choice is a pure function of published data (nonce + scores)
+    that any third party re-derives; steering it would require dropping every creditable
+    miner with a smaller digest, i.e. under-crediting real solves — visible and self-harming.
+    A missing/empty nonce yields no pick (the pre-#114 pass-through).
+    """
+    if not creditable:
+        return None
+    nonce_bytes = nonce.encode("utf-8")
+    if not nonce_bytes:
+        return None
+    epoch_bytes = str(int(source_epoch)).encode("ascii")
+
+    def _digest(hotkey: str) -> str:
+        return hashlib.sha256(
+            _SPOTCHECK_DOMAIN + b"\x00" + nonce_bytes + b"\x00"
+            + epoch_bytes + b"\x00" + hotkey.encode("utf-8")
+        ).hexdigest()
+
+    # sorted() first so an (astronomically unlikely) digest tie breaks deterministically.
+    return min(sorted(creditable), key=_digest)
+
+
 def build_score_report(
     score_store: CyberGymScoreStore,
     *,
@@ -405,16 +443,25 @@ def build_score_report(
     if frontier is not None:
         document["nonce"] = frontier["nonce"]
         document["dispatched_units"] = float(frontier["dispatched_units"])
-    # Attach one representative Intel-TDX receipt for the validator's spot-check: the
-    # highest-scoring miner (ties by hotkey, deterministic + re-exportable) that has a
-    # captured attested sample. The validator DCAP-verifies it and checks it commits to
-    # this epoch's nonce + a scored miner. Absent any sample the report omits it and the
-    # lane composes as today; the choice is a pure function of the closed scores + samples.
-    for hotkey in sorted(scores, key=lambda h: (-scores[h], h)):
-        sample = score_store.attestation_sample_for(source_epoch, hotkey)
-        if sample is not None:
-            document["attestation_receipt"] = sample
-            break
+    # Attach one Intel-TDX receipt for the validator's spot-check, chosen by the CHAIN,
+    # not the producer (wallscaler #115 review, finding 2). The chain-anchored batch nonce
+    # (#114) keys a deterministic pick over the creditable-solve set — the positive-scored
+    # miners, fully enumerable right here — and we expose THAT miner's attested receipt.
+    # Because the producer does not control the nonce, it cannot surface a chosen receipt
+    # by fabricating scores; see _spotcheck_miner. If the chain-named miner has no attested
+    # sample (an unattested solve), the field is omitted — and finding 1's validator-side
+    # posture ratchet turns omission into a lane burn once the audience has adopted
+    # attestation, so dropping the field is not a free bypass. Without a nonce (an epoch
+    # scored before #114) the report omits the field and the lane composes as it did then.
+    if frontier is not None:
+        creditable = sorted(h for h, v in scores.items() if v > 0.0)
+        chosen = _spotcheck_miner(
+            creditable, nonce=frontier["nonce"], source_epoch=source_epoch
+        )
+        if chosen is not None:
+            sample = score_store.attestation_sample_for(source_epoch, chosen)
+            if sample is not None:
+                document["attestation_receipt"] = sample
     return normalize_report(document)
 
 

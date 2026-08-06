@@ -503,6 +503,28 @@ def test_build_score_report_omits_the_frontier_when_absent(tmp_path):
 
 
 # --- attestation spot-check sample (representative receipt in the report) ------
+SPOTCHECK_NONCE = "cgnonce-sha256:" + "ab" * 32
+RECEIPT_SCHEMA = "cathedral_customer_receipt_v1"
+
+
+def _chain_named_miner(creditable, nonce=SPOTCHECK_NONCE, epoch=EPOCH):
+    """Re-derive the spot-check pick the way an independent third party would.
+
+    Deliberately NOT importing the production helper: this reproduces the published
+    contract (domain-separated sha256 over nonce+epoch+hotkey, argmin) from scratch, so
+    the test fails if the production selection ever drifts from the documented formula.
+    """
+    import hashlib
+
+    def d(h):
+        return hashlib.sha256(
+            b"cathedral-cybergym-spotcheck-v1\x00" + nonce.encode("utf-8") + b"\x00"
+            + str(int(epoch)).encode("ascii") + b"\x00" + h.encode("utf-8")
+        ).hexdigest()
+
+    return min(sorted(creditable), key=d)
+
+
 def test_attestation_sample_first_write_wins(tmp_path):
     store = _store(tmp_path)
     store.record_attestation_sample(EPOCH, "5A", {"a": 1}, "eA==")
@@ -511,25 +533,67 @@ def test_attestation_sample_first_write_wins(tmp_path):
     assert store.attestation_sample_for(EPOCH, "5B") is None
 
 
-def test_attestation_receipt_picks_the_top_scored_miner_with_a_sample(tmp_path):
+def test_attestation_receipt_is_chosen_by_the_chain_nonce_not_producer_ranking(tmp_path):
+    """The receipt shown is fixed by the chain nonce over the creditable set, not by the
+    producer-reported scores (wallscaler #115 finding 2)."""
     store = _store(tmp_path, [("5Low", "2", "r-low"), ("5Top", "8", "r-top")])
     store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=2, at=CLOSED_AT)
-    store.record_attestation_sample(EPOCH, "5Low", {"schema": "cathedral_customer_receipt_v1", "id": "low"}, "bG93")
-    store.record_attestation_sample(EPOCH, "5Top", {"schema": "cathedral_customer_receipt_v1", "id": "top"}, "dG9w")
+    store.record_frontier(EPOCH, SPOTCHECK_NONCE, "10")
+    store.record_attestation_sample(EPOCH, "5Low", {"schema": RECEIPT_SCHEMA, "id": "low"}, "bG93")
+    store.record_attestation_sample(EPOCH, "5Top", {"schema": RECEIPT_SCHEMA, "id": "top"}, "dG9w")
+    named = _chain_named_miner(["5Low", "5Top"])
     doc = _build(store)
-    assert doc["attestation_receipt"]["receipt"]["id"] == "top"   # highest score chosen
-    assert doc["attestation_receipt"]["result_b64"] == "dG9w"
+    assert doc["attestation_receipt"]["receipt"]["id"] == {"5Low": "low", "5Top": "top"}[named]
 
 
-def test_attestation_receipt_falls_through_to_a_scored_miner_that_has_one(tmp_path):
-    store = _store(tmp_path, [("5Low", "2", "r-low"), ("5Top", "8", "r-top")])
+def test_spotcheck_pick_ignores_a_fabricated_higher_score(tmp_path):
+    """Adding a fabricated top score for a different miner does not change which receipt
+    is exposed — the pick is a pure function of nonce + creditable set, not the ranking."""
+    base = [("5Low", "2", "r-low"), ("5Top", "8", "r-top")]
+    named = _chain_named_miner(["5Low", "5Top"])
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    s1 = _store(tmp_path / "a", base)
+    s1.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=2, at=CLOSED_AT)
+    s1.record_frontier(EPOCH, SPOTCHECK_NONCE, "10")
+    for hk in ("5Low", "5Top"):
+        s1.record_attestation_sample(EPOCH, hk, {"schema": RECEIPT_SCHEMA, "id": hk}, "eA==")
+    # Same two miners + samples, but the producer inflates the OTHER miner far past the pick.
+    inflated = [("5Low", "999", "r-low"), ("5Top", "999", "r-top")]
+    s2 = _store(tmp_path / "b", inflated)
+    s2.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=2, at=CLOSED_AT)
+    s2.record_frontier(EPOCH, SPOTCHECK_NONCE, "10")
+    for hk in ("5Low", "5Top"):
+        s2.record_attestation_sample(EPOCH, hk, {"schema": RECEIPT_SCHEMA, "id": hk}, "eA==")
+    assert _build(s1)["attestation_receipt"]["receipt"]["id"] == named
+    assert _build(s2)["attestation_receipt"]["receipt"]["id"] == named
+
+
+def test_producer_cannot_surface_its_own_receipt_when_the_chain_names_another(tmp_path):
+    """If only the miner the chain did NOT name has a sample, the field is omitted rather
+    than falling through to the receipt a ranking-based producer would prefer."""
+    store = _store(tmp_path, [("5A", "9", "r-a"), ("5B", "1", "r-b")])
     store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=2, at=CLOSED_AT)
-    store.record_attestation_sample(EPOCH, "5Low", {"schema": "cathedral_customer_receipt_v1", "id": "low"}, "bG93")
-    doc = _build(store)  # top miner has no sample -> the next scored one with a sample
-    assert doc["attestation_receipt"]["receipt"]["id"] == "low"
+    store.record_frontier(EPOCH, SPOTCHECK_NONCE, "10")
+    named = _chain_named_miner(["5A", "5B"])
+    other = "5B" if named == "5A" else "5A"
+    store.record_attestation_sample(EPOCH, other, {"schema": RECEIPT_SCHEMA, "id": "other"}, "eA==")
+    assert "attestation_receipt" not in _build(store)  # no fall-through to the other receipt
+    store.record_attestation_sample(EPOCH, named, {"schema": RECEIPT_SCHEMA, "id": "named"}, "eQ==")
+    assert _build(store)["attestation_receipt"]["receipt"]["id"] == "named"
 
 
-def test_attestation_receipt_omitted_without_any_sample(tmp_path):
+def test_attestation_receipt_omitted_without_a_sample_for_the_named_miner(tmp_path):
     store = _store(tmp_path, [("5A", "8", "r-a")])
     store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=1, at=CLOSED_AT)
+    store.record_frontier(EPOCH, SPOTCHECK_NONCE, "10")
     assert "attestation_receipt" not in _build(store)
+
+
+def test_attestation_receipt_omitted_without_a_nonce(tmp_path):
+    """Pre-#114 epoch: no frontier -> no chain anchor -> no spot-check sample (the
+    byte-identical pass-through), even when a sample exists."""
+    store = _store(tmp_path, [("5A", "8", "r-a")])
+    store.mark_epoch(EPOCH, state=EPOCH_CLOSED, scored_miners=1, at=CLOSED_AT)
+    store.record_attestation_sample(EPOCH, "5A", {"schema": RECEIPT_SCHEMA, "id": "a"}, "eA==")
+    assert "attestation_receipt" not in _build(store)  # no frontier recorded
