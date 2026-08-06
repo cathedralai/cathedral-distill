@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -38,6 +39,8 @@ from cathedral_distill.cybergym_fresh import is_fresh_task
 from cathedral_distill.cybergym_synthetic import is_synthetic_task
 from cathedral_distill.cybergym_verifier import poc_digest, verify_poc
 from cathedral_distill.receipt_keys import ReceiptKeyRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class EmissionGateError(ValueError):
@@ -624,6 +627,43 @@ def run_epoch(
         netuid=chain.netuid,
         source_epoch=chain.source_epoch,
     )
+
+    # Pin the epoch's common-frontier context so the exported report can carry it:
+    # the tournament composer (cathedral-validator) needs the tie-break `nonce` and
+    # `dispatched_units` — the total difficulty-weight of the common batch, i.e. the
+    # base-100 denominator. The batch is identical for every miner (one nonce), so
+    # its total rewardable weight is computed once here, applying the SAME rewardable
+    # filter the scoring loop below uses (fresh / non-analyzable-source /
+    # uncredited-synthetic tasks earn nothing, so they are not dispatched weight).
+    # Best-effort report metadata: a failure here must never break scoring — the
+    # report then omits the fields and the lane composes as it does today.
+    if score_store is not None:
+        try:
+            frontier_batch = pool.draw(
+                size=batch_size, nonce=epoch_nonce, as_of=as_of, cutoff=cutoff
+            )
+            frontier_rewardable = getattr(pool, "rewardable_task", None)
+            dispatched_units = Decimal(0)
+            for task in frontier_batch.tasks:
+                if is_fresh_task(task.task_id):
+                    continue
+                if callable(frontier_rewardable):
+                    try:
+                        allowed = bool(frontier_rewardable(task.task_id))
+                    except Exception:  # noqa: BLE001 - source admission fails closed
+                        allowed = False
+                    if not allowed:
+                        continue
+                if not credit_synthetic_tasks and is_synthetic_task(task.task_id):
+                    continue
+                dispatched_units += Decimal(level_weights.get(task.level, Decimal(0)))
+            score_store.record_frontier(chain.source_epoch, epoch_nonce, dispatched_units)
+        except Exception:  # noqa: BLE001 - frontier is metadata, never block the epoch
+            logger.warning(
+                "could not record CyberGym epoch frontier for epoch %s",
+                chain.source_epoch, exc_info=True,
+            )
+
     results: list[MinerResult] = []
     for miner in miners:
         nonce = epoch_nonce

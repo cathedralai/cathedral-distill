@@ -45,6 +45,17 @@ SEMANTIC_KEYS = (
     "evidence_sha256",
 )
 
+# Optional keys the tournament composer consumes (cathedral-validator
+# OPTIONAL_SEMANTIC_KEYS must match): `nonce` (the epoch's chain-anchored batch
+# nonce, the tie-break key) and `dispatched_units` (the common batch's total
+# difficulty-weight, the base-100 denominator). Folded into the signed digest WHEN
+# PRESENT, never required — a report without them stays byte-identical to today.
+OPTIONAL_SEMANTIC_KEYS = (
+    "nonce",
+    "dispatched_units",
+)
+_ALL_SEMANTIC_KEYS = SEMANTIC_KEYS + OPTIONAL_SEMANTIC_KEYS
+
 SCORE_UNITS = "level_weighted_verified_solves"
 MAX_BODY_BYTES = 65_536
 MAX_SCORES = 8_192
@@ -101,9 +112,9 @@ def normalize_report(document: Any) -> dict[str, Any]:
     """
     if not isinstance(document, Mapping):
         raise CyberGymScoreReportError("score report must be an object")
-    if set(document) != set(SEMANTIC_KEYS):
-        missing = sorted(set(SEMANTIC_KEYS) - set(document))
-        extra = sorted(set(document) - set(SEMANTIC_KEYS))
+    missing = sorted(set(SEMANTIC_KEYS) - set(document))
+    extra = sorted(set(document) - set(_ALL_SEMANTIC_KEYS))
+    if missing or extra:
         detail = []
         if missing:
             detail.append("missing " + ",".join(missing))
@@ -150,7 +161,7 @@ def normalize_report(document: Any) -> dict[str, Any]:
             raise CyberGymScoreReportError(f"duplicate miner_hotkey {hotkey!r}")
         scores[hotkey] = _score(raw_score)
 
-    return {
+    normalized: dict[str, Any] = {
         "producer_hotkey": producer,
         "network": network,
         "netuid": netuid,
@@ -161,6 +172,24 @@ def normalize_report(document: Any) -> dict[str, Any]:
         "scores": scores,
         "evidence_sha256": evidence,
     }
+    # Optional tournament inputs — normalized IDENTICALLY to the validator's
+    # cybergym_contract.normalize_semantic_document (nonce.strip(); float(dispatched))
+    # so a producer that emits them and the validator that re-derives the digest agree
+    # byte-for-byte.
+    if "nonce" in document:
+        nonce = document["nonce"]
+        if not isinstance(nonce, str) or not nonce.strip() or len(nonce) > 256:
+            raise CyberGymScoreReportError("nonce must be a non-empty string <= 256 chars")
+        normalized["nonce"] = nonce.strip()
+    if "dispatched_units" in document:
+        dispatched = document["dispatched_units"]
+        if isinstance(dispatched, bool) or not isinstance(dispatched, (int, float)):
+            raise CyberGymScoreReportError("dispatched_units must be a number")
+        dispatched = float(dispatched)
+        if not math.isfinite(dispatched) or dispatched < 0.0:
+            raise CyberGymScoreReportError("dispatched_units must be finite and non-negative")
+        normalized["dispatched_units"] = dispatched
+    return normalized
 
 
 def canonical_report_bytes(document: Mapping[str, Any]) -> bytes:
@@ -342,6 +371,14 @@ def build_score_report(
             entries=positive_entries,
         ),
     }
+    # Attach the epoch's frontier context (batch nonce + dispatched_units) recorded
+    # at scoring time, so the tournament composer can consume it. An epoch scored
+    # before this shipped has no frontier row: the report then omits the fields and
+    # the CyberGym lane composes exactly as it does today (single-epoch pass-through).
+    frontier = score_store.epoch_frontier(source_epoch)
+    if frontier is not None:
+        document["nonce"] = frontier["nonce"]
+        document["dispatched_units"] = float(frontier["dispatched_units"])
     return normalize_report(document)
 
 
