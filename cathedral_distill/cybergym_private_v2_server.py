@@ -14,14 +14,20 @@ normal emission gate policy instead of this entrypoint.
 
 from __future__ import annotations
 
+import base64
 import hmac
+import json
 import os
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 
 from cathedral_distill.corpus_admission import require_admitted_private_manifest
 from cathedral_distill.cybergym_attest import CathedralReceiptPolicy
@@ -51,6 +57,11 @@ _TOKEN_FILE_ENV = "CYBERGYM_E2E_BEARER_TOKEN_FILE"
 # Unset (default) keeps the loopback dev/test posture that credits unattested solves.
 _APPROVED_WORKLOAD_ENV = "CYBERGYM_APPROVED_WORKLOAD_SHA256"
 _BATCH_SIZE_ENV = "CYBERGYM_BATCH_SIZE"
+# Point at a `cathedral_customer_receipt_trusted_keys_v1` JSON to make the receipt
+# gate CRYPTOGRAPHICALLY verify Cathedral's Ed25519 signature (trustless), instead
+# of the default trusted-issuer check on the receipt's own flags. Unset keeps the
+# trusted-issuer default. Pin the file, do not runtime-fetch it (see #109).
+_TRUSTED_KEYS_ENV = "CATHEDRAL_RECEIPT_TRUSTED_KEYS"
 
 
 def _required(name: str) -> str:
@@ -77,7 +88,65 @@ def _receipt_policy_from_environment() -> CathedralReceiptPolicy | None:
             f"{_APPROVED_WORKLOAD_ENV} must be a 64-hex sha256 (the approved solver's "
             f"workload_sha256); got {raw!r}"
         )
-    return CathedralReceiptPolicy(expected_workload_sha256=raw)
+    return CathedralReceiptPolicy(
+        expected_workload_sha256=raw,
+        receipt_verifier=_receipt_verifier_from_environment(),
+    )
+
+
+def _cathedral_receipt_signed_bytes(receipt: Mapping[str, Any]) -> bytes:
+    """Cathedral signs the canonical JSON of every receipt field except `signature`
+    (cathedral-compute `customer_receipt.py::customer_receipt_signed_bytes`)."""
+    unsigned = {k: v for k, v in receipt.items() if k != "signature"}
+    return json.dumps(
+        unsigned, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True, allow_nan=False,
+    ).encode("ascii")
+
+
+def _receipt_verifier_from_environment() -> Callable[[Mapping[str, Any]], bool] | None:
+    """Independent Cathedral-signature verifier from the pinned trust file, or None.
+
+    Turns the receipt gate from trusted-issuer (believing the receipt's own
+    `intel_verified`/`execution_binding_verified` flags) into trustless: the
+    receipt's Ed25519 signature must verify against Cathedral's PUBLISHED key
+    (`cathedral_customer_receipt_trusted_keys_v1`), the key must be `active`, and
+    the receipt's `issued_at` must fall inside that key's validity window — so a
+    forged receipt carrying the right flags is refused. Fails closed: any missing
+    field, unknown key, retired key, out-of-window issue, or bad signature returns
+    False (which `verify_persistent_enclave_attestation` treats as a refusal).
+    """
+    path = os.environ.get(_TRUSTED_KEYS_ENV, "").strip()
+    if not path:
+        return None
+    try:
+        keys = json.loads(Path(path).read_text())["keys"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SystemExit(f"{_TRUSTED_KEYS_ENV} is not a readable trusted-keys JSON: {exc}") from None
+
+    def verify(receipt: Mapping[str, Any]) -> bool:
+        try:
+            entry = keys[str(receipt["signing_key_id"])]
+            if entry.get("status") != "active" or entry.get("algorithm") != "ed25519":
+                return False
+            issued = datetime.fromisoformat(str(receipt["issued_at"]).replace("Z", "+00:00"))
+            valid_from = datetime.fromisoformat(str(entry["valid_from"]).replace("Z", "+00:00"))
+            valid_until = datetime.fromisoformat(str(entry["valid_until"]).replace("Z", "+00:00"))
+            if not (valid_from <= issued <= valid_until):
+                return False
+            public_key = Ed25519PublicKey.from_public_bytes(
+                base64.b64decode(str(entry["public_key_base64"]), validate=True)
+            )
+            signature = base64.b64decode(str(receipt["signature"]["value_base64"]), validate=True)
+        except (KeyError, TypeError, ValueError):
+            return False
+        try:
+            public_key.verify(signature, _cathedral_receipt_signed_bytes(receipt))
+        except InvalidSignature:
+            return False
+        return True
+
+    return verify
 
 
 def _batch_size_from_environment() -> int:
