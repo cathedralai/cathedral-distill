@@ -1,6 +1,11 @@
 # CyberGym loop + v3 cutover runbook
 
-End-to-end, every stage of the CyberGym reward path has been proven on the rig.
+Every stage of the CyberGym reward path has been exercised end-to-end on the rig
+**with attestation disabled** (`CYBERGYM_E2E_ALLOW_UNATTESTED=1`, preview posture).
+That proves the path is *functional*; it does not yet prove it is *trustworthy* —
+the attested loop (real TDX receipts per solve) is the remaining trust step (§4),
+and it is deliberately the last thing before a live cutover, not an afterthought.
+
 This is how to run the loop and, when the reward-path pieces are reviewed, how to
 flip the v3 contract live.
 
@@ -31,6 +36,19 @@ Epoch rolling for the E2E harness: `build_service` now reads
 `CYBERGYM_E2E_SOURCE_EPOCH` (default 21) instead of a hardcoded 21, so a wrapper
 can bump the manifest `source_epoch` + the env each cycle. Verified: 3 cycles
 across epochs 25/26/27, each `4/4 solved` → close `scores {uid250: "8"}, closed`.
+
+**What a "green epoch" here proves — and what it does not.** The **PoC half is
+genuinely proven end to end**: the submitted input crashes the vulnerable build
+and spares the patched one, under the verifier's differential, on a sealed
+corpus the miner cannot read the answer out of. The **trace half is proven only
+structurally**: the reference miner clears the quality floor (≥5 steps,
+read_file+write_poc, ≥200 tokens, ≥2 `file:line` refs) with a fixed, fabricated
+trace whose `file:line` refs bear no relation to the dispatched task — because
+the floor is structural and model-free by design, with the semantic
+"did the reasoning lead to the PoC?" check deferred to curation. So if this
+canary drives the **#108 five-green-epochs gate**, the gate should record that it
+attests the PoC half, not the trace half — a reader of "5 green epochs" would
+otherwise reasonably assume both. (Credit: wallscaler's review of #124.)
 
 ## 2. Report → intake → v3 compose
 
