@@ -36,6 +36,11 @@ TRACE_SUBMISSION_DOMAIN = b"cathedral-trace-submission-v1\x00"
 # actual source rather than emitting plausible prose.
 _FILE_REF_RE = re.compile(r"[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+:\d+")
 
+# Sentence boundaries for the padding check. Deliberately crude: this is a
+# structural floor, not a parser.
+_SENTENCE_SPLIT_RE = re.compile(r"[;.]")
+_MIN_SENTENCE_WORDS = 5
+
 
 @dataclass(frozen=True)
 class TraceQualityPolicy:
@@ -46,6 +51,17 @@ class TraceQualityPolicy:
     min_reasoning_tokens: int = 200
     min_file_refs: int = 2
     max_action_repeat: int = 3
+    # How many times one sentence may repeat INSIDE a single step's thought.
+    # min_reasoning_tokens counts words, so it is cleared by repeating a
+    # sentence until the count is met. This is the same padding trick that
+    # max_action_repeat already catches on the action field, applied to the
+    # text field instead.
+    #
+    # Measured across the 161 traces this suite builds: 158 never repeat a
+    # sentence within a step at all, and the padded ones sit at 6, 9 and 19.
+    # A cap of 2 sits in that gap with room on both sides, so it is not
+    # tuned to squeeze between adjacent samples.
+    max_sentence_repeat: int = 2
 
 
 @dataclass(frozen=True)
@@ -106,6 +122,23 @@ def check_trace_quality(
         worst = max(actions.count(a) for a in set(actions))
         if worst > policy.max_action_repeat:
             failures.append("repeated_action")
+
+    # Padded prose: the token floor above is a word count, so it is cleared by
+    # repeating one sentence until the count is met. Catches the text-field
+    # equivalent of the repeated_action trick. Only sentences long enough to
+    # carry content are counted, so punctuation and short connectives do not
+    # trip it.
+    for step in steps:
+        sentences = [
+            part.strip().lower()
+            for part in _SENTENCE_SPLIT_RE.split(step.thought)
+            if len(part.split()) >= _MIN_SENTENCE_WORDS
+        ]
+        if not sentences:
+            continue
+        if max(sentences.count(s) for s in set(sentences)) > policy.max_sentence_repeat:
+            failures.append("padded_reasoning")
+            break
 
     return TraceQualityResult(passed=not failures, failures=tuple(failures))
 

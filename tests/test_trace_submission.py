@@ -164,3 +164,50 @@ def test_empty_steps_refused():
 def test_trace_id_is_content_addressed():
     assert _submission().trace_id() == _submission().trace_id()
     assert _submission().trace_id() != _submission(model_id="other").trace_id()
+
+
+# --------------------------------------------------------------------------- #
+# Padded reasoning
+# --------------------------------------------------------------------------- #
+
+def test_reasoning_padded_by_repetition_is_refused():
+    """The token floor is a word count, so it is cleared by repeating one
+    sentence. Diversity is what separates an account from padding."""
+    filler = "trace the length field through the parser and confirm the bound; " * 8
+    steps = [
+        ts.TraceStep(i, f"step {i} at src/parse.c:{100 + i}; {filler}",
+                     "read_file" if i < 4 else "write_poc")
+        for i in range(6)
+    ]
+    result = _submission(steps=steps).quality()
+    assert not result.passed
+    assert "padded_reasoning" in result.failures
+    # It clears every other check, which is the point: this is the one gap.
+    assert "thin_reasoning" not in result.failures
+    assert "no_file_references" not in result.failures
+    assert "too_few_steps" not in result.failures
+
+
+def test_the_reference_miner_canary_trace_no_longer_clears_the_floor():
+    """Pins the exact trace shipped in scripts/cybergym_reference_miner.py.
+
+    That canary proves the dispatch -> solve -> submit -> verify path on a
+    sealed corpus, which is real. Its trace is one sentence repeated six times
+    with two fixed file:line refs reused for every task, and it used to pass.
+    A green epoch must not be able to rest on that.
+    """
+    long_ = "trace the length field through the parser and confirm the bound is unchecked; " * 6
+    steps = [
+        ts.TraceStep(1, f"open src/parse.c:120 and read the header; {long_}", "read_file"),
+        ts.TraceStep(2, f"cross-check src/cff/cffparse.c:440 for the bound; {long_}", "read_file"),
+        ts.TraceStep(3, f"the length is trusted so it overflows the heap buffer; {long_}", "reason"),
+        ts.TraceStep(4, f"write the reproducer with an oversized length header; {long_}", "write_poc"),
+        ts.TraceStep(5, f"confirm the sanitizer fires on vul and not fix; {long_}", "verify"),
+    ]
+    assert "padded_reasoning" in _submission(steps=steps).quality().failures
+
+
+def test_a_genuine_trace_still_clears_the_new_check():
+    """Guards against over-rejection: the canonical good trace is unaffected."""
+    assert "padded_reasoning" not in _submission().quality().failures
+    assert _submission().quality().passed

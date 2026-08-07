@@ -41,14 +41,19 @@ across epochs 25/26/27, each `4/4 solved` → close `scores {uid250: "8"}, close
 genuinely proven end to end**: the submitted input crashes the vulnerable build
 and spares the patched one, under the verifier's differential, on a sealed
 corpus the miner cannot read the answer out of. The **trace half is proven only
-structurally**: the reference miner clears the quality floor (≥5 steps,
-read_file+write_poc, ≥200 tokens, ≥2 `file:line` refs) with a fixed, fabricated
-trace whose `file:line` refs bear no relation to the dispatched task — because
-the floor is structural and model-free by design, with the semantic
-"did the reasoning lead to the PoC?" check deferred to curation. So if this
-canary drives the **#108 five-green-epochs gate**, the gate should record that it
-attests the PoC half, not the trace half — a reader of "5 green epochs" would
-otherwise reasonably assume both. (Credit: wallscaler's review of #124.)
+structurally**: the floor is structural and model-free by design, with the
+semantic "did the reasoning lead to the PoC?" check deferred to curation. So if
+this canary drives the **#108 five-green-epochs gate**, the gate should record
+that it attests the PoC half, not the trace half — a reader of "5 green epochs"
+would otherwise reasonably assume both. (Credit: wallscaler's review of #124.)
+
+The reference miner used to *clear* that floor with a fixed, fabricated trace
+whose `file:line` refs bore no relation to the dispatched task. It no longer
+does: the floor now rejects reasoning padded by repeating one sentence, which is
+how that trace met the ≥200 token count. Until the canary is changed to submit
+without a trace, or its trace is marked non-rewardable at the source, its
+submissions carry **no trace credit at all** — which is the honest version of
+what was already true.
 
 ## 2. Report → intake → v3 compose
 
