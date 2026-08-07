@@ -284,7 +284,7 @@ def build_service(
         block_hash="0x" + "cd" * 32,
         network="finney",
         netuid=39,
-        source_epoch=21,
+        source_epoch=int(os.environ.get("CYBERGYM_E2E_SOURCE_EPOCH", "21")),
         valid_from_block=100,
         valid_until_block=460,
     )
