@@ -98,20 +98,15 @@ _SOURCE_LOCATION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A crashing SYMBOL named in an ASan-style frame ("… in cff_parse_num"): a snake_case
-# C/C++ identifier (>=1 underscore) after "in ". High precision for the library
-# functions that fingerprint a public bug even with the file:line stripped. Applied
-# ONLY to `sanitizer_trace` (structured) — a natural-language `description` would
-# false-positive on prose like "in the_parser".
-_SANITIZER_SYMBOL_RE = re.compile(r"\bin\s+([A-Za-z_][A-Za-z0-9]*_[A-Za-z0-9_]+)")
-
-# Fields whose value is INTENTIONALLY source-revealing at the level that discloses
-# them, so they must not be scanned for origin fingerprints. The level-3 `patch` is
-# the fix diff itself — a unified diff always names source paths (`--- a/src/foo.c`),
-# and disclosing it is the designed help at that tier; scanning it would refuse every
-# level-3 task and hard-fail validator startup. The fingerprint channels we police are
-# the metadata fields not meant to reveal the public origin.
-_FINGERPRINT_SCANNED_FIELDS = frozenset({"description", "sanitizer_trace"})
+# The metadata fields the SOURCE-LOCATION regex scans. NOT the level-3 `patch`: a
+# unified diff always names source files (`--- a/src/foo.c`), and the regex flags that
+# *pattern*, not whether it fingerprints the PUBLIC origin — so it cannot tell a
+# genericised patch (`parser.c`) from a raw one (`cffparse.c`) and would refuse every
+# level-3 task. `description`/`sanitizer_trace` are different: they are not supposed to
+# carry any source location, so a match there IS a leak. The patch is instead policed
+# by `forbidden_terms` below, which checks the SPECIFIC stripped identifiers and so does
+# distinguish a genericised patch from a raw one.
+_SOURCE_LOCATION_FIELDS = frozenset({"description", "sanitizer_trace"})
 
 
 def disclosed_origin_fingerprints(
@@ -122,32 +117,29 @@ def disclosed_origin_fingerprints(
 ) -> tuple[str, ...]:
     """Fingerprints of a task's PUBLIC origin that leak through its DISCLOSED context.
 
-    Only the fields ``LEVEL_CONTEXT_FIELDS[level]`` reveals to the miner AND that are
-    not intentionally source-revealing (`_FINGERPRINT_SCANNED_FIELDS` — description,
-    sanitizer_trace; NOT the level-3 `patch`, whose diff names source paths by design)
-    are scanned. Reusing the disclosure map keeps the check from drifting from what the
-    dispatch builder discloses; a trace withheld at the task's level is not flagged.
+    Scans the fields ``LEVEL_CONTEXT_FIELDS[level]`` reveals to the miner (reusing the
+    disclosure map so the check cannot drift from what the dispatch builder discloses; a
+    trace withheld at the task's level is not flagged). Two channels:
 
-    Three channels, each fails closed on presence:
-
-    * a **source-file location** (``_SOURCE_LOCATION_RE``) — high precision.
-      ``arvo:900001``'s ``src/cff/cffparse.c:440`` is caught here.
-    * a **crashing symbol** in a ``sanitizer_trace`` (``_SANITIZER_SYMBOL_RE``, the
-      ``… in cff_parse_num`` frame) — closes the function channel even when the
-      file:line is stripped, which the source regex alone misses.
-    * any of ``forbidden_terms`` (case-insensitive substring) — the rigorous knob:
-      the sealer knows the exact identifiers it stripped (project name, upstream id)
-      and passes them so admission asserts none reappear. The reseal tool should
-      populate these from the task's known origin; the two regexes are the always-on
-      floor when it does not.
+    * **source-file location** (``_SOURCE_LOCATION_RE``, high precision) — checked on the
+      metadata fields ``_SOURCE_LOCATION_FIELDS`` (description, sanitizer_trace), which
+      are not meant to carry any source path, so a match is a leak. ``arvo:900001``'s
+      ``src/cff/cffparse.c:440`` is caught here. NOT applied to the level-3 ``patch``:
+      a diff legitimately names files, and this regex cannot tell a genericised patch
+      from a raw one.
+    * **forbidden_terms** (case-insensitive substring) — checked on EVERY disclosed
+      field, INCLUDING the patch. These are the exact identifiers the sealer stripped
+      (public source basename, crashing symbol, project name, upstream id); a raw
+      patch/trace still naming them is refused while a genericised one passes. The
+      reseal tool populates these from the task's known origin — this is how the symbol
+      and project channels (and the level-3 patch) are policed. Without them, only the
+      high-precision source-location floor fires; document that, do not fake wider
+      coverage with a heuristic that over-refuses generic ASan/libc runtime frames.
 
     Returns the offending tokens (sorted, deduped), or ``()`` when nothing fingerprints
     the origin.
     """
-    disclosed = [
-        field for field in LEVEL_CONTEXT_FIELDS.get(int(level), ())
-        if field in _FINGERPRINT_SCANNED_FIELDS
-    ]
+    disclosed = LEVEL_CONTEXT_FIELDS.get(int(level), ())
     hits: set[str] = set()
     lowered_terms = [t.lower() for t in forbidden_terms if t]
     for key in disclosed:
@@ -155,11 +147,12 @@ def disclosed_origin_fingerprints(
         if not value:
             continue
         text = str(value)
-        hits.update(match.group(0) for match in _SOURCE_LOCATION_RE.finditer(text))
-        if key == "sanitizer_trace":
-            hits.update(m.group(1) for m in _SANITIZER_SYMBOL_RE.finditer(text))
+        # forbidden_terms police every disclosed field, the patch included.
         lowered = text.lower()
         hits.update(t for t in lowered_terms if t in lowered)
+        # the source-location regex only the metadata fields (never the patch).
+        if key in _SOURCE_LOCATION_FIELDS:
+            hits.update(match.group(0) for match in _SOURCE_LOCATION_RE.finditer(text))
     return tuple(sorted(hits))
 
 
