@@ -21,6 +21,7 @@ from cathedral_distill.corpus_admission import (
     PublicAnswerProbeError,
     admit,
     admit_private_manifest,
+    disclosed_origin_fingerprints,
     answer_is_public,
     probe_public_answer_image,
     reference_poc,
@@ -317,6 +318,155 @@ class TestScoreableFilter:
         assert kept == ["arvo:368", "arvo:10400"]
 
 
+def _private_manifest_ctx(task_id: str, context: dict, *, level: int = 2):
+    """A private manifest whose one task carries `context`, disclosed at `level`."""
+    slug = task_id.replace(":", "-")
+    return load_private_repro_manifest({
+        "schema": "cathedral_cybergym_private_repro_manifest_v1",
+        "source_epoch": 21,
+        "tasks": [{
+            "task_id": task_id,
+            "level": level,
+            "disclosed_at": "2026-07-27T11:00:00Z",
+            "vulnerable_image": f"registry.test/{slug}-vul@sha256:{'ab' * 32}",
+            "fixed_image": f"registry.test/{slug}-fix@sha256:{'cd' * 32}",
+            "context": context,
+        }],
+    })
+
+
+# The exact disclosed sanitizer_trace `arvo:900001` serves on the live rig (:8672):
+# a private, digest-pinned image, but the metadata names the public bug.
+_LEAKY_TRACE = {
+    "description": "re-sealed real OSS-Fuzz bug",
+    "sanitizer_trace": "AddressSanitizer: heap-use-after-free src/cff/cffparse.c:440 in cff_parse_num",
+}
+_CLEAN_TRACE = {"description": "re-sealed real OSS-Fuzz bug", "sanitizer_trace": "AddressSanitizer"}
+
+
+class TestDisclosureFingerprint:
+    """A privately-sealed image still leaks its answer if the DISPATCH fingerprints
+    the public origin bug — the miner pulls the public twin's reproducer instead of
+    solving. `answer_is_public` checks OUR image's pullability; this checks the
+    metadata channel that is orthogonal to it."""
+
+    def test_a_disclosed_source_location_is_a_fingerprint(self):
+        assert disclosed_origin_fingerprints(2, _LEAKY_TRACE) == ("src/cff/cffparse.c:440",)
+
+    def test_a_bug_class_alone_is_not_a_fingerprint(self):
+        assert disclosed_origin_fingerprints(2, _CLEAN_TRACE) == ()
+        # nor is the generic scaffolding + a hyphenated bug class
+        assert disclosed_origin_fingerprints(
+            2, {"description": "re-sealed real OSS-Fuzz bug", "sanitizer_trace": "heap-use-after-free"}
+        ) == ()
+
+    def test_a_field_not_disclosed_at_this_level_is_not_a_leak(self):
+        # level 1 discloses only `description`; the leaky sanitizer_trace is withheld.
+        assert disclosed_origin_fingerprints(1, _LEAKY_TRACE) == ()
+        # level 0 discloses nothing at all.
+        assert disclosed_origin_fingerprints(0, _LEAKY_TRACE) == ()
+
+    def test_the_level_3_patch_is_policed_by_forbidden_terms_not_the_regex(self):
+        """A diff always names source files, so the source-location regex cannot tell a
+        genericised patch from a raw one and is NOT applied to the patch (else every
+        level-3 task refuses). The patch is policed by forbidden_terms — the specific
+        stripped identifiers — which passes a genericised patch and catches a raw one."""
+        raw = "--- a/src/cff/cffparse.c\n+++ b/src/cff/cffparse.c\n@@ -440 +440 @@\n- bad\n+ ok"
+        generic = "--- a/parser.c\n+++ b/parser.c\n@@ -10 +10 @@\n- bad\n+ ok"
+        # genericised patch, no known-origin terms: passes (not a fail-closed footgun)
+        assert disclosed_origin_fingerprints(
+            3, {"description": "x", "sanitizer_trace": "AddressSanitizer", "patch": generic}) == ()
+        # raw patch still naming the stripped source: caught via forbidden_terms
+        assert disclosed_origin_fingerprints(
+            3, {"description": "x", "sanitizer_trace": "AddressSanitizer", "patch": raw},
+            forbidden_terms=["cffparse.c"]) == ("cffparse.c",)
+
+    def test_generic_asan_runtime_frames_do_not_over_refuse(self):
+        """Generic ASan/libc runtime frames must not be mistaken for a bug fingerprint —
+        the earlier auto-symbol heuristic refused these. The symbol channel is policed by
+        forbidden_terms (the sealer's known crash symbol), not a frame heuristic."""
+        ctx = {"description": "re-sealed bug",
+               "sanitizer_trace": "AddressSanitizer: heap-use-after-free\n"
+                                  " #0 in __interceptor_memcpy\n #1 in __libc_start_main"}
+        assert disclosed_origin_fingerprints(2, ctx) == ()
+        # the actual crash symbol IS caught when the sealer supplies it as a forbidden term
+        assert disclosed_origin_fingerprints(
+            2, {"description": "x", "sanitizer_trace": "AddressSanitizer: uaf in cff_parse_num"},
+            forbidden_terms=["cff_parse_num"]) == ("cff_parse_num",)
+
+    def test_ambiguous_single_letter_extensions_do_not_false_positive(self):
+        ctx = {"description": "built with 2.31.s on macos.m", "sanitizer_trace": "AddressSanitizer"}
+        assert disclosed_origin_fingerprints(2, ctx) == ()
+
+    def test_forbidden_terms_catch_a_project_or_symbol_the_sealer_hid(self):
+        ctx = {"description": "a freetype2 bug", "sanitizer_trace": "AddressSanitizer"}
+        assert disclosed_origin_fingerprints(2, ctx, forbidden_terms=["freetype2"]) == ("freetype2",)
+        # case-insensitive, and only over disclosed fields
+        assert disclosed_origin_fingerprints(0, ctx, forbidden_terms=["FreeType2"]) == ()
+
+    def test_a_fingerprinted_task_is_refused_even_though_its_image_is_private(self):
+        """The `arvo:900001` regression: differential passes, image is unpullable, yet
+        the disclosed crash site fingerprints the public bug, so it is NOT scoreable."""
+        manifest = _private_manifest_ctx("arvo:900001", _LEAKY_TRACE)
+        real = b"known differential crash"
+
+        def run(argv, **kwargs):
+            if "manifest" in argv:
+                return _completed(returncode=1, stderr=b"manifest unknown")  # private
+            if "cat" in argv:
+                return _completed(stdout=real)
+            raise AssertionError(argv)
+
+        def backend(task_id, poc, mode, **kwargs):
+            return int(poc == real and mode == "vul")
+
+        (result,) = admit_private_manifest(manifest, _run=run, _backend=backend)
+        assert result.discriminates and result.solvable          # a genuine vuln...
+        assert result.answer_is_public is False                  # ...with a private image...
+        assert result.disclosure_leaks_origin is True            # ...but the metadata leaks it
+        assert result.scoreable is False
+        assert any("cffparse.c:440" in r and "public" in r for r in result.reasons)
+
+    def test_genericising_the_disclosure_restores_scoreability(self):
+        manifest = _private_manifest_ctx("arvo:900001", _CLEAN_TRACE)
+        real = b"known differential crash"
+
+        def run(argv, **kwargs):
+            if "manifest" in argv:
+                return _completed(returncode=1, stderr=b"manifest unknown")
+            if "cat" in argv:
+                return _completed(stdout=real)
+            raise AssertionError(argv)
+
+        def backend(task_id, poc, mode, **kwargs):
+            return int(poc == real and mode == "vul")
+
+        (result,) = admit_private_manifest(manifest, _run=run, _backend=backend)
+        assert result.disclosure_leaks_origin is False
+        assert result.scoreable is True
+
+    def test_forbidden_terms_flow_through_admission(self):
+        manifest = _private_manifest_ctx(
+            "arvo:900002", {"description": "a freetype2 bug", "sanitizer_trace": "AddressSanitizer"}
+        )
+        real = b"known differential crash"
+
+        def run(argv, **kwargs):
+            if "manifest" in argv:
+                return _completed(returncode=1, stderr=b"manifest unknown")
+            if "cat" in argv:
+                return _completed(stdout=real)
+            raise AssertionError(argv)
+
+        def backend(task_id, poc, mode, **kwargs):
+            return int(poc == real and mode == "vul")
+
+        (result,) = admit_private_manifest(
+            manifest, _run=run, _backend=backend, forbidden_terms=["freetype2"]
+        )
+        assert result.disclosure_leaks_origin is True and result.scoreable is False
+
+
 class TestPrivateManifestAdmission:
     def test_checks_the_manifests_pinned_images_and_bound_backend(self):
         manifest = _private_manifest("arvo:10400")
@@ -349,6 +499,35 @@ class TestPrivateManifestAdmission:
         assert len(result) == 1 and result[0].scoreable
         assert seen["images"] == [task.vulnerable_image]
         assert any(mode == "fix" for _task_id, _poc, mode in seen["backend"])
+
+    def test_probe_run_drives_the_registry_probe_not_the_reproduction(self):
+        """The anonymous registry probe and the docker differential are DISTINCT seams:
+        passing a probe runner must not starve the reproduction backend of a real runner
+        (the reseal-on-rig bug — docker_reproduce_backend would run its differential
+        through a function that only answers `manifest inspect`)."""
+        manifest = _private_manifest("arvo:10400")
+        task = manifest.task("arvo:10400")
+        real = b"known differential crash"
+        routed = {"backend_run": [], "probe": []}
+
+        def backend_run(argv, **kwargs):  # only the reproduction should reach here
+            routed["backend_run"].append(argv[:2])
+            return _completed(stdout=real) if "cat" in argv else _completed()
+
+        def probe_run(argv, **kwargs):    # only the anonymous registry probe
+            routed["probe"].append(argv)
+            assert "manifest" in argv and "--config" in argv
+            return _completed(returncode=1, stderr=b"manifest unknown")
+
+        def backend(task_id, poc, mode, *, _run, **kwargs):
+            # the backend must receive the REPRODUCTION runner, never the probe
+            assert _run is backend_run, "reproduction backend was handed the registry probe"
+            return int(poc == real and mode == "vul")
+
+        result = admit_private_manifest(
+            manifest, _run=backend_run, probe_run=probe_run, _backend=backend)
+        assert result[0].scoreable and result[0].answer_is_public is False
+        assert routed["probe"], "the anonymous probe was never called"
 
     def test_refuses_a_degenerate_pinned_task_before_it_can_be_served(self):
         manifest = _private_manifest("arvo:3938")

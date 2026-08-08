@@ -44,11 +44,13 @@ without Docker or a registry.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
+from cathedral_distill.cybergym_protocol import LEVEL_CONTEXT_FIELDS
 from cathedral_distill.cybergym_repro import (
     DOCKER_TIMEOUT,
     _image_and_command,
@@ -77,6 +79,85 @@ CONTROL_INPUTS: tuple[bytes, ...] = (
 )
 
 
+#: A source-file location like ``src/cff/cffparse.c:440`` or ``cffparse.c`` — the
+#: sharp fingerprint of a public bug's origin. The public-answer probe checks
+#: whether OUR image is pullable; it says nothing about whether the DISCLOSED
+#: metadata lets a miner identify the *public twin* of a privately-sealed bug and
+#: pull ITS reproducer instead (``docker run --entrypoint cat n132/arvo:<id>-vul
+#: /tmp/poc``). A real filename with a known source extension, optional ``:<line>``,
+#: is high-precision: bug classes (``heap-use-after-free``), tool names
+#: (``AddressSanitizer``), and generic scaffolding (``re-sealed real OSS-Fuzz bug``)
+#: carry no source extension and are not matched.
+_SOURCE_LOCATION_RE = re.compile(
+    # A path-ish token then a source extension, optional :line. The prefix class
+    # excludes `.` so it cannot overlap the literal extension dot — no O(n^2)
+    # backtracking over a large field. Ambiguous single-letter extensions (`s`, `m`)
+    # are omitted: they matched version strings like `2.31.s` and `macos.m`.
+    r"\b[\w/+-]+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|inc|rs|go|rb|py|java|kt|cs|swift|mm)"
+    r"\b(?::\d+)?",
+    re.IGNORECASE,
+)
+
+# The field the SOURCE-LOCATION regex scans: `sanitizer_trace` ONLY. A sanitizer report
+# is structured and is not supposed to carry a source path, so a `file.c:line` in it IS a
+# high-confidence leak (arvo:900001's `src/cff/cffparse.c:440`). NOT the free-text
+# `description` (a real description mentioning `parser.py` or a version like `v2.0.go`
+# would false-positive and drop a legitimate task), and NOT the level-3 `patch` (a diff
+# always names files, so the regex cannot tell a genericised patch from a raw one). Those
+# channels — description prose, the crashing symbol, the project name, the patch — are the
+# SEALER's responsibility to genericise at reseal time; admission asserts the specific
+# stripped identifiers do not reappear via `forbidden_terms` when the sealer supplies them.
+# This admission check is a narrow high-confidence BACKSTOP, not comprehensive coverage.
+_SOURCE_LOCATION_FIELDS = frozenset({"sanitizer_trace"})
+
+
+def disclosed_origin_fingerprints(
+    level: int,
+    context: Mapping[str, str],
+    *,
+    forbidden_terms: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """Fingerprints of a task's PUBLIC origin that leak through its DISCLOSED context.
+
+    Scans the fields ``LEVEL_CONTEXT_FIELDS[level]`` reveals to the miner (reusing the
+    disclosure map so the check cannot drift from what the dispatch builder discloses; a
+    trace withheld at the task's level is not flagged). Two channels:
+
+    * **source-file location** (``_SOURCE_LOCATION_RE``, high precision) — checked on
+      ``_SOURCE_LOCATION_FIELDS`` (``sanitizer_trace`` only), a structured field not meant
+      to carry a source path, so a match is a high-confidence leak. ``arvo:900001``'s
+      ``src/cff/cffparse.c:440`` is caught here. NOT the free-text ``description`` (would
+      over-refuse) nor the level-3 ``patch`` (a diff legitimately names files). This is a
+      narrow BACKSTOP; comprehensive origin-hiding is the sealer's job at reseal time.
+    * **forbidden_terms** (case-insensitive substring) — checked on EVERY disclosed
+      field, INCLUDING the patch. These are the exact identifiers the sealer stripped
+      (public source basename, crashing symbol, project name, upstream id); a raw
+      patch/trace still naming them is refused while a genericised one passes. The
+      reseal tool populates these from the task's known origin — this is how the symbol
+      and project channels (and the level-3 patch) are policed. Without them, only the
+      high-precision source-location floor fires; document that, do not fake wider
+      coverage with a heuristic that over-refuses generic ASan/libc runtime frames.
+
+    Returns the offending tokens (sorted, deduped), or ``()`` when nothing fingerprints
+    the origin.
+    """
+    disclosed = LEVEL_CONTEXT_FIELDS.get(int(level), ())
+    hits: set[str] = set()
+    lowered_terms = [t.lower() for t in forbidden_terms if t]
+    for key in disclosed:
+        value = context.get(key)
+        if not value:
+            continue
+        text = str(value)
+        # forbidden_terms police every disclosed field, the patch included.
+        lowered = text.lower()
+        hits.update(t for t in lowered_terms if t in lowered)
+        # the source-location regex only the metadata fields (never the patch).
+        if key in _SOURCE_LOCATION_FIELDS:
+            hits.update(match.group(0) for match in _SOURCE_LOCATION_RE.finditer(text))
+    return tuple(sorted(hits))
+
+
 @dataclass(frozen=True)
 class Admission:
     """Why a task may or may not be scored. `scoreable` is the only gate.
@@ -95,6 +176,12 @@ class Admission:
     solvable: bool
     answer_is_public: bool
     answer_probe_errored: bool = False
+    #: The disclosed context fingerprints the task's PUBLIC origin, so a miner can
+    #: pull the public twin's reproducer and read the answer without solving — even
+    #: though OUR image is private. A distinct refusal axis from `answer_is_public`
+    #: (which is about our own image being pullable): the leak here is the metadata,
+    #: not the image.
+    disclosure_leaks_origin: bool = False
     reasons: tuple[str, ...] = field(default_factory=tuple)
 
     def as_dict(self) -> dict:
@@ -105,6 +192,7 @@ class Admission:
             "solvable": self.solvable,
             "answer_is_public": self.answer_is_public,
             "answer_probe_errored": self.answer_probe_errored,
+            "disclosure_leaks_origin": self.disclosure_leaks_origin,
             "reasons": list(self.reasons),
         }
 
@@ -279,8 +367,16 @@ def answer_is_public(task_id: str, *, docker: str = "docker",
 def _admit(task_id: str, *, reference: Callable[[], bytes | None],
            public_answer: Callable[[bytes | None], PublicAnswerProbe],
            backend: Backend,
-           controls: Sequence[bytes]) -> Admission:
-    """Evaluate the three scoreability properties for one fixed task/image pair."""
+           controls: Sequence[bytes],
+           level: int = 0,
+           context: Mapping[str, str] | None = None,
+           forbidden_terms: Sequence[str] = ()) -> Admission:
+    """Evaluate the scoreability properties for one fixed task/image pair.
+
+    ``level``/``context`` describe what the dispatch will DISCLOSE for this task;
+    the disclosure-fingerprint axis is off (empty context) for the tag-derived
+    :func:`admit` path, which has no manifest context to leak.
+    """
     reasons: list[str] = []
 
     crashing_controls = [control for control in controls if backend(task_id, control, "vul") != 0]
@@ -325,13 +421,30 @@ def _admit(task_id: str, *, reference: Callable[[], bytes | None],
             "reproducer, so any miner can read the answer without solving it"
         )
 
+    fingerprints = disclosed_origin_fingerprints(
+        level, context or {}, forbidden_terms=forbidden_terms
+    )
+    if fingerprints:
+        reasons.append(
+            f"the level-{int(level)} disclosure fingerprints the task's public "
+            f"origin ({', '.join(fingerprints)}); a miner can identify the upstream "
+            "OSS-Fuzz/ARVO bug and pull its public reproducer image to read the "
+            "answer without solving, even though this image is private. Genericise "
+            "the disclosed fields (drop file:line, function, and project "
+            "identifiers) or lower the disclosure level"
+        )
+
     return Admission(
         task_id=task_id,
-        scoreable=discriminates and solvable and not probe.public and not probe.errored,
+        scoreable=(
+            discriminates and solvable and not probe.public and not probe.errored
+            and not fingerprints
+        ),
         discriminates=discriminates,
         solvable=solvable,
         answer_is_public=probe.public,
         answer_probe_errored=probe.errored,
+        disclosure_leaks_origin=bool(fingerprints),
         reasons=tuple(reasons),
     )
 
@@ -367,9 +480,11 @@ def admit(task_id: str, *, docker: str = "docker",
 
 def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "docker",
                            _run: Runner = subprocess.run,
+                           probe_run: Runner | None = None,
                            _backend: Backend = docker_reproduce_backend,
                            controls: Sequence[bytes] = CONTROL_INPUTS,
                            reference_pocs: PrivateReferencePoCStore | None = None,
+                           forbidden_terms: Sequence[str] = (),
                            ) -> tuple[Admission, ...]:
     """Run admission over the validator's exact, digest-pinned manifest images.
 
@@ -379,7 +494,21 @@ def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "doc
     different bytes from the ones the verifier scores. A v2 reward manifest
     resolves its reference PoCs from validator-controlled storage, never by
     reading a file from a miner-retrievable verifier image.
+
+    ``_run`` drives the reproduction (the authenticated docker differential);
+    ``probe_run`` drives the ANONYMOUS public-answer registry probe, which needs a
+    fresh empty docker config, not the host's pull credentials. They are distinct
+    seams: a caller resealing on the rig passes the real docker runner as ``_run``
+    and an anonymous probe as ``probe_run``. ``probe_run`` defaults to ``_run`` so
+    existing single-runner callers (and the whole test suite) are unchanged.
+
+    Each task's level-appropriate disclosure is also checked for public-origin
+    fingerprints (:func:`disclosed_origin_fingerprints`): a privately-sealed image
+    still leaks its answer if the dispatched metadata identifies the public bug.
+    ``forbidden_terms`` are the exact identifiers the sealer stripped (project,
+    symbol, upstream id) that must not reappear in any disclosed field.
     """
+    probe_run = probe_run if probe_run is not None else _run
     if not isinstance(manifest, PrivateReproManifest):
         raise ReproManifestError("manifest admission requires a PrivateReproManifest")
     if manifest.reward_ready:
@@ -409,9 +538,12 @@ def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "doc
                     task.vulnerable_image, docker=docker, _run=_run))
             ),
             public_answer=lambda poc, task=task: probe_public_answer_image(
-                task.vulnerable_image, poc=poc, docker=docker, _run=_run),
+                task.vulnerable_image, poc=poc, docker=docker, _run=probe_run),
             backend=backend,
             controls=controls,
+            level=int(task.level),
+            context=task.context,
+            forbidden_terms=forbidden_terms,
         ))
     return tuple(admissions)
 
