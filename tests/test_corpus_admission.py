@@ -500,6 +500,35 @@ class TestPrivateManifestAdmission:
         assert seen["images"] == [task.vulnerable_image]
         assert any(mode == "fix" for _task_id, _poc, mode in seen["backend"])
 
+    def test_probe_run_drives_the_registry_probe_not_the_reproduction(self):
+        """The anonymous registry probe and the docker differential are DISTINCT seams:
+        passing a probe runner must not starve the reproduction backend of a real runner
+        (the reseal-on-rig bug — docker_reproduce_backend would run its differential
+        through a function that only answers `manifest inspect`)."""
+        manifest = _private_manifest("arvo:10400")
+        task = manifest.task("arvo:10400")
+        real = b"known differential crash"
+        routed = {"backend_run": [], "probe": []}
+
+        def backend_run(argv, **kwargs):  # only the reproduction should reach here
+            routed["backend_run"].append(argv[:2])
+            return _completed(stdout=real) if "cat" in argv else _completed()
+
+        def probe_run(argv, **kwargs):    # only the anonymous registry probe
+            routed["probe"].append(argv)
+            assert "manifest" in argv and "--config" in argv
+            return _completed(returncode=1, stderr=b"manifest unknown")
+
+        def backend(task_id, poc, mode, *, _run, **kwargs):
+            # the backend must receive the REPRODUCTION runner, never the probe
+            assert _run is backend_run, "reproduction backend was handed the registry probe"
+            return int(poc == real and mode == "vul")
+
+        result = admit_private_manifest(
+            manifest, _run=backend_run, probe_run=probe_run, _backend=backend)
+        assert result[0].scoreable and result[0].answer_is_public is False
+        assert routed["probe"], "the anonymous probe was never called"
+
     def test_refuses_a_degenerate_pinned_task_before_it_can_be_served(self):
         manifest = _private_manifest("arvo:3938")
 

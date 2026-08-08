@@ -480,6 +480,7 @@ def admit(task_id: str, *, docker: str = "docker",
 
 def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "docker",
                            _run: Runner = subprocess.run,
+                           probe_run: Runner | None = None,
                            _backend: Backend = docker_reproduce_backend,
                            controls: Sequence[bytes] = CONTROL_INPUTS,
                            reference_pocs: PrivateReferencePoCStore | None = None,
@@ -494,12 +495,20 @@ def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "doc
     resolves its reference PoCs from validator-controlled storage, never by
     reading a file from a miner-retrievable verifier image.
 
+    ``_run`` drives the reproduction (the authenticated docker differential);
+    ``probe_run`` drives the ANONYMOUS public-answer registry probe, which needs a
+    fresh empty docker config, not the host's pull credentials. They are distinct
+    seams: a caller resealing on the rig passes the real docker runner as ``_run``
+    and an anonymous probe as ``probe_run``. ``probe_run`` defaults to ``_run`` so
+    existing single-runner callers (and the whole test suite) are unchanged.
+
     Each task's level-appropriate disclosure is also checked for public-origin
     fingerprints (:func:`disclosed_origin_fingerprints`): a privately-sealed image
     still leaks its answer if the dispatched metadata identifies the public bug.
     ``forbidden_terms`` are the exact identifiers the sealer stripped (project,
     symbol, upstream id) that must not reappear in any disclosed field.
     """
+    probe_run = probe_run if probe_run is not None else _run
     if not isinstance(manifest, PrivateReproManifest):
         raise ReproManifestError("manifest admission requires a PrivateReproManifest")
     if manifest.reward_ready:
@@ -529,7 +538,7 @@ def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "doc
                     task.vulnerable_image, docker=docker, _run=_run))
             ),
             public_answer=lambda poc, task=task: probe_public_answer_image(
-                task.vulnerable_image, poc=poc, docker=docker, _run=_run),
+                task.vulnerable_image, poc=poc, docker=docker, _run=probe_run),
             backend=backend,
             controls=controls,
             level=int(task.level),
