@@ -351,7 +351,10 @@ class TestDisclosureFingerprint:
     metadata channel that is orthogonal to it."""
 
     def test_a_disclosed_source_location_is_a_fingerprint(self):
-        assert disclosed_origin_fingerprints(2, _LEAKY_TRACE) == ("src/cff/cffparse.c:440",)
+        # the leaky trace carries both a source location AND a crashing symbol
+        assert disclosed_origin_fingerprints(2, _LEAKY_TRACE) == (
+            "cff_parse_num", "src/cff/cffparse.c:440",
+        )
 
     def test_a_bug_class_alone_is_not_a_fingerprint(self):
         assert disclosed_origin_fingerprints(2, _CLEAN_TRACE) == ()
@@ -365,6 +368,28 @@ class TestDisclosureFingerprint:
         assert disclosed_origin_fingerprints(1, _LEAKY_TRACE) == ()
         # level 0 discloses nothing at all.
         assert disclosed_origin_fingerprints(0, _LEAKY_TRACE) == ()
+
+    def test_the_level_3_patch_is_intentional_disclosure_not_a_leak(self):
+        """The level-3 patch IS the fix diff and always names source paths; scanning it
+        would refuse every level-3 task and hard-fail validator startup. It must not be
+        scanned — only description/sanitizer_trace are fingerprint channels."""
+        patch = "--- a/src/cff/cffparse.c\n+++ b/src/cff/cffparse.c\n@@ -440 +440 @@\n- bad\n+ ok"
+        ctx = {"description": "re-sealed bug", "sanitizer_trace": "AddressSanitizer", "patch": patch}
+        assert disclosed_origin_fingerprints(3, ctx) == ()
+
+    def test_a_crashing_symbol_without_a_path_is_a_fingerprint(self):
+        """The function channel: an ASan frame naming the crash symbol fingerprints the
+        public bug even after the file:line is stripped."""
+        ctx = {"description": "re-sealed bug",
+               "sanitizer_trace": "AddressSanitizer: heap-use-after-free in cff_parse_num"}
+        assert disclosed_origin_fingerprints(2, ctx) == ("cff_parse_num",)
+        # a generic frame with no snake_case symbol is not a fingerprint
+        assert disclosed_origin_fingerprints(
+            2, {"description": "x", "sanitizer_trace": "AddressSanitizer: SEGV in main"}) == ()
+
+    def test_ambiguous_single_letter_extensions_do_not_false_positive(self):
+        ctx = {"description": "built with 2.31.s on macos.m", "sanitizer_trace": "AddressSanitizer"}
+        assert disclosed_origin_fingerprints(2, ctx) == ()
 
     def test_forbidden_terms_catch_a_project_or_symbol_the_sealer_hid(self):
         ctx = {"description": "a freetype2 bug", "sanitizer_trace": "AddressSanitizer"}
