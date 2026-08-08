@@ -189,12 +189,14 @@ def test_reasoning_padded_by_repetition_is_refused():
 
 
 def test_the_reference_miner_canary_trace_no_longer_clears_the_floor():
-    """Pins the exact trace shipped in scripts/cybergym_reference_miner.py.
+    """Pins the padded shape #124 shipped (since replaced — see
+    ``test_the_shipped_reference_miner_trace_clears_the_floor`` for the current one).
 
     That canary proves the dispatch -> solve -> submit -> verify path on a
-    sealed corpus, which is real. Its trace is one sentence repeated six times
-    with two fixed file:line refs reused for every task, and it used to pass.
-    A green epoch must not be able to rest on that.
+    sealed corpus, which is real. Its ORIGINAL trace was one sentence repeated six
+    times with two fixed file:line refs reused for every task, and it used to pass.
+    A green epoch must not be able to rest on that, so this shape stays refused
+    whether or not it is the one currently shipped.
     """
     long_ = "trace the length field through the parser and confirm the bound is unchecked; " * 6
     steps = [
@@ -211,3 +213,31 @@ def test_a_genuine_trace_still_clears_the_new_check():
     """Guards against over-rejection: the canonical good trace is unaffected."""
     assert "padded_reasoning" not in _submission().quality().failures
     assert _submission().quality().passed
+
+
+def _load_reference_miner():
+    """Import the reference-miner script (scripts/ is not a package)."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "cybergym_reference_miner.py"
+    spec = importlib.util.spec_from_file_location("cybergym_reference_miner", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_shipped_reference_miner_trace_clears_the_floor():
+    """The ACTUAL trace the canary ships must clear the floor — otherwise the
+    sealed-corpus loop cannot produce a creditable solve and the green-epoch gate
+    stalls. Imports the real script, so it fails if the trace ever regresses to
+    padding (which the sibling test above pins as refused)."""
+    rm = _load_reference_miner()
+    for task_id, poc in (("arvo:900001", b"CGV2-E2E:MANGO/17\n"), ("arvo:900003", b"x" * 17)):
+        trace = rm._trace(task_id, poc)
+        steps = [ts.TraceStep(s["step"], s["thought"], s["action"]) for s in trace["steps"]]
+        result = _submission(
+            steps=steps, task_id=trace["task_id"], poc_sha256=trace["poc_sha256"],
+        ).quality()
+        assert result.passed, f"{task_id}: {result.failures}"
+        assert "padded_reasoning" not in result.failures
