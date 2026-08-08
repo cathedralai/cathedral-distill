@@ -98,15 +98,17 @@ _SOURCE_LOCATION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# The metadata fields the SOURCE-LOCATION regex scans. NOT the level-3 `patch`: a
-# unified diff always names source files (`--- a/src/foo.c`), and the regex flags that
-# *pattern*, not whether it fingerprints the PUBLIC origin — so it cannot tell a
-# genericised patch (`parser.c`) from a raw one (`cffparse.c`) and would refuse every
-# level-3 task. `description`/`sanitizer_trace` are different: they are not supposed to
-# carry any source location, so a match there IS a leak. The patch is instead policed
-# by `forbidden_terms` below, which checks the SPECIFIC stripped identifiers and so does
-# distinguish a genericised patch from a raw one.
-_SOURCE_LOCATION_FIELDS = frozenset({"description", "sanitizer_trace"})
+# The field the SOURCE-LOCATION regex scans: `sanitizer_trace` ONLY. A sanitizer report
+# is structured and is not supposed to carry a source path, so a `file.c:line` in it IS a
+# high-confidence leak (arvo:900001's `src/cff/cffparse.c:440`). NOT the free-text
+# `description` (a real description mentioning `parser.py` or a version like `v2.0.go`
+# would false-positive and drop a legitimate task), and NOT the level-3 `patch` (a diff
+# always names files, so the regex cannot tell a genericised patch from a raw one). Those
+# channels — description prose, the crashing symbol, the project name, the patch — are the
+# SEALER's responsibility to genericise at reseal time; admission asserts the specific
+# stripped identifiers do not reappear via `forbidden_terms` when the sealer supplies them.
+# This admission check is a narrow high-confidence BACKSTOP, not comprehensive coverage.
+_SOURCE_LOCATION_FIELDS = frozenset({"sanitizer_trace"})
 
 
 def disclosed_origin_fingerprints(
@@ -121,12 +123,12 @@ def disclosed_origin_fingerprints(
     disclosure map so the check cannot drift from what the dispatch builder discloses; a
     trace withheld at the task's level is not flagged). Two channels:
 
-    * **source-file location** (``_SOURCE_LOCATION_RE``, high precision) — checked on the
-      metadata fields ``_SOURCE_LOCATION_FIELDS`` (description, sanitizer_trace), which
-      are not meant to carry any source path, so a match is a leak. ``arvo:900001``'s
-      ``src/cff/cffparse.c:440`` is caught here. NOT applied to the level-3 ``patch``:
-      a diff legitimately names files, and this regex cannot tell a genericised patch
-      from a raw one.
+    * **source-file location** (``_SOURCE_LOCATION_RE``, high precision) — checked on
+      ``_SOURCE_LOCATION_FIELDS`` (``sanitizer_trace`` only), a structured field not meant
+      to carry a source path, so a match is a high-confidence leak. ``arvo:900001``'s
+      ``src/cff/cffparse.c:440`` is caught here. NOT the free-text ``description`` (would
+      over-refuse) nor the level-3 ``patch`` (a diff legitimately names files). This is a
+      narrow BACKSTOP; comprehensive origin-hiding is the sealer's job at reseal time.
     * **forbidden_terms** (case-insensitive substring) — checked on EVERY disclosed
       field, INCLUDING the patch. These are the exact identifiers the sealer stripped
       (public source basename, crashing symbol, project name, upstream id); a raw
