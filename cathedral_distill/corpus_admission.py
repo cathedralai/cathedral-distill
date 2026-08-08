@@ -367,6 +367,7 @@ def admit(task_id: str, *, docker: str = "docker",
 
 def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "docker",
                            _run: Runner = subprocess.run,
+                           probe_run: Runner | None = None,
                            _backend: Backend = docker_reproduce_backend,
                            controls: Sequence[bytes] = CONTROL_INPUTS,
                            reference_pocs: PrivateReferencePoCStore | None = None,
@@ -379,7 +380,15 @@ def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "doc
     different bytes from the ones the verifier scores. A v2 reward manifest
     resolves its reference PoCs from validator-controlled storage, never by
     reading a file from a miner-retrievable verifier image.
+
+    ``_run`` drives the reproduction (the authenticated docker differential);
+    ``probe_run`` drives the ANONYMOUS public-answer registry probe, which needs a
+    fresh empty docker config, not the host's pull credentials. They are distinct
+    seams: a caller resealing on the rig passes the real docker runner as ``_run``
+    and an anonymous probe as ``probe_run``. ``probe_run`` defaults to ``_run`` so
+    existing single-runner callers (and the whole test suite) are unchanged.
     """
+    probe_run = probe_run if probe_run is not None else _run
     if not isinstance(manifest, PrivateReproManifest):
         raise ReproManifestError("manifest admission requires a PrivateReproManifest")
     if manifest.reward_ready:
@@ -409,7 +418,7 @@ def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "doc
                     task.vulnerable_image, docker=docker, _run=_run))
             ),
             public_answer=lambda poc, task=task: probe_public_answer_image(
-                task.vulnerable_image, poc=poc, docker=docker, _run=_run),
+                task.vulnerable_image, poc=poc, docker=docker, _run=probe_run),
             backend=backend,
             controls=controls,
         ))
