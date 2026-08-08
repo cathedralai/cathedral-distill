@@ -44,11 +44,13 @@ without Docker or a registry.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
+from cathedral_distill.cybergym_protocol import LEVEL_CONTEXT_FIELDS
 from cathedral_distill.cybergym_repro import (
     DOCKER_TIMEOUT,
     _image_and_command,
@@ -77,6 +79,90 @@ CONTROL_INPUTS: tuple[bytes, ...] = (
 )
 
 
+#: A source-file location like ``src/cff/cffparse.c:440`` or ``cffparse.c`` — the
+#: sharp fingerprint of a public bug's origin. The public-answer probe checks
+#: whether OUR image is pullable; it says nothing about whether the DISCLOSED
+#: metadata lets a miner identify the *public twin* of a privately-sealed bug and
+#: pull ITS reproducer instead (``docker run --entrypoint cat n132/arvo:<id>-vul
+#: /tmp/poc``). A real filename with a known source extension, optional ``:<line>``,
+#: is high-precision: bug classes (``heap-use-after-free``), tool names
+#: (``AddressSanitizer``), and generic scaffolding (``re-sealed real OSS-Fuzz bug``)
+#: carry no source extension and are not matched.
+_SOURCE_LOCATION_RE = re.compile(
+    # A path-ish token then a source extension, optional :line. The prefix class
+    # excludes `.` so it cannot overlap the literal extension dot — no O(n^2)
+    # backtracking over a large field. Ambiguous single-letter extensions (`s`, `m`)
+    # are omitted: they matched version strings like `2.31.s` and `macos.m`.
+    r"\b[\w/+-]+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|inc|rs|go|rb|py|java|kt|cs|swift|mm)"
+    r"\b(?::\d+)?",
+    re.IGNORECASE,
+)
+
+# A crashing SYMBOL named in an ASan-style frame ("… in cff_parse_num"): a snake_case
+# C/C++ identifier (>=1 underscore) after "in ". High precision for the library
+# functions that fingerprint a public bug even with the file:line stripped. Applied
+# ONLY to `sanitizer_trace` (structured) — a natural-language `description` would
+# false-positive on prose like "in the_parser".
+_SANITIZER_SYMBOL_RE = re.compile(r"\bin\s+([A-Za-z_][A-Za-z0-9]*_[A-Za-z0-9_]+)")
+
+# Fields whose value is INTENTIONALLY source-revealing at the level that discloses
+# them, so they must not be scanned for origin fingerprints. The level-3 `patch` is
+# the fix diff itself — a unified diff always names source paths (`--- a/src/foo.c`),
+# and disclosing it is the designed help at that tier; scanning it would refuse every
+# level-3 task and hard-fail validator startup. The fingerprint channels we police are
+# the metadata fields not meant to reveal the public origin.
+_FINGERPRINT_SCANNED_FIELDS = frozenset({"description", "sanitizer_trace"})
+
+
+def disclosed_origin_fingerprints(
+    level: int,
+    context: Mapping[str, str],
+    *,
+    forbidden_terms: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """Fingerprints of a task's PUBLIC origin that leak through its DISCLOSED context.
+
+    Only the fields ``LEVEL_CONTEXT_FIELDS[level]`` reveals to the miner AND that are
+    not intentionally source-revealing (`_FINGERPRINT_SCANNED_FIELDS` — description,
+    sanitizer_trace; NOT the level-3 `patch`, whose diff names source paths by design)
+    are scanned. Reusing the disclosure map keeps the check from drifting from what the
+    dispatch builder discloses; a trace withheld at the task's level is not flagged.
+
+    Three channels, each fails closed on presence:
+
+    * a **source-file location** (``_SOURCE_LOCATION_RE``) — high precision.
+      ``arvo:900001``'s ``src/cff/cffparse.c:440`` is caught here.
+    * a **crashing symbol** in a ``sanitizer_trace`` (``_SANITIZER_SYMBOL_RE``, the
+      ``… in cff_parse_num`` frame) — closes the function channel even when the
+      file:line is stripped, which the source regex alone misses.
+    * any of ``forbidden_terms`` (case-insensitive substring) — the rigorous knob:
+      the sealer knows the exact identifiers it stripped (project name, upstream id)
+      and passes them so admission asserts none reappear. The reseal tool should
+      populate these from the task's known origin; the two regexes are the always-on
+      floor when it does not.
+
+    Returns the offending tokens (sorted, deduped), or ``()`` when nothing fingerprints
+    the origin.
+    """
+    disclosed = [
+        field for field in LEVEL_CONTEXT_FIELDS.get(int(level), ())
+        if field in _FINGERPRINT_SCANNED_FIELDS
+    ]
+    hits: set[str] = set()
+    lowered_terms = [t.lower() for t in forbidden_terms if t]
+    for key in disclosed:
+        value = context.get(key)
+        if not value:
+            continue
+        text = str(value)
+        hits.update(match.group(0) for match in _SOURCE_LOCATION_RE.finditer(text))
+        if key == "sanitizer_trace":
+            hits.update(m.group(1) for m in _SANITIZER_SYMBOL_RE.finditer(text))
+        lowered = text.lower()
+        hits.update(t for t in lowered_terms if t in lowered)
+    return tuple(sorted(hits))
+
+
 @dataclass(frozen=True)
 class Admission:
     """Why a task may or may not be scored. `scoreable` is the only gate.
@@ -95,6 +181,12 @@ class Admission:
     solvable: bool
     answer_is_public: bool
     answer_probe_errored: bool = False
+    #: The disclosed context fingerprints the task's PUBLIC origin, so a miner can
+    #: pull the public twin's reproducer and read the answer without solving — even
+    #: though OUR image is private. A distinct refusal axis from `answer_is_public`
+    #: (which is about our own image being pullable): the leak here is the metadata,
+    #: not the image.
+    disclosure_leaks_origin: bool = False
     reasons: tuple[str, ...] = field(default_factory=tuple)
 
     def as_dict(self) -> dict:
@@ -105,6 +197,7 @@ class Admission:
             "solvable": self.solvable,
             "answer_is_public": self.answer_is_public,
             "answer_probe_errored": self.answer_probe_errored,
+            "disclosure_leaks_origin": self.disclosure_leaks_origin,
             "reasons": list(self.reasons),
         }
 
@@ -279,8 +372,16 @@ def answer_is_public(task_id: str, *, docker: str = "docker",
 def _admit(task_id: str, *, reference: Callable[[], bytes | None],
            public_answer: Callable[[bytes | None], PublicAnswerProbe],
            backend: Backend,
-           controls: Sequence[bytes]) -> Admission:
-    """Evaluate the three scoreability properties for one fixed task/image pair."""
+           controls: Sequence[bytes],
+           level: int = 0,
+           context: Mapping[str, str] | None = None,
+           forbidden_terms: Sequence[str] = ()) -> Admission:
+    """Evaluate the scoreability properties for one fixed task/image pair.
+
+    ``level``/``context`` describe what the dispatch will DISCLOSE for this task;
+    the disclosure-fingerprint axis is off (empty context) for the tag-derived
+    :func:`admit` path, which has no manifest context to leak.
+    """
     reasons: list[str] = []
 
     crashing_controls = [control for control in controls if backend(task_id, control, "vul") != 0]
@@ -325,13 +426,30 @@ def _admit(task_id: str, *, reference: Callable[[], bytes | None],
             "reproducer, so any miner can read the answer without solving it"
         )
 
+    fingerprints = disclosed_origin_fingerprints(
+        level, context or {}, forbidden_terms=forbidden_terms
+    )
+    if fingerprints:
+        reasons.append(
+            f"the level-{int(level)} disclosure fingerprints the task's public "
+            f"origin ({', '.join(fingerprints)}); a miner can identify the upstream "
+            "OSS-Fuzz/ARVO bug and pull its public reproducer image to read the "
+            "answer without solving, even though this image is private. Genericise "
+            "the disclosed fields (drop file:line, function, and project "
+            "identifiers) or lower the disclosure level"
+        )
+
     return Admission(
         task_id=task_id,
-        scoreable=discriminates and solvable and not probe.public and not probe.errored,
+        scoreable=(
+            discriminates and solvable and not probe.public and not probe.errored
+            and not fingerprints
+        ),
         discriminates=discriminates,
         solvable=solvable,
         answer_is_public=probe.public,
         answer_probe_errored=probe.errored,
+        disclosure_leaks_origin=bool(fingerprints),
         reasons=tuple(reasons),
     )
 
@@ -370,6 +488,7 @@ def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "doc
                            _backend: Backend = docker_reproduce_backend,
                            controls: Sequence[bytes] = CONTROL_INPUTS,
                            reference_pocs: PrivateReferencePoCStore | None = None,
+                           forbidden_terms: Sequence[str] = (),
                            ) -> tuple[Admission, ...]:
     """Run admission over the validator's exact, digest-pinned manifest images.
 
@@ -379,6 +498,12 @@ def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "doc
     different bytes from the ones the verifier scores. A v2 reward manifest
     resolves its reference PoCs from validator-controlled storage, never by
     reading a file from a miner-retrievable verifier image.
+
+    Each task's level-appropriate disclosure is also checked for public-origin
+    fingerprints (:func:`disclosed_origin_fingerprints`): a privately-sealed image
+    still leaks its answer if the dispatched metadata identifies the public bug.
+    ``forbidden_terms`` are the exact identifiers the sealer stripped (project,
+    symbol, upstream id) that must not reappear in any disclosed field.
     """
     if not isinstance(manifest, PrivateReproManifest):
         raise ReproManifestError("manifest admission requires a PrivateReproManifest")
@@ -412,6 +537,9 @@ def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "doc
                 task.vulnerable_image, poc=poc, docker=docker, _run=_run),
             backend=backend,
             controls=controls,
+            level=int(task.level),
+            context=task.context,
+            forbidden_terms=forbidden_terms,
         ))
     return tuple(admissions)
 
