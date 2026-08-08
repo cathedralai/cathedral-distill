@@ -74,6 +74,13 @@ def _trace(task_id: str, poc: bytes) -> dict:
     file:line refs are generic placeholders — the canary never sees the real source,
     so it names a plausible surface rather than claiming a specific one that would be
     wrong for most targets.
+
+    Containment (why a FABRICATED trace clearing the floor is safe here): the canary
+    sets NO ``model_seal``, so ``is_trainable`` is False and its trace never enters the
+    training corpus; and trace quality does not gate the creditable solve at all
+    (creditable = solved AND attested — cybergym_protocol), so clearing the floor is
+    hygiene, not a gate. If either invariant changes — the canary gains a seal, or the
+    trace bonus (#116) is folded into work_units — revisit this before shipping.
     """
     steps = [
         (1, "read_file",
@@ -108,7 +115,8 @@ def _trace(task_id: str, poc: bytes) -> dict:
         "poc_sha256": "sha256:" + hashlib.sha256(poc).hexdigest(),
         "model_id": "cathedral-reference-canary-v1",
         "licence": "cathedral-corpus-v1",
-        "steps": [{"step": s, "thought": t, "action": a} for s, a, t in steps],
+        # tuples are (step, action, thought) — keep the dict keys in the same order.
+        "steps": [{"step": s, "action": a, "thought": t} for s, a, t in steps],
     }
 
 

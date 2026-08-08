@@ -188,15 +188,13 @@ def test_reasoning_padded_by_repetition_is_refused():
     assert "too_few_steps" not in result.failures
 
 
-def test_the_reference_miner_canary_trace_no_longer_clears_the_floor():
-    """Pins the padded shape #124 shipped (since replaced — see
+def test_the_padded_shape_124_shipped_stays_refused():
+    """Pins the padded shape #124 originally shipped (since replaced — see
     ``test_the_shipped_reference_miner_trace_clears_the_floor`` for the current one).
 
-    That canary proves the dispatch -> solve -> submit -> verify path on a
-    sealed corpus, which is real. Its ORIGINAL trace was one sentence repeated six
-    times with two fixed file:line refs reused for every task, and it used to pass.
-    A green epoch must not be able to rest on that, so this shape stays refused
-    whether or not it is the one currently shipped.
+    Its ORIGINAL trace was one sentence repeated six times with two fixed file:line
+    refs reused for every task, and it used to pass. That padded shape stays refused
+    whether or not it is the one currently shipped — the point of the #126 check.
     """
     long_ = "trace the length field through the parser and confirm the bound is unchecked; " * 6
     steps = [
@@ -228,10 +226,12 @@ def _load_reference_miner():
 
 
 def test_the_shipped_reference_miner_trace_clears_the_floor():
-    """The ACTUAL trace the canary ships must clear the floor — otherwise the
-    sealed-corpus loop cannot produce a creditable solve and the green-epoch gate
-    stalls. Imports the real script, so it fails if the trace ever regresses to
-    padding (which the sibling test above pins as refused)."""
+    """The ACTUAL trace the canary ships must clear the floor. Trace quality does NOT
+    gate the creditable solve (that is ``solved and attested`` — cybergym_protocol) nor
+    the green epoch; the point is HYGIENE — the operator's own canary must not ship the
+    exact one-sentence-padding anti-pattern #126 exists to reject. Imports the real
+    script, so it fails if the trace ever regresses to padding (pinned refused by the
+    sibling test above)."""
     rm = _load_reference_miner()
     for task_id, poc in (("arvo:900001", b"CGV2-E2E:MANGO/17\n"), ("arvo:900003", b"x" * 17)):
         trace = rm._trace(task_id, poc)
