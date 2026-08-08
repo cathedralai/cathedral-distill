@@ -140,6 +140,9 @@ def _denied_probe_run(argv, **kw):
 
 def run_demo(docker="docker"):
     ctx = tempfile.mkdtemp(prefix="reseal-demo-")
+    # One outer try/finally so BOTH the build context AND any built images are cleaned
+    # on every exit path — including an early `return 1` from a failed build (which used
+    # to leak the already-built vul image).
     try:
         with open(os.path.join(ctx, "run_poc.c"), "w") as f:
             f.write(_DEMO_C)
@@ -147,16 +150,17 @@ def run_demo(docker="docker"):
             f.write(_DEMO_DOCKERFILE)
         for mode, fixed in (("vul", "0"), ("fix", "1")):
             print(f"[build] {_DEMO_TAGS[mode]} (FIXED={fixed}) ...")
-            r = subprocess.run([docker, "build", "-q", "--build-arg", f"FIXED={fixed}",
-                                "-t", _DEMO_TAGS[mode], ctx], capture_output=True)
+            try:
+                r = subprocess.run([docker, "build", "-q", "--build-arg", f"FIXED={fixed}",
+                                    "-t", _DEMO_TAGS[mode], ctx], capture_output=True)
+            except OSError as exc:
+                print(f"docker not runnable ({docker!r}: {exc}); --demo needs a working Docker.")
+                return 1
             if r.returncode != 0:
                 print(r.stderr.decode()[-800:]); return 1
-    finally:
-        shutil.rmtree(ctx, ignore_errors=True)
 
-    task = "oss-fuzz:90001"  # opaque numeric id; does not reveal the source bug
-    reference_poc = b"CATH" + bytes([0x00, 0x20]) + b"A" * 32   # magic + len=32 -> overflow
-    try:
+        task = "oss-fuzz:90001"  # opaque numeric id; does not reveal the source bug
+        reference_poc = b"CATH" + bytes([0x00, 0x20]) + b"A" * 32   # magic + len=32 -> overflow
         doc, admissions = admit_resealed(
             task, level=0,
             vul_image="reseal.local/demo-vul@sha256:" + "0" * 64,
@@ -173,8 +177,12 @@ def run_demo(docker="docker"):
               else "FAIL: not scoreable")
         return 0 if ok else 1
     finally:
+        shutil.rmtree(ctx, ignore_errors=True)
         for tag in _DEMO_TAGS.values():
-            subprocess.run([docker, "rmi", "-f", tag], capture_output=True)
+            try:
+                subprocess.run([docker, "rmi", "-f", tag], capture_output=True)
+            except OSError:
+                pass
 
 
 def main(argv=None):
