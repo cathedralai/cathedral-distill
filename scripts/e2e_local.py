@@ -37,6 +37,7 @@ import base64
 import hashlib
 import json
 import re
+import shutil
 import sys
 import tempfile
 import warnings
@@ -75,14 +76,33 @@ def _craft_overflow(program: str) -> bytes:
 
 
 def _trace(task_id: str, poc_sha256: str) -> dict:
-    long = ("I read the parser's memcpy call to see exactly how many bytes get copied "
-            "relative to the declared buffer size, which is the minimal overflow input")
+    # Five DISTINCT steps (no repeated sentence -> clears #126's padded_reasoning check)
+    # totalling >=200 reasoning words with >=2 file:line refs, so the submission is
+    # trainable, not merely solved. Earlier this was one sentence x5 = 165 words, below
+    # the min_reasoning_tokens=200 floor, so the trace/trainable half never passed.
     steps = [
-        {"step": 1, "thought": f"open synth.c:1, find the magic check; {long}", "action": "read_file"},
-        {"step": 2, "thought": f"read buf[] and the memcpy at synth.c:5; {long}", "action": "read_file"},
-        {"step": 3, "thought": f"copy size vs buf size gives the overflow; {long}", "action": "reason"},
-        {"step": 4, "thought": f"write a PoC one byte past the buffer; {long}", "action": "write_poc"},
-        {"step": 5, "thought": f"confirm it crashes vul, not fix; {long}", "action": "verify"},
+        {"step": 1, "action": "read_file",
+         "thought": f"open the delivered target for {task_id} and read its entry at synth.c:1, "
+                    "confirming the magic-byte gate that any reaching input must satisfy before "
+                    "the parse path is entered, so the reachable surface is understood first"},
+        {"step": 2, "action": "read_file",
+         "thought": "read the fixed-size stack buffer and the memcpy at synth.c:5, noting the copy "
+                    "length is taken from an attacker-controlled field and is never compared against "
+                    "the destination capacity before the copy executes on the vulnerable build"},
+        {"step": 3, "action": "reason",
+         "thought": "reason that the patched build survives the same bytes only because it adds the "
+                    "missing bound check the vulnerable revision omits, so only an input whose declared "
+                    "length exceeds the destination buffer capacity separates the two builds under the "
+                    "differential, which is exactly the property the reward path is set up to pay for"},
+        {"step": 4, "action": "write_poc",
+         "thought": "write the reproducer as the magic prefix followed by a length field larger than the "
+                    "buffer and a payload of that size, so the unchecked copy overruns the stack buffer on "
+                    "the vulnerable target and is rejected by the bound check on the patched one"},
+        {"step": 5, "action": "verify",
+         "thought": "verify the differential locally before submitting the result: the crafted input trips "
+                    "the sanitizer abort on the vulnerable build and exits cleanly on the patched build, "
+                    "the crash-on-vul and spare-on-fix outcome the validator independently re-runs before "
+                    "it will credit the submission as a genuine solve on the sealed task"},
     ]
     return {"task_id": task_id, "poc_sha256": poc_sha256, "model_id": "cathedral/agent-v1",
             "steps": steps, "licence": "cathedral-corpus-v1",
@@ -120,6 +140,8 @@ def distill_stages(work: Path) -> dict:
     for task in d.tasks:
         art = svc.handle_artifact({"task_id": task.task_id, "batch_id": d.batch_id},
                                   authenticated_caller=MINER)
+        if "program" not in art:  # handle_artifact returns {"error": ...} or a bytes artifact
+            _fail(f"artifact for {task.task_id} has no program: {art.get('error') or list(art)}")
         poc = _craft_overflow(art["program"])
         outcome = svc.submit(
             SubmissionEnvelope(batch_id=d.batch_id, task_id=task.task_id, miner_hotkey=MINER,
@@ -195,9 +217,9 @@ def validator_stages(work: Path, report: dict, *, require_attestation: bool,
     sys.path.insert(0, str(vpath))
     import os
     os.environ["CATHEDRAL_ALLOCATION_CONTRACT"] = "v3"
-    os.environ["CATHEDRAL_CYBERGYM_HMAC_SECRET"] = HMAC_SECRET
     from scaffold.publisher import cybergym_attestation as att  # noqa: E402
     from scaffold.publisher import cybergym_contract as contract  # noqa: E402
+    from scaffold.publisher import cybergym_ingest as ingest_mod  # noqa: E402
     from scaffold.publisher import mechanism_cybergym_adapter as adapter  # noqa: E402
     from scaffold.publisher import weights  # noqa: E402
     from scaffold.publisher.mechanism_router import compose, MechanismSpec, ScoreVectorMeta  # noqa: E402
@@ -213,28 +235,20 @@ def validator_stages(work: Path, report: dict, *, require_attestation: bool,
     now = generated + timedelta(seconds=60)
 
     def ingest(store: Store, document_raw: dict) -> None:
-        doc = contract.normalize_semantic_document(document_raw)
-        body = contract.canonical_report_bytes(doc).decode("utf-8")
-        bb = body.encode("utf-8")
-        digest = contract.report_digest(doc)
-        rid = contract.receipt_id(digest)
-        sig = "sha256=" + contract.body_hmac_hex(bb, HMAC_SECRET)
-        gen = doc["generated_at"]
-        store.write(lambda c: c.execute(
-            "INSERT OR REPLACE INTO cybergym_score_reports(id,network,netuid,source_epoch,"
-            "producer_hotkey,complete,score_units,score_count,generated_at_iso,received_at_iso,"
-            "report_sha256,body_sha256,evidence_sha256,signature,report_json) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (rid, doc["network"], doc["netuid"], epoch, doc["producer_hotkey"], 1,
-             doc["score_units"], len(doc["scores"]), gen, gen, digest,
-             hashlib.sha256(bb).hexdigest(), doc["evidence_sha256"], sig, body)))
-        for hk, sc in doc["scores"].items():
-            store.write(lambda c, hk=hk, sc=sc: c.execute(
-                "INSERT OR REPLACE INTO cybergym_scores(report_id,miner_hotkey,epoch,score,"
-                "network,netuid,producer_hotkey,report_sha256,generated_at_iso,received_at_iso) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (rid, hk, epoch, sc, doc["network"], doc["netuid"], doc["producer_hotkey"],
-                 digest, gen, gen)))
+        # Go through the REAL intake path — validate -> bind the authenticated body ->
+        # store behind the epoch fence + attestation-posture ratchet — NOT hand-rolled
+        # INSERTs. The whole point of this stage is to guard scaffold.publisher.
+        # cybergym_ingest.store_report; re-implementing a legacy row shape here would let
+        # the e2e stay green while the real intake (authenticated_body, posture, fence)
+        # drifts, which is exactly the seam this script exists to protect.
+        body = contract.canonical_report_bytes(contract.normalize_semantic_document(document_raw))
+        sig = "sha256=" + contract.body_hmac_hex(body, HMAC_SECRET)
+        validated = ingest_mod.validate_report(
+            document_raw, audience=("finney", 39),
+            producer=document_raw["producer_hotkey"], now=now)
+        validated = ingest_mod.bind_authenticated_body(validated, body)
+        ingest_mod.store_report(store, validated, signature=sig)
+        # Fixture rows store_report does not own: epoch close + the registration snapshot.
         store.write(lambda c: c.execute("CREATE TABLE IF NOT EXISTS cybergym_epoch_status"
                                         "(epoch INTEGER PRIMARY KEY, state TEXT NOT NULL)"))
         store.write(lambda c: c.execute(
@@ -277,12 +291,13 @@ def validator_stages(work: Path, report: dict, *, require_attestation: bool,
 
     if require_attestation:
         print("\n--- DCAP attestation gate (require flag ON): pay-vs-burn ---")
+        att_root = Path(tempfile.mkdtemp(prefix="cybergym-attest-"))  # cleaned after the loop
         for label, receipt, drop_nonce in [
             ("valid receipt   ", _valid_receipt(miner, report["nonce"]), False),
             ("no receipt      ", None, False),
             ("receipt, no nonce", _valid_receipt(miner, report["nonce"]), True),
         ]:
-            fresh = Path(tempfile.mkdtemp())
+            fresh = Path(tempfile.mkdtemp(dir=att_root))
             att_trust = fresh / "trusted.json"
             pub = _KEY_ATT.public_key().public_bytes(
                 serialization.Encoding.Raw, serialization.PublicFormat.Raw)
@@ -308,6 +323,7 @@ def validator_stages(work: Path, report: dict, *, require_attestation: bool,
             print(f"      {label} attestation={i.get('attestation'):>13} "
                   f"miner weight={paid:<4} {'PAYS' if paid else 'BURNS'}")
         os.environ.pop(att.REQUIRE_ATTESTATION_ENV, None)
+        shutil.rmtree(att_root, ignore_errors=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -328,7 +344,6 @@ def main(argv: list[str] | None = None) -> int:
                          validator_path=args.validator_path)
     finally:
         if not args.keep:
-            import shutil
             shutil.rmtree(work, ignore_errors=True)
     return 0
 
