@@ -318,20 +318,23 @@ class TestScoreableFilter:
         assert kept == ["arvo:368", "arvo:10400"]
 
 
-def _private_manifest_ctx(task_id: str, context: dict, *, level: int = 2):
+def _private_manifest_ctx(task_id: str, context: dict, *, level: int = 2, origin_terms=None):
     """A private manifest whose one task carries `context`, disclosed at `level`."""
     slug = task_id.replace(":", "-")
+    task = {
+        "task_id": task_id,
+        "level": level,
+        "disclosed_at": "2026-07-27T11:00:00Z",
+        "vulnerable_image": f"registry.test/{slug}-vul@sha256:{'ab' * 32}",
+        "fixed_image": f"registry.test/{slug}-fix@sha256:{'cd' * 32}",
+        "context": context,
+    }
+    if origin_terms is not None:
+        task["origin_terms"] = list(origin_terms)
     return load_private_repro_manifest({
         "schema": "cathedral_cybergym_private_repro_manifest_v1",
         "source_epoch": 21,
-        "tasks": [{
-            "task_id": task_id,
-            "level": level,
-            "disclosed_at": "2026-07-27T11:00:00Z",
-            "vulnerable_image": f"registry.test/{slug}-vul@sha256:{'ab' * 32}",
-            "fixed_image": f"registry.test/{slug}-fix@sha256:{'cd' * 32}",
-            "context": context,
-        }],
+        "tasks": [task],
     })
 
 
@@ -465,6 +468,74 @@ class TestDisclosureFingerprint:
             manifest, _run=run, _backend=backend, forbidden_terms=["freetype2"]
         )
         assert result.disclosure_leaks_origin is True and result.scoreable is False
+
+    def test_task_origin_terms_are_enforced_without_a_caller_passing_them(self):
+        """#131 enforced-by-construction: the manifest carries the sealer's stripped
+        origin identifiers privately, and admission uses them automatically — no caller
+        needs to remember `forbidden_terms`. A disclosure naming a hidden term is refused."""
+        manifest = _private_manifest_ctx(
+            "arvo:900001",
+            {"description": "re-sealed bug", "sanitizer_trace": "AddressSanitizer: uaf in cff_parse_num"},
+            origin_terms=["freetype2", "cff_parse_num", "cffparse.c"],
+        )
+        real = b"known differential crash"
+
+        def run(argv, **kwargs):
+            if "manifest" in argv:
+                return _completed(returncode=1, stderr=b"manifest unknown")
+            if "cat" in argv:
+                return _completed(stdout=real)
+            raise AssertionError(argv)
+
+        def backend(task_id, poc, mode, **kwargs):
+            return int(poc == real and mode == "vul")
+
+        # NOTE: no forbidden_terms passed — the task's own origin_terms drive it.
+        (result,) = admit_private_manifest(manifest, _run=run, _backend=backend)
+        assert result.disclosure_leaks_origin is True and result.scoreable is False
+        assert any("cff_parse_num" in r for r in result.reasons)
+
+    def test_a_genericised_disclosure_with_origin_terms_recorded_is_scoreable(self):
+        """The seal-time genericised context (no hidden term present) passes, and the
+        private origin_terms are never in the dispatched context."""
+        manifest = _private_manifest_ctx(
+            "arvo:900001",
+            {"description": "re-sealed bug", "sanitizer_trace": "AddressSanitizer: heap-use-after-free"},
+            origin_terms=["freetype2", "cff_parse_num", "cffparse.c"],
+        )
+        task = manifest.task("arvo:900001")
+        assert "origin_terms" not in task.context  # private, never dispatched
+        real = b"known differential crash"
+
+        def run(argv, **kwargs):
+            if "manifest" in argv:
+                return _completed(returncode=1, stderr=b"manifest unknown")
+            if "cat" in argv:
+                return _completed(stdout=real)
+            raise AssertionError(argv)
+
+        def backend(task_id, poc, mode, **kwargs):
+            return int(poc == real and mode == "vul")
+
+        (result,) = admit_private_manifest(manifest, _run=run, _backend=backend)
+        assert result.disclosure_leaks_origin is False and result.scoreable is True
+
+    def test_origin_terms_are_validated_and_digest_bound(self):
+        import copy
+        base = {
+            "schema": "cathedral_cybergym_private_repro_manifest_v1", "source_epoch": 21,
+            "tasks": [{"task_id": "arvo:1", "level": 2, "disclosed_at": "2026-07-27T11:00:00Z",
+                       "vulnerable_image": f"registry.test/a-vul@sha256:{'ab' * 32}",
+                       "fixed_image": f"registry.test/a-fix@sha256:{'cd' * 32}", "context": {}}]}
+        for bad_terms in (["", "ok"], "notalist", ["dup", "dup"]):
+            bad = copy.deepcopy(base)
+            bad["tasks"][0]["origin_terms"] = bad_terms
+            with pytest.raises(ReproManifestError):
+                load_private_repro_manifest(bad)
+        # present terms change the manifest digest (tamper-evidence); absent = default ()
+        withterms = copy.deepcopy(base)
+        withterms["tasks"][0]["origin_terms"] = ["freetype2"]
+        assert load_private_repro_manifest(base).digest != load_private_repro_manifest(withterms).digest
 
 
 class TestPrivateManifestAdmission:

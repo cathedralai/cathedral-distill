@@ -543,7 +543,11 @@ def admit_private_manifest(manifest: PrivateReproManifest, *, docker: str = "doc
             controls=controls,
             level=int(task.level),
             context=task.context,
-            forbidden_terms=forbidden_terms,
+            # Each task's own stripped-origin identifiers are enforced automatically
+            # (the manifest carries them privately), unioned with any caller-supplied
+            # terms — so the symbol/project/patch channels are policed by construction,
+            # not by the caller remembering to pass forbidden_terms.
+            forbidden_terms=tuple(forbidden_terms) + tuple(task.origin_terms),
         ))
     return tuple(admissions)
 

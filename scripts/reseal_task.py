@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,8 +40,31 @@ from cathedral_distill.corpus_admission import admit_private_manifest
 
 # --- the re-seal engine (parameterized; the same call works local-demo or on the rig) ---
 
+_SCRUBBED = "<redacted>"
+
+
+def genericise_disclosure(context, origin_terms):
+    """Redact each PUBLIC-origin identifier from the DISCLOSED context values, so a
+    sealed task's dispatched metadata cannot fingerprint the public bug it was sealed
+    from — keeping the surrounding bug-class prose. This is the seal-time half of #131:
+    the sealer knows the exact identifiers it is hiding (source basenames, the crashing
+    symbol, the project name) and scrubs them here, then records the SAME terms privately
+    as ``origin_terms`` (see admit_resealed) so admission asserts none of them, or a raw
+    source path, ever reappear in what the miner sees. Case-insensitive substring removal.
+    """
+    scrubbed = {}
+    for key, value in dict(context).items():
+        text = str(value)
+        for term in origin_terms:
+            if term:
+                text = re.sub(re.escape(term), _SCRUBBED, text, flags=re.IGNORECASE)
+        scrubbed[key] = text
+    return scrubbed
+
+
 def admit_resealed(task_id, *, level, vul_image, fix_image, reference_poc, challenge_artifact,
-                   source_epoch=21, backend, probe_run, docker="docker"):
+                   source_epoch=21, backend, probe_run, docker="docker",
+                   context=None, origin_terms=()):
     """Build the private reward manifest for one re-sealed task and run admission.
 
     Returns ``(manifest_document, admissions)``. ``backend(task_id, poc, mode)`` runs
@@ -49,9 +73,21 @@ def admit_resealed(task_id, *, level, vul_image, fix_image, reference_poc, chall
     distinct seams in ``admit_private_manifest`` — the reproduction must NOT run
     through the registry-probe function, or ``docker_reproduce_backend`` would try to
     run its differential via a probe that only answers ``manifest inspect``.
+
+    ``context`` is the disclosed metadata for this task (description / sanitizer_trace /
+    patch); ``origin_terms`` are the public-origin identifiers the sealer is hiding. The
+    context is GENERICISED against those terms before it can be dispatched, and the terms
+    are recorded PRIVATELY so admission enforces non-leakage by construction (#131).
     """
+    disclosed = genericise_disclosure(
+        context if context is not None else {"description": f"re-sealed task {task_id}"},
+        origin_terms,
+    )
     images = {task_id: {"vul": {"digest": vul_image}, "fix": {"digest": fix_image}}}
-    metadata = {task_id: {"level": level, "description": f"re-sealed task {task_id}"}}
+    meta = {"level": level, **disclosed}
+    if origin_terms:
+        meta["origin_terms"] = list(origin_terms)
+    metadata = {task_id: meta}
     document = build_private_repro_manifest(
         images, source_epoch=source_epoch,
         disclosed_at=datetime(2026, 8, 6, tzinfo=timezone.utc),
