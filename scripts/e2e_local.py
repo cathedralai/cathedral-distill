@@ -70,7 +70,10 @@ def _fail(msg: str) -> None:
 def _craft_overflow(program: str) -> bytes:
     """A genuine solve: parse the delivered pseudo-C, overflow buf by one byte."""
     magic = bytes(int(h, 16) for h in re.findall(r"\\x([0-9a-f]{2})", program))
-    buf = int(re.search(r"char buf\[(\d+)\]", program).group(1))
+    m = re.search(r"char buf\[(\d+)\]", program)
+    if m is None:
+        raise ValueError("delivered program has no `char buf[N]` to overflow")
+    buf = int(m.group(1))
     n = buf + 1
     return magic + n.to_bytes(2, "big") + b"A" * n
 
@@ -293,9 +296,9 @@ def validator_stages(work: Path, report: dict, *, require_attestation: bool,
         print("\n--- DCAP attestation gate (require flag ON): pay-vs-burn ---")
         att_root = Path(tempfile.mkdtemp(prefix="cybergym-attest-"))  # cleaned after the loop
         for label, receipt, drop_nonce in [
-            ("valid receipt   ", _valid_receipt(miner, report["nonce"]), False),
+            ("valid receipt   ", _valid_receipt(miner, report.get("nonce", "")), False),
             ("no receipt      ", None, False),
-            ("receipt, no nonce", _valid_receipt(miner, report["nonce"]), True),
+            ("receipt, no nonce", _valid_receipt(miner, report.get("nonce", "")), True),
         ]:
             fresh = Path(tempfile.mkdtemp(dir=att_root))
             att_trust = fresh / "trusted.json"
@@ -320,7 +323,7 @@ def validator_stages(work: Path, report: dict, *, require_attestation: bool,
                 v, m, i = adapter.cybergym_score_snapshot(s, epoch=epoch, now=now)
             fin, _ = compose_v3(v, m)
             paid = fin.get(MINER_UID, 0.0)
-            print(f"      {label} attestation={i.get('attestation'):>13} "
+            print(f"      {label} attestation={(i.get('attestation') or 'n/a'):>13} "
                   f"miner weight={paid:<4} {'PAYS' if paid else 'BURNS'}")
         os.environ.pop(att.REQUIRE_ATTESTATION_ENV, None)
         shutil.rmtree(att_root, ignore_errors=True)
