@@ -117,6 +117,24 @@ def _crash_evidence(value: Any) -> Mapping[str, Any]:
     }
 
 
+def _origin_terms(value: Any) -> tuple[str, ...]:
+    """The PRIVATE stripped-origin identifiers (absent/empty is fine). A tuple of
+    unique, non-empty, non-whitespace strings; anything else is a manifest error."""
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ReproManifestError("origin_terms must be a list of strings")
+    terms = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ReproManifestError("origin_terms entries must be non-empty strings")
+        # strip so a padded token ('cff_parse_num ') still policed as the bare token
+        terms.append(item.strip())
+    if len(set(terms)) != len(terms):
+        raise ReproManifestError("origin_terms must be unique")
+    return tuple(terms)
+
+
 @dataclass(frozen=True)
 class PinnedReproTask:
     """One undisclosed task plus its exact vulnerable and fixed images."""
@@ -130,6 +148,13 @@ class PinnedReproTask:
     crash_evidence: Mapping[str, Any] | None = None
     challenge_artifact_digest: str | None = None
     reference_poc_digest: str | None = None
+    #: The exact PUBLIC-origin identifiers the sealer stripped (source basenames, the
+    #: crashing symbol, the project name, an upstream id). PRIVATE — never disclosed to a
+    #: miner (not in `context`, so not in any dispatched field), but bound into the
+    #: manifest digest via `evidence()` so tampering is evident. Admission asserts none of
+    #: them reappear in the disclosed context (`corpus_admission` forbidden_terms), turning
+    #: the fingerprint check from operator-must-remember into enforced-by-construction.
+    origin_terms: tuple[str, ...] = ()
 
     @property
     def reward_ready(self) -> bool:
@@ -172,6 +197,10 @@ class PinnedReproTask:
             evidence["challenge_artifact_digest"] = self.challenge_artifact_digest
         if self.reference_poc_digest is not None:
             evidence["reference_poc_digest"] = self.reference_poc_digest
+        if self.origin_terms:
+            # Bound into the manifest digest (tamper-evidence), never disclosed. Absent
+            # when empty so it does not change the digest of a manifest that has none.
+            evidence["origin_terms"] = list(self.origin_terms)
         return evidence
 
 
@@ -224,7 +253,7 @@ def _parse_task(value: Any, *, reward_manifest: bool) -> PinnedReproTask:
     }
     if reward_manifest:
         expected |= {"challenge_artifact_digest", "reference_poc_digest"}
-    allowed = expected | {"crash_evidence"}
+    allowed = expected | {"crash_evidence", "origin_terms"}
     if set(value) - allowed or expected - set(value):
         missing = sorted(expected - set(value))
         unknown = sorted(set(value) - allowed)
@@ -261,6 +290,7 @@ def _parse_task(value: Any, *, reward_manifest: bool) -> PinnedReproTask:
             _sha256_digest(value["reference_poc_digest"], field="reference_poc_digest")
             if reward_manifest else None
         ),
+        origin_terms=_origin_terms(value.get("origin_terms")),
     )
     try:
         task.to_task()
@@ -367,6 +397,9 @@ def build_private_repro_manifest(
         }
         if "crash_evidence" in meta:
             row["crash_evidence"] = dict(meta["crash_evidence"])
+        if meta.get("origin_terms"):
+            # PRIVATE stripped-origin identifiers; validated by the loader below.
+            row["origin_terms"] = list(meta["origin_terms"])
         if reward_manifest:
             assert challenge_artifacts is not None and reference_pocs is not None
             artifact = challenge_artifacts[task_id]
