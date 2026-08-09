@@ -94,7 +94,7 @@ def sandboxed_subprocess_backend(
     *,
     timeout_s: float = 120.0,
     cpu_seconds: int = 60,
-    memory_bytes: int = 2 * 1024 * 1024 * 1024,
+    memory_bytes: int | None = None,
 ) -> VerifierBackend:
     """`subprocess_backend` hardened for running adversarial PoCs against a
     deliberately-crashing binary. The PoC is attacker input, so the child runs:
@@ -102,8 +102,15 @@ def sandboxed_subprocess_backend(
       * with a **scrubbed environment** — only a minimal PATH and the CUDA/TRITON
         vars a toolchain needs, never the validator's secrets (SparkProof SEC-4:
         untrusted candidate code must not read `os.environ`);
-      * under **resource limits** — CPU time, address space, and no core dumps, so
-        a runaway or memory-bomb PoC cannot exhaust the host;
+      * under **resource limits** — CPU time and no core dumps, so a runaway PoC
+        cannot burn unbounded CPU or dump core. **Address space (RLIMIT_AS) is NOT
+        capped by default.** The CyberGym targets are sanitizer builds (ASan/MSan),
+        which reserve ~20 TiB of *virtual* shadow memory at init and abort under any
+        small RLIMIT_AS — so capping virtual AS is the wrong control here: it does
+        not bound physical use and silently turns every genuine crash into a
+        "did not crash". Physical-memory bounding is the container/cgroup/enclave's
+        job (the same layer that enforces no-egress). Pass an explicit
+        `memory_bytes` only to cap AS for a non-sanitizer workload that needs it;
       * with a **wall-clock timeout** mapped to the clean timeout code.
 
     Network isolation (no egress) is the remaining control and is enforced at the
@@ -126,7 +133,11 @@ def sandboxed_subprocess_backend(
 
     def _limits() -> None:  # pragma: no cover - runs in the child, before exec
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
-        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+        # Only cap virtual address space when a caller explicitly asks: a sanitizer
+        # target reserves ~20 TiB of virtual shadow and aborts under any small
+        # RLIMIT_AS, which would fail every real CyberGym solve (see the docstring).
+        if memory_bytes is not None:
+            resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         os.setsid()  # own session/process group so a timeout kills the whole tree
 
