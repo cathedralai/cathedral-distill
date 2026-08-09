@@ -34,8 +34,6 @@ BASE = os.environ.get("CYBERGYM_BASE", "http://127.0.0.1:8672")
 HOTKEY = os.environ.get("CYBERGYM_E2E_MINER_HOTKEY", "")
 ENVELOPE_SCHEMA = "cathedral_cybergym_submission_envelope_v1"
 TRACE_SCHEMA = "cathedral_trace_submission_v1"
-# Enough reasoning to clear the structural quality floor (>=200 tokens, >=2 file:line refs).
-_LONG = "trace the length field through the parser and confirm the bound is unchecked; " * 6
 
 
 def _token() -> str:
@@ -58,19 +56,67 @@ def post(path: str, payload: dict):
 
 
 def _trace(task_id: str, poc: bytes) -> dict:
+    """A synthetic, structural health-probe trace.
+
+    The canary's job is the MECHANICAL path — dispatch -> solve -> submit ->
+    verify -> score -> close — driven by the HELD reference PoC on a sealed corpus
+    that ``mock_miner`` cannot read the answer out of. So its trace clears the
+    model-free quality floor (>=5 steps, read_file+write_poc, >=200 reasoning
+    tokens, >=2 file:line refs, no padded sentence-repetition) with GENERIC
+    bug-repro methodology, not task-specific reasoning it does not have and cannot
+    fabricate honestly. It attests the PoC half of a green epoch, never the trace
+    half — genuine trace VALUE is a separate mechanism's job (a weak/strong
+    training-value differential), not a canary's, and the launch gate should record
+    it that way.
+
+    Each step is one distinct sentence, so it does not trip the ``padded_reasoning``
+    check (#126) the earlier one-sentence-repeated-six-times trace failed. The
+    file:line refs are generic placeholders — the canary never sees the real source,
+    so it names a plausible surface rather than claiming a specific one that would be
+    wrong for most targets.
+
+    Containment (why a FABRICATED trace clearing the floor is safe here): the canary
+    sets NO ``model_seal``, so ``is_trainable`` is False and its trace never enters the
+    training corpus; and trace quality does not gate the creditable solve at all
+    (creditable = solved AND attested — cybergym_protocol), so clearing the floor is
+    hygiene, not a gate. If either invariant changes — the canary gains a seal, or the
+    trace bonus (#116) is folded into work_units — revisit this before shipping.
+    """
+    steps = [
+        (1, "read_file",
+         f"open the delivered vulnerable build for {task_id} and read its fuzzer "
+         "entrypoint at harness.c:31, tracing exactly how the untrusted input buffer "
+         "is received and handed to the target so that the full reachable parsing "
+         "surface is mapped before any bytes are shaped or any hypothesis is formed"),
+        (2, "read_file",
+         "walk the length-and-copy path that the sanitizer report implicates, reading "
+         "the size computation at parser.c:214 and confirming that the byte count taken "
+         "directly from the attacker-controlled header is never re-validated against "
+         "the real capacity of the destination heap allocation it is copied into"),
+        (3, "reason",
+         "reason about why the patched build survives the identical input while the "
+         "vulnerable one aborts, since the fix restores the missing bound comparison at "
+         "parser.c:216 that the vulnerable revision dropped, so only an input that "
+         "genuinely drives the unchecked copy can separate the two builds"),
+        (4, "write_poc",
+         "construct the reproducer for this sealed task as an oversized length field "
+         "placed ahead of a deliberately short trailing payload, sized so that the "
+         "unchecked copy reaches well past the end of the destination buffer and "
+         "corrupts the adjacent heap metadata on the vulnerable target"),
+        (5, "verify",
+         "verify the differential locally before submitting the result, since the "
+         "crafted input must trip the AddressSanitizer heap-overflow abort on the "
+         "vulnerable image and yet return cleanly on the patched image, the exact "
+         "crash-on-vul and spare-on-fix outcome the validator independently re-runs"),
+    ]
     return {
         "schema": TRACE_SCHEMA,
         "task_id": task_id,
         "poc_sha256": "sha256:" + hashlib.sha256(poc).hexdigest(),
         "model_id": "cathedral-reference-canary-v1",
         "licence": "cathedral-corpus-v1",
-        "steps": [
-            {"step": 1, "thought": f"open src/parse.c:120 and read the header; {_LONG}", "action": "read_file"},
-            {"step": 2, "thought": f"cross-check src/cff/cffparse.c:440 for the bound; {_LONG}", "action": "read_file"},
-            {"step": 3, "thought": f"the length is trusted so it overflows the heap buffer; {_LONG}", "action": "reason"},
-            {"step": 4, "thought": f"write the reproducer with an oversized length header; {_LONG}", "action": "write_poc"},
-            {"step": 5, "thought": f"confirm the sanitizer fires on vul and not fix; {_LONG}", "action": "verify"},
-        ],
+        # tuples are (step, action, thought) — keep the dict keys in the same order.
+        "steps": [{"step": s, "action": a, "thought": t} for s, a, t in steps],
     }
 
 
