@@ -52,12 +52,15 @@ def genericise_disclosure(context, origin_terms):
     as ``origin_terms`` (see admit_resealed) so admission asserts none of them, or a raw
     source path, ever reappear in what the miner sees. Case-insensitive substring removal.
     """
+    terms = sorted({t for t in origin_terms if t}, key=len, reverse=True)
+    # One alternation, longest-first, so a shorter term can't re-match inside the
+    # `<redacted>` a longer term just inserted (order-independent, no garbled output).
+    pattern = re.compile("|".join(re.escape(t) for t in terms), re.IGNORECASE) if terms else None
     scrubbed = {}
     for key, value in dict(context).items():
         text = str(value)
-        for term in origin_terms:
-            if term:
-                text = re.sub(re.escape(term), _SCRUBBED, text, flags=re.IGNORECASE)
+        if pattern is not None:
+            text = pattern.sub(_SCRUBBED, text)
         scrubbed[key] = text
     return scrubbed
 
@@ -84,7 +87,12 @@ def admit_resealed(task_id, *, level, vul_image, fix_image, reference_poc, chall
         origin_terms,
     )
     images = {task_id: {"vul": {"digest": vul_image}, "fix": {"digest": fix_image}}}
-    meta = {"level": level, **disclosed}
+    # Only the genuine context fields may spread into meta — a disclosed key named
+    # "level" or "origin_terms" must never shadow the parameter or be promoted into the
+    # private, digest-bound origin_terms field.
+    context_fields = {k: v for k, v in disclosed.items()
+                      if k in ("description", "sanitizer_trace", "patch")}
+    meta = {"level": level, **context_fields}
     if origin_terms:
         meta["origin_terms"] = list(origin_terms)
     metadata = {task_id: meta}

@@ -128,7 +128,8 @@ def _origin_terms(value: Any) -> tuple[str, ...]:
     for item in value:
         if not isinstance(item, str) or not item.strip():
             raise ReproManifestError("origin_terms entries must be non-empty strings")
-        terms.append(item)
+        # strip so a padded token ('cff_parse_num ') still policed as the bare token
+        terms.append(item.strip())
     if len(set(terms)) != len(terms):
         raise ReproManifestError("origin_terms must be unique")
     return tuple(terms)

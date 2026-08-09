@@ -536,6 +536,10 @@ class TestDisclosureFingerprint:
         withterms = copy.deepcopy(base)
         withterms["tasks"][0]["origin_terms"] = ["freetype2"]
         assert load_private_repro_manifest(base).digest != load_private_repro_manifest(withterms).digest
+        # a padded term is stored stripped, so it is policed as the bare token
+        padded = copy.deepcopy(base)
+        padded["tasks"][0]["origin_terms"] = ["cff_parse_num "]
+        assert load_private_repro_manifest(padded).task("arvo:1").origin_terms == ("cff_parse_num",)
 
 
 class TestPrivateManifestAdmission:
