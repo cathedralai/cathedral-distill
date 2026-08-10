@@ -127,3 +127,18 @@ def test_benchmark_not_solved_when_backend_reports_no_crash():
     out = cp.benchmark_submission(cp.screen_submission(_envelope(d, "arvo:1", POC), d), _backend(set()))
     assert out.solved is False and out.reason.startswith("not_solved:")
     assert out.work_units == Decimal(0) and out.trace_id is None
+
+
+def test_screen_gate_actually_rejects_a_missing_attestation_under_a_policy():
+    # Exercise the REAL gate wiring (not a hand-built ScreenOutcome): with an attestation policy
+    # configured and no attestation on the envelope, screen_submission must set attested=False,
+    # and benchmark_submission must then reject it WITHOUT running the differential.
+    from cathedral_distill.attestation import AttestationPolicy
+
+    policy = AttestationPolicy(trusted_roots={}, allowed_measurements=frozenset())
+    d = _dispatch()
+    s = cp.screen_submission(_envelope(d, "arvo:1", POC), d, attestation_policy=policy)
+    assert s.attested is False and s.attest_reason == "missing_tdx_attestation"
+    out = cp.benchmark_submission(s, _raising_backend)  # backend must not run
+    assert out.attested is False and not out.solved
+    assert out.reason == "rejected_unattested:missing_tdx_attestation"
