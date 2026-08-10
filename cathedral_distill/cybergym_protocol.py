@@ -319,32 +319,44 @@ def _attestation_schema(token: bytes) -> str:
     return str(doc.get("schema", "")) if isinstance(doc, dict) else ""
 
 
-def process_submission(
+@dataclass(frozen=True)
+class ScreenOutcome:
+    """A submission that has cleared intake screening (format/binding + the TDX attestation
+    gate), carrying everything the differential benchmark needs. `attested=False` means the
+    submission failed the attestation gate and must NOT be benchmarked — `benchmark_submission`
+    skips the differential and short-circuits to the unattested rejection, exactly as the fused
+    path did."""
+
+    task: Task
+    poc_bytes: bytes
+    digest: str
+    submission: TraceSubmission
+    attested: bool
+    attest_reason: str
+    miner_hotkey: str
+    source_epoch: int
+    level: int
+
+
+def screen_submission(
     envelope: SubmissionEnvelope,
     dispatch_msg: DispatchMessage,
-    backend,
     *,
-    trace_policy: TraceQualityPolicy = TraceQualityPolicy(),
-    weights: Mapping[Level, Decimal] = DEFAULT_LEVEL_WEIGHTS,
     attestation_policy: AttestationPolicy | None = None,
     cathedral_receipt_policy: CathedralReceiptPolicy | None = None,
     now: datetime | None = None,
-) -> SubmissionOutcome:
-    """Verify one submission against the batch it answers, and score it.
+) -> ScreenOutcome:
+    """Screen one submission WITHOUT running the (expensive) differential benchmark.
 
-    Fails closed: an off-batch task, a PoC whose digest disagrees with the trace,
-    or a malformed trace is rejected. A well-formed submission is run through the
-    differential crash test to set `solved`.
-
-    Intel-TDX attestation gate: when `attestation_policy` is provided (production),
-    the submission must carry a valid TDX attestation bound to (batch, task, PoC,
-    miner) — see `cybergym_attest`; a solve is *creditable* (earns level-weighted
-    units, is corpus-eligible) only when it is both solved AND attested. When no
-    policy is given (the hardware-free dev/test path), attestation is not required
-    and `attested` is vacuously true, preserving the prior behaviour exactly. A
-    missing or invalid attestation is never a hard protocol error. It is rejected
-    before the differential backend runs (`attested=False`, `solved=False`), so a
-    flood of invalid proofs cannot turn the verifier into a free Docker oracle.
+    Fails closed on the binding checks (off-batch task, artifact mismatch, bad base64, size,
+    trace↔task↔PoC disagreement) by raising `ProtocolError`. Then applies the Intel-TDX
+    attestation gate: with a policy configured (production) the submission must carry a valid
+    attestation bound to (batch, task, PoC, miner); with no policy (the hardware-free dev/test
+    path) the submission is vacuously attested, preserving the prior behaviour exactly. A
+    missing/invalid attestation is never a hard error — it sets `attested=False` so the caller
+    rejects it before spending verifier capacity on the differential. This is the intake seam
+    the backend's FIFO screening drives; accepted (attested) submissions go on to
+    `benchmark_submission`.
     """
     if envelope.batch_id != dispatch_msg.batch_id:
         raise ProtocolError("submission batch_id does not match the dispatched batch")
@@ -424,46 +436,100 @@ def process_submission(
             except (ValueError, TypeError, CyberGymAttestError) as exc:
                 attested, attest_reason = False, f"tdx_attestation_invalid:{exc}"
 
-    if not attested:
+    return ScreenOutcome(
+        task=task, poc_bytes=poc_bytes, digest=digest, submission=submission,
+        attested=attested, attest_reason=attest_reason,
+        miner_hotkey=envelope.miner_hotkey, source_epoch=dispatch_msg.source_epoch,
+        level=dt.level,
+    )
+
+
+def benchmark_submission(
+    screened: ScreenOutcome,
+    backend,
+    *,
+    trace_policy: TraceQualityPolicy = TraceQualityPolicy(),
+    weights: Mapping[Level, Decimal] = DEFAULT_LEVEL_WEIGHTS,
+) -> SubmissionOutcome:
+    """Run the differential benchmark on an already-screened submission and score it.
+
+    An unattested screen is rejected here without touching the backend (`solved=False`,
+    `rejected_unattested:…`) — identical to the pre-split ordering. An attested screen is run
+    through the differential crash test; a solve is *creditable* (earns level-weighted units,
+    is corpus-eligible, keeps its trace) only when it is both solved AND attested. This is the
+    seam a validator runs to benchmark an accepted submission (three distinct validators run it
+    for the quorum).
+    """
+    if not screened.attested:
         return SubmissionOutcome(
-            task_id=task.task_id,
-            miner_hotkey=envelope.miner_hotkey,
-            source_epoch=dispatch_msg.source_epoch,
-            level=dt.level,
+            task_id=screened.task.task_id,
+            miner_hotkey=screened.miner_hotkey,
+            source_epoch=screened.source_epoch,
+            level=screened.level,
             solved=False,
             trainable=False,
-            reason="rejected_unattested:" + attest_reason,
+            reason="rejected_unattested:" + screened.attest_reason,
             work_units=Decimal(0),
             bonus=0.0,
-            poc_sha256=digest,
+            poc_sha256=screened.digest,
             trace_id=None,
             submission=None,
             attested=False,
         )
 
-    result = verify_poc(task, poc_bytes, backend)
-    poc_sub = PoCSubmission(task_id=task.task_id, poc_sha256=digest, result=result)
+    result = verify_poc(screened.task, screened.poc_bytes, backend)
+    poc_sub = PoCSubmission(
+        task_id=screened.task.task_id, poc_sha256=screened.digest, result=result
+    )
     solved = result.solved
 
-    creditable = solved and attested
-    work_units = derived_work_units(task, poc_sub if creditable else None, weights)
-    trainable = bool(creditable and submission.is_trainable(trace_policy))
-    bonus = submission_bonus(submission, trace_policy) if creditable else 0.0
+    creditable = solved and screened.attested
+    work_units = derived_work_units(screened.task, poc_sub if creditable else None, weights)
+    trainable = bool(creditable and screened.submission.is_trainable(trace_policy))
+    bonus = submission_bonus(screened.submission, trace_policy) if creditable else 0.0
 
     if not solved:
         reason = "not_solved:" + result.outcome
     elif not trainable:
-        reason = "solved_trace_below_floor:" + submission.quality(trace_policy).reason
+        reason = "solved_trace_below_floor:" + screened.submission.quality(trace_policy).reason
     else:
         reason = "solved_trainable"
 
     return SubmissionOutcome(
-        task_id=task.task_id, miner_hotkey=envelope.miner_hotkey,
-        source_epoch=dispatch_msg.source_epoch, level=dt.level, solved=solved,
+        task_id=screened.task.task_id, miner_hotkey=screened.miner_hotkey,
+        source_epoch=screened.source_epoch, level=screened.level, solved=solved,
         trainable=trainable, reason=reason, work_units=work_units, bonus=bonus,
-        poc_sha256=digest, trace_id=submission.trace_id() if creditable else None,
-        submission=submission if creditable else None, attested=attested,
+        poc_sha256=screened.digest,
+        trace_id=screened.submission.trace_id() if creditable else None,
+        submission=screened.submission if creditable else None, attested=screened.attested,
     )
+
+
+def process_submission(
+    envelope: SubmissionEnvelope,
+    dispatch_msg: DispatchMessage,
+    backend,
+    *,
+    trace_policy: TraceQualityPolicy = TraceQualityPolicy(),
+    weights: Mapping[Level, Decimal] = DEFAULT_LEVEL_WEIGHTS,
+    attestation_policy: AttestationPolicy | None = None,
+    cathedral_receipt_policy: CathedralReceiptPolicy | None = None,
+    now: datetime | None = None,
+) -> SubmissionOutcome:
+    """Screen one submission and, if it clears the attestation gate, benchmark and score it.
+
+    Exactly `benchmark_submission(screen_submission(...), backend, ...)` — the fused path, kept
+    unchanged for callers that screen and benchmark in one place. The two halves are separable
+    so the backend can screen FIFO in real time and have validators benchmark the accepted
+    submissions later. Fails closed on binding errors (raised from `screen_submission`); an
+    invalid/missing attestation is a soft rejection scored before the differential runs, so a
+    flood of invalid proofs cannot turn the verifier into a free Docker oracle.
+    """
+    screened = screen_submission(
+        envelope, dispatch_msg, attestation_policy=attestation_policy,
+        cathedral_receipt_policy=cathedral_receipt_policy, now=now,
+    )
+    return benchmark_submission(screened, backend, trace_policy=trace_policy, weights=weights)
 
 
 # --------------------------------------------------------------------------- #
