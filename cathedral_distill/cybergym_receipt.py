@@ -36,6 +36,12 @@ from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level
 
 RECEIPT_SCHEMA_V1 = "cathedral_cybergym_receipt_v1"
 RECEIPT_SCHEMA_V2 = "cathedral_cybergym_receipt_v2"
+# v3 pins the canonical benchmark environment (the reproduce timeout + resource
+# limits + network policy + verifier image digest) INTO the signed receipt, so a
+# peer re-deriving the score can confirm the exact conditions the differential ran
+# under — not just trust that some code path used them. A v3 receipt is a v2 receipt
+# (it still carries the eligibility snapshot) plus the top-level `env` block.
+RECEIPT_SCHEMA_V3 = "cathedral_cybergym_receipt_v3"
 # Kept for callers constructing legacy/dev receipts without observed eligibility.
 RECEIPT_SCHEMA = RECEIPT_SCHEMA_V1
 RECEIPT_ID_DOMAIN = b"cathedral-cybergym-receipt-id-v1\x00"
@@ -55,6 +61,7 @@ _RECEIPT_KEYS = frozenset(
         "batch", "score", "receipt_id", "signing_key_id", "signature",
     }
 )
+_RECEIPT_KEYS_V3 = _RECEIPT_KEYS | frozenset({"env"})
 _BATCH_KEYS_V1 = frozenset({"batch_id", "nonce", "holdout_digest", "graded_tasks"})
 _BATCH_KEYS_V2 = _BATCH_KEYS_V1 | frozenset({"eligibility_snapshot_digest"})
 _SCORE_KEYS = frozenset(
@@ -63,6 +70,15 @@ _SCORE_KEYS = frozenset(
         "earned_units", "max_units", "score", "work_units", "items_root",
     }
 )
+# The canonical-environment block (v3). Every field is a canonical string so no
+# float can move it and the whole block is bound by the receipt signature.
+_ENV_KEYS = frozenset(
+    {"reproduce_timeout_s", "cpu_seconds", "memory_bytes", "network_policy", "verifier_digest"}
+)
+# The network posture the differential ran under. `none` is the creditable
+# attested posture (no egress); `unspecified` is the honest value when a legacy /
+# non-attested deployment cannot assert it — never silently claim `none`.
+_NETWORK_POLICIES = frozenset({"none", "unspecified"})
 _SIGNATURE_KEYS = frozenset({"algorithm", "value_base64"})
 
 
@@ -128,6 +144,29 @@ def _weights_to_dict(weights: Mapping[Level, Decimal]) -> dict[str, str]:
     return {str(int(level)): str(Decimal(weight)) for level, weight in weights.items()}
 
 
+def _validate_env(env: Any) -> dict[str, str]:
+    """Validate the canonical-environment block and return it as canonical strings.
+
+    Fails closed: exact key set, decimal-string timeout/cpu, `memory_bytes` a
+    decimal string or the literal `"unlimited"` (the sanitizer-target case where
+    RLIMIT_AS is deliberately not capped), `network_policy` from a small allow-list,
+    and `verifier_digest` a sha256 digest of the pinned verifier/workload image.
+    """
+    e = _exact_keys(env, _ENV_KEYS, "env")
+    _decimal(e["reproduce_timeout_s"], "env.reproduce_timeout_s")
+    _decimal(e["cpu_seconds"], "env.cpu_seconds")
+    memory = str(e["memory_bytes"])
+    if memory != "unlimited" and not _DECIMAL_RE.match(memory):
+        raise CyberGymReceiptError("env.memory_bytes must be a decimal string or 'unlimited'")
+    if str(e["network_policy"]) not in _NETWORK_POLICIES:
+        raise CyberGymReceiptError(
+            "env.network_policy must be one of: " + ", ".join(sorted(_NETWORK_POLICIES))
+        )
+    if not _DIGEST_RE.match(str(e["verifier_digest"])):
+        raise CyberGymReceiptError("env.verifier_digest must be sha256:<64 hex>")
+    return {k: str(v) for k, v in e.items()}
+
+
 # --------------------------------------------------------------------------- #
 # Build + sign
 # --------------------------------------------------------------------------- #
@@ -149,10 +188,28 @@ def build_receipt(
     private_key: Ed25519PrivateKey,
     signing_key_id: str,
     level_weights: Mapping[Level, Decimal] = DEFAULT_LEVEL_WEIGHTS,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Assemble and sign a receipt from a `cybergym.BatchScore` and its context."""
+    """Assemble and sign a receipt from a `cybergym.BatchScore` and its context.
+
+    When `env` (the canonical benchmark environment — reproduce timeout, resource
+    limits, network policy, verifier image digest) is supplied, a v3 receipt is
+    produced: it pins those conditions into the signed body so a peer can confirm
+    them, not just re-derive the arithmetic. v3 is a superset of v2 and therefore
+    still requires the eligibility snapshot.
+    """
+    if env is not None and eligibility_snapshot_digest is None:
+        raise CyberGymReceiptError(
+            "a v3 receipt (pinned env) also requires eligibility_snapshot_digest"
+        )
+    if env is not None:
+        schema = RECEIPT_SCHEMA_V3
+    elif eligibility_snapshot_digest is not None:
+        schema = RECEIPT_SCHEMA_V2
+    else:
+        schema = RECEIPT_SCHEMA_V1
     body: dict[str, Any] = {
-        "schema": RECEIPT_SCHEMA_V2 if eligibility_snapshot_digest is not None else RECEIPT_SCHEMA_V1,
+        "schema": schema,
         "network": network,
         "netuid": netuid,
         "source_epoch": source_epoch,
@@ -181,6 +238,8 @@ def build_receipt(
     }
     if eligibility_snapshot_digest is not None:
         body["batch"]["eligibility_snapshot_digest"] = eligibility_snapshot_digest
+    if env is not None:
+        body["env"] = _validate_env(env)
     body["receipt_id"] = compute_receipt_id(body)
     signature = private_key.sign(canonical_bytes(body))
     body["signature"] = {
@@ -223,8 +282,13 @@ def _nonneg_int(value: Any, label: str) -> int:
 
 
 def validate_structure(receipt: Any) -> Mapping[str, Any]:
-    doc = _exact_keys(receipt, _RECEIPT_KEYS, "cybergym receipt")
-    if doc["schema"] not in (RECEIPT_SCHEMA_V1, RECEIPT_SCHEMA_V2):
+    if not isinstance(receipt, Mapping):
+        raise CyberGymReceiptError("cybergym receipt must be an object")
+    # Peek the schema so the exact-key-set matches the version (v3 adds `env`); an
+    # unknown/missing schema still fails through the standard unsupported-schema path.
+    receipt_keys = _RECEIPT_KEYS_V3 if receipt.get("schema") == RECEIPT_SCHEMA_V3 else _RECEIPT_KEYS
+    doc = _exact_keys(receipt, receipt_keys, "cybergym receipt")
+    if doc["schema"] not in (RECEIPT_SCHEMA_V1, RECEIPT_SCHEMA_V2, RECEIPT_SCHEMA_V3):
         raise CyberGymReceiptError("unsupported cybergym receipt schema")
     if len(canonical_bytes({k: v for k, v in doc.items() if k != "signature"})) > MAX_RECEIPT_BYTES:
         raise CyberGymReceiptError("receipt exceeds 256 KiB")
@@ -235,9 +299,10 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
     if last <= first:
         raise CyberGymReceiptError("valid_until_block must exceed valid_from_block")
 
+    _v2_or_v3 = doc["schema"] in (RECEIPT_SCHEMA_V2, RECEIPT_SCHEMA_V3)
     batch = _exact_keys(
         doc["batch"],
-        _BATCH_KEYS_V2 if doc["schema"] == RECEIPT_SCHEMA_V2 else _BATCH_KEYS_V1,
+        _BATCH_KEYS_V2 if _v2_or_v3 else _BATCH_KEYS_V1,
         "batch",
     )
     if not _BATCH_ID_RE.match(str(batch["batch_id"])):
@@ -246,11 +311,10 @@ def validate_structure(receipt: Any) -> Mapping[str, Any]:
         raise CyberGymReceiptError("nonce is invalid")
     if not _DIGEST_RE.match(str(batch["holdout_digest"])):
         raise CyberGymReceiptError("holdout_digest must be sha256:<64 hex>")
-    if (
-        doc["schema"] == RECEIPT_SCHEMA_V2
-        and not _DIGEST_RE.match(str(batch["eligibility_snapshot_digest"]))
-    ):
+    if _v2_or_v3 and not _DIGEST_RE.match(str(batch["eligibility_snapshot_digest"])):
         raise CyberGymReceiptError("eligibility_snapshot_digest must be sha256:<64 hex>")
+    if doc["schema"] == RECEIPT_SCHEMA_V3:
+        _validate_env(doc["env"])
     graded = _nonneg_int(batch["graded_tasks"], "graded_tasks")
 
     score = _exact_keys(doc["score"], _SCORE_KEYS, "score")
