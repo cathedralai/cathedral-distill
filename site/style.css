@@ -1,4 +1,4 @@
-/* Cathedral SN39 — shared launch-site styles.
+/* Cathedral — shared launch-site styles.
    Dark, technical, one accent. Spend the accent only on what matters. */
 
 :root {
@@ -11,9 +11,11 @@
   --ink:       #e8eaf0;
   --ink-dim:   #9aa0ad;
   --ink-faint: #646b78;
-  --accent:    #7cff6b;   /* the one accent — verified / go */
+  --accent:    #7cff6b;   /* verified / go */
   --accent-dim:#3f7d38;
-  --crash:     #ff5c57;   /* semantic, differential diagram only */
+  --compute:   #ff8a3d;   /* compute product CTA — E2B-adjacent warmth */
+  --compute-dim:#8a4518;
+  --crash:     #ff5c57;
   --spare:     #7cff6b;
   --mono: "SFMono-Regular", ui-monospace, "JetBrains Mono", "Menlo", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", system-ui, sans-serif;
@@ -31,6 +33,33 @@ body {
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
+}
+
+/* Dot grid — infra landing pages (Compute) */
+.page-compute {
+  background-color: var(--bg);
+  background-image: radial-gradient(circle at 1px 1px, rgba(255,255,255,.045) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+.page-compute .btn-primary {
+  background: var(--compute);
+  color: #1a0a00;
+}
+.page-compute .btn-primary:hover { background: #ffa260; }
+.page-compute .btn-ghost:hover { border-color: var(--compute-dim); color: var(--compute); }
+.page-compute .brand b,
+.page-compute .eyebrow,
+.page-compute h1.hero-h .hl,
+.page-compute .nav-links a.active,
+.page-compute .card .k,
+.page-compute .pill.on { color: var(--compute); }
+.page-compute .eyebrow::before { background: var(--compute); }
+.page-compute .step .n { background: var(--compute); color: #1a0a00; }
+.page-compute .yes { color: var(--compute); }
+.page-compute .hero::before {
+  background:
+    radial-gradient(680px 340px at 72% 8%, rgba(255,138,61,.12), transparent 70%),
+    radial-gradient(520px 380px at 12% 90%, rgba(255,138,61,.05), transparent 70%);
 }
 
 a { color: var(--accent); text-decoration: none; }
@@ -52,6 +81,22 @@ a:hover { text-decoration: underline; }
 .nav-links a { color: var(--ink-dim); }
 .nav-links a:hover { color: var(--ink); text-decoration: none; }
 .nav-links a.active { color: var(--accent); }
+.nav-toggle {
+  display: none;
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.nav-toggle:hover { color: var(--ink); border-color: var(--ink-faint); }
+.nav-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ---------- buttons ---------- */
 .btn {
@@ -88,6 +133,74 @@ h1.hero-h .hl { color: var(--accent); }
 .hero-sub { font-size: clamp(18px, 2.2vw, 22px); color: var(--ink-dim); max-width: 60ch; margin: 0 0 36px; }
 .hero-cta { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
 .hero-note { font-family: var(--mono); font-size: 12.5px; color: var(--ink-faint); margin-top: 26px; }
+
+/* Split hero: copy + terminal (Compute / Arena) */
+.hero-split .wrap {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 40px;
+  align-items: center;
+}
+.hero-split h1.hero-h { max-width: none; }
+.hero-copy { min-width: 0; }
+
+/* Terminal chrome — Daytona / E2B product mock */
+.terminal {
+  border: 1px solid var(--line-2);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0a0b0f;
+  box-shadow: 0 24px 64px rgba(0,0,0,.45);
+}
+.terminal-bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.terminal-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--line-2);
+}
+.terminal-dot:nth-child(1) { background: #ff5f57; }
+.terminal-dot:nth-child(2) { background: #febc2e; }
+.terminal-dot:nth-child(3) { background: #28c840; }
+.terminal-title {
+  margin-left: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  letter-spacing: .04em;
+}
+.terminal-body {
+  margin: 0;
+  padding: 18px 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--ink-dim);
+  overflow-x: auto;
+  white-space: pre;
+}
+.terminal-body .t-dim { color: var(--ink-faint); }
+.terminal-body .t-ok { color: var(--accent); }
+.page-compute .terminal-body .t-ok { color: var(--compute); }
+.terminal-body .t-warn { color: #febc2e; }
+.terminal-body .t-crash { color: var(--crash); }
+
+/* Bento — break the 3-col symmetry */
+.bento {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(3, 1fr);
+}
+.bento-wide { grid-column: span 2; }
+.bento-tall { grid-row: span 2; }
+.profile-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.code.compact { margin-top: 16px; font-size: 11.5px; padding: 14px 16px; }
+.compare td:first-child { width: 28%; }
 
 /* ---------- section scaffolding ---------- */
 section { padding: 72px 0; border-top: 1px solid var(--line); }
@@ -201,7 +314,27 @@ footer a { color: var(--ink-dim); }
 
 @media (max-width: 860px) {
   .g2, .g3, .g4 { grid-template-columns: 1fr; }
-  .nav-links { display: none; }
+  .bento { grid-template-columns: 1fr; }
+  .bento-wide, .bento-tall { grid-column: auto; grid-row: auto; }
+  .hero-split .wrap { grid-template-columns: 1fr; }
+  .hero-split { padding-top: 88px; }
+  .terminal { order: -1; }
+  .nav-toggle { display: inline-block; }
+  .nav-links {
+    display: none;
+    position: absolute;
+    top: 60px; left: 0; right: 0;
+    flex-direction: column;
+    gap: 0;
+    background: rgba(8,9,12,.96);
+    border-bottom: 1px solid var(--line);
+    padding: 8px 24px 16px;
+  }
+  .nav-links.open { display: flex; }
+  .nav-links a { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .nav-links a:last-child { border-bottom: 0; }
+  .nav { position: sticky; }
+  .nav .wrap { position: relative; flex-wrap: wrap; }
   section { padding: 52px 0; }
   .live-table { font-size: 13px; }
 }

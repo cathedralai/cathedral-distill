@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cathedral Compute — attested sandboxes for agents</title>
+<meta name="description" content="Intel TDX sealed workers with offline-verifiable receipts. One-shot jobs, persistent SSH sandboxes, and confidential GPU. API-first, like E2B or Daytona, with proof attached.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="page-compute">
+
+<nav class="nav"><div class="wrap">
+  <span class="brand">CATHEDRAL <b>COMPUTE</b></span>
+  <button type="button" class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
+  <div class="nav-links" id="site-nav">
+    <a href="index.html">Subnet</a>
+    <a href="compute.html" class="active">Compute</a>
+    <a href="arena.html">Arena</a>
+    <a href="research.html">Research</a>
+    <a href="https://cathedral.computer/docs/">API docs ↗</a>
+  </div>
+</div></nav>
+
+<header class="hero hero-split"><div class="wrap">
+  <div class="hero-copy">
+    <span class="eyebrow">Attested sandboxes · API-first</span>
+    <h1 class="hero-h">Run agent code.<br>Get a <span class="hl">receipt</span>.</h1>
+    <p class="hero-sub">Cathedral Compute is infrastructure for untrusted code: spin up Intel TDX workers, run a bounded job or keep a sealed SSH sandbox alive, and download a signed receipt you can verify offline. Isolation like E2B or Daytona. Proof they do not ship.</p>
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="https://cathedral.computer/docs/">Start free →</a>
+      <a class="btn btn-ghost" href="#profiles">Profiles</a>
+    </div>
+    <p class="hero-note">Live at cathedral.computer · one complimentary test per account · prepaid credits for production</p>
+  </div>
+  <div class="terminal" aria-label="Example worker lifecycle">
+    <div class="terminal-bar">
+      <span class="terminal-dot"></span>
+      <span class="terminal-dot"></span>
+      <span class="terminal-dot"></span>
+      <span class="terminal-title">worker · attest.v1</span>
+    </div>
+    <pre class="terminal-body"><span class="t-dim">$</span> curl -X POST cathedral.computer/v1/workers \
+    -H "Authorization: Bearer $CATHEDRAL_API_KEY" \
+    -d '{"profile":"attest.v1", ...}'
+
+<span class="t-dim">202</span>  worker_id=wkr_8f2a…  <span class="t-dim">accepted</span>
+
+<span class="t-dim">$</span> curl cathedral.computer/v1/workers/wkr_8f2a…
+<span class="t-warn">provisioning</span>  tdx_cpu · measured image pinned
+<span class="t-ok">running</span>       python -c "print(6 * 7)"  →  42
+<span class="t-ok">completed</span>     exit=0 · teardown confirmed
+
+<span class="t-dim">$</span> curl cathedral.computer/v1/receipts/rcpt_… -o receipt.json
+<span class="t-ok">receipt ready</span>  ed25519 · offline verifiable</pre>
+  </div>
+</div></header>
+
+<section id="why"><div class="wrap">
+  <div class="sec-label">Why not just another sandbox</div>
+  <h2>E2B and Daytona isolate. Cathedral isolates and attests.</h2>
+  <p class="lead">Generic sandboxes answer "did the process run?" Cathedral answers "did it run inside the measured environment we promised, with this exact workload bound into the receipt?" That is the wedge for agents handling secrets, regulated data, or work that has to be replayed by a third party.</p>
+  <div class="bento" style="margin-top:32px">
+    <div class="card bento-wide">
+      <div class="k">The difference</div>
+      <h3 style="margin-top:10px">Verified ≠ confidential</h3>
+      <p>Core-style rented GPU paths guarantee <em>correctness</em> of results, not privacy from the GPU host. Secure Sandbox (TDX CVM + optional CC-GPU) extends trust to the worker. We say which profile you are on; the receipt says what we proved.</p>
+    </div>
+    <div class="card">
+      <div class="k">attest.v1</div>
+      <h3 style="margin-top:10px">One-shot jobs</h3>
+      <p>Fresh TDX environment, bounded runtime, no egress, result-bound receipt, confirmed teardown. Pay only when execution completes.</p>
+    </div>
+    <div class="card">
+      <div class="k">custom.v1</div>
+      <h3 style="margin-top:10px">Persistent workers</h3>
+      <p>SSH into a sealed CVM. Docker inside the guest. Hourly metering after the workload is ready. You verify the quote before the first keystroke.</p>
+    </div>
+    <div class="card bento-tall">
+      <div class="k">Arena hook</div>
+      <h3 style="margin-top:10px">Solve here. Judge there.</h3>
+      <p>For SN39 miners, the solving sandbox and evaluation sandbox are never the same box. Submit from one attested worker; Cathedral replays in a fresh one. <a href="arena.html">Arena →</a></p>
+    </div>
+    <div class="card">
+      <div class="k">cc_gpu</div>
+      <h3 style="margin-top:10px">Confidential GPU</h3>
+      <p>Catalog-gated live testing on GCP G4 with NVIDIA CC mode. Fixed price per verified execution. Spot capacity; fail-closed when evidence gates are not PASS.</p>
+    </div>
+  </div>
+</div></section>
+
+<section id="profiles" style="background:var(--bg-2)"><div class="wrap">
+  <div class="sec-label">Profiles</div>
+  <h2>Pick the guarantee you need.</h2>
+  <div class="grid g2" style="margin-top:28px">
+    <div class="card profile-card">
+      <div class="profile-head"><span class="pill on">attest.v1</span><span class="faint">one-shot</span></div>
+      <h3>Run once, prove once</h3>
+      <p>Best for eval harnesses, CI checks, and agent steps that must not persist state. No reuse. Egress denied unless the profile allows it.</p>
+      <div class="code compact"><span class="c"># from cathedral.computer/docs</span>
+curl -X POST .../v1/workers \
+  -d '{"profile":"attest.v1",
+       "lifetime":{"mode":"one_shot","reuse":"forbidden"},
+       "workload":{"image":"python:3.12-slim",
+                    "command":["python","-c","..."]},
+       "network":{"egress":"none"},
+       "budget":{"max_spend_usd":1,"auto_stop":true}}'</div>
+    </div>
+    <div class="card profile-card">
+      <div class="profile-head"><span class="pill on">custom.v1</span><span class="faint">persistent</span></div>
+      <h3>Keep a sealed worker alive</h3>
+      <p>SSH public key in the request. Bounded service lifetime. Billing opens only after the requested container is running inside the CVM.</p>
+      <div class="code compact"><span class="c"># SSH host key bound into the TDX quote</span>
+curl -X POST .../v1/workers \
+  -d '{"profile":"custom.v1",
+       "ssh_public_key":"ssh-ed25519 AAAA...",
+       "lifetime":{"mode":"bounded_service",
+                    "max_runtime_minutes":60}}'</div>
+    </div>
+  </div>
+  <div class="banner build" style="margin-top:20px"><span class="tag">Preview</span><span><strong>hybrid_gpu</strong> pairs a TDX controller with a rented remote GPU. Transport is encrypted; the GPU host is trusted for plaintext execution. Separate scopes and prequoted max hourly rate. See the live <a href="https://cathedral.computer/docs/">profile catalog</a>.</span></div>
+</div></section>
+
+<section id="compare"><div class="wrap">
+  <div class="sec-label">Honest comparison</div>
+  <h2>Where we win, where we do not.</h2>
+  <div class="tbl-wrap" style="margin-top:24px">
+    <table class="compare">
+      <thead><tr><th></th><th>E2B / Daytona</th><th>Cathedral Compute</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Cold start</strong></td>
+          <td>Sub-second to low seconds</td>
+          <td>TDX commissioning adds overhead. Optimizing, not there yet.</td>
+        </tr>
+        <tr>
+          <td><strong>Agent SDK ergonomics</strong></td>
+          <td>Mature Python/TS SDKs, templates, snapshots</td>
+          <td>REST API + offline receipt verifier today. SDK is the next layer.</td>
+        </tr>
+        <tr>
+          <td><strong>Parallel fan-out</strong></td>
+          <td>Massive concurrent sandboxes</td>
+          <td>Capacity-constrained; catalog gates and 503 when full.</td>
+        </tr>
+        <tr>
+          <td><strong>Attested receipt</strong></td>
+          <td class="no">Not standard</td>
+          <td class="yes">Signed <code>cathedral_customer_receipt_v1</code>, offline verify</td>
+        </tr>
+        <tr>
+          <td><strong>Split solve / eval</strong></td>
+          <td class="no">Same box</td>
+          <td class="yes">Independent replay workspace for ranked SN39 work</td>
+        </tr>
+        <tr>
+          <td><strong>Confidential GPU</strong></td>
+          <td>Varies by provider</td>
+          <td class="yes">NVIDIA CC on G4, evidence-gated launch</td>
+        </tr>
+        <tr>
+          <td><strong>Subnet-native weight</strong></td>
+          <td class="no">No</td>
+          <td class="yes">Receipt → leaderboard → validator weight on SN39</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="faint" style="font-size:13px;margin-top:16px">We are not trying to out-Daytona Daytona on milliseconds. We are selling attested execution for workloads where proof matters: security research, regulated agents, and subnet mining.</p>
+</div></section>
+
+<section id="pricing" style="background:var(--bg-2)"><div class="wrap">
+  <div class="sec-label">Pricing</div>
+  <h2>Pay for verified execution, not mystery uptime.</h2>
+  <div class="grid g3" style="margin-top:28px">
+    <div class="card stat">
+      <div class="num">Free</div>
+      <div class="lab">One restricted one-minute test per verified account. Fixed diagnostic command. No reuse.</div>
+    </div>
+    <div class="card stat">
+      <div class="num">$0.20</div>
+      <div class="lab">Per completed TDX CPU one-shot (<code>attest.v1</code>). Reserved at accept; charged only on success. Failed CPU runs refunded.</div>
+    </div>
+    <div class="card stat">
+      <div class="num">$3.00</div>
+      <div class="lab">Per verified confidential GPU execution (up to 10 min). Includes commissioning, verification, teardown.</div>
+    </div>
+  </div>
+  <p class="muted" style="margin-top:20px;font-size:15px">Persistent workers bill hourly after ready: from $0.40/h (4 vCPU) to $4.40/h (44 vCPU). Prepaid USD credits via Stripe. Full table on <a href="https://cathedral.computer/docs/">cathedral.computer/docs</a>.</p>
+</div></section>
+
+<section id="flow"><div class="wrap">
+  <div class="sec-label">API flow</div>
+  <h2>Three calls to a verifiable result.</h2>
+  <div class="steps" style="margin-top:24px">
+    <div class="step"><div class="n"></div><div><h3>Create a scoped API key</h3><p>Dashboard at cathedral.computer. Google or email link. Keys are shown once; we store only a SHA-256 hash.</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>POST /v1/workers</h3><p>Pick a profile, set budget and lifetime, pass an idempotency key. Response is 202 with a worker ID.</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>Poll, then keep the receipt</h3><p><code>GET /v1/workers/{id}</code> until terminal. Download <code>/v1/receipts/{id}</code>. Verify offline with <code>cathedral customer-receipt verify</code>.</p></div></div>
+  </div>
+</div></section>
+
+<div class="cta-block"><div class="wrap">
+  <div class="sec-label center">Get started</div>
+  <h2>Same API the subnet uses internally.</h2>
+  <p class="lead center" style="margin:0 auto 30px">Run the free test, read the docs, or wire your agent loop against the workers API.</p>
+  <div class="hero-cta">
+    <a class="btn btn-primary" href="https://cathedral.computer/docs/">Open API docs</a>
+    <a class="btn btn-ghost" href="arena.html">Mine on SN39 →</a>
+  </div>
+</div></div>
+
+<footer><div class="wrap">
+  <span class="brand">CATHEDRAL <b>COMPUTE</b></span>
+  <span class="faint">Attested execution · cathedral.computer</span>
+  <div class="foot-links">
+    <a href="index.html">Subnet</a>
+    <a href="arena.html">Arena</a>
+    <a href="https://github.com/cathedralai/cathedral-compute">GitHub</a>
+  </div>
+</div></footer>
+
+<script>
+(function () {
+  var btn = document.querySelector('.nav-toggle');
+  var nav = document.getElementById('site-nav');
+  if (!btn || !nav) return;
+  btn.addEventListener('click', function () {
+    var open = nav.classList.toggle('open');
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+})();
+</script>
+</body>
+</html>
