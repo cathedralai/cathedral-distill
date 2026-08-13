@@ -6,8 +6,7 @@ security work on Bittensor. The through-line: **everyone else scores an
 proves it.**
 
 > Market and competitor figures below are cited to public sources. Product
-> capabilities of Cathedral itself are grounded in the repo (see
-> [POSITIONING.md](POSITIONING.md)).
+> capabilities of Cathedral itself are grounded in the repo.
 
 ---
 

@@ -2,7 +2,8 @@
 
 Ready-to-post copy for the SN39 launch. Grounded in the built mechanism; unbuilt
 pieces are flagged so nothing here over-promises. Tighten the netuid claim before
-posting (see [POSITIONING.md](POSITIONING.md)).
+posting: public subnet trackers list netuid 39 under a different project, so the
+on-chain netuid must be confirmed before any of this copy ships externally.
 
 ---
 
