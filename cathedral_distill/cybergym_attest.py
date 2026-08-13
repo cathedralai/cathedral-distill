@@ -57,6 +57,11 @@ REQUIRED_TEE = "intel_tdx"
 RECEIPT_ATTESTATION_SCHEMA = "cathedral_cybergym_receipt_attestation_v1"
 PROFILE_ATTEST_V1 = "attest.v1"
 PROFILE_PERSISTENT_ENCLAVE = "persistent_enclave"
+# The agent itself runs in the enclave (measured workload = the pinned agent + runtime), reaching ONLY
+# the official base-model providers over pinned-CA TLS. Same solve/miner/nonce binding as
+# persistent_enclave PLUS a verified restricted-egress policy — the runtime enforcement of the
+# provider allowlist that closes the answer-oracle (docs/AGENT_ENCLAVE_EGRESS.md in the backend repo).
+PROFILE_AGENT_ENCLAVE = "agent_enclave"
 
 # The canonical form of a CathedralReceiptPolicy's verdict-deciding content, for the
 # epoch attestation-posture digest. Mirrors attestation.attestation_policy_manifest:
@@ -65,7 +70,8 @@ PROFILE_PERSISTENT_ENCLAVE = "persistent_enclave"
 # closed for AttestationPolicy.
 RECEIPT_POLICY_SCHEMA = "cathedral_cybergym_receipt_policy_v1"
 _RECEIPT_POLICY_FIELDS = frozenset(
-    {"quote_verifier", "expected_workload_sha256", "receipt_verifier", "max_age_seconds"}
+    {"quote_verifier", "expected_workload_sha256", "receipt_verifier", "max_age_seconds",
+     "expected_egress_allowlist", "require_tls_pinning"}
 )
 
 
@@ -176,6 +182,11 @@ class CathedralReceiptPolicy:
     expected_workload_sha256: str | None = None
     receipt_verifier: ReceiptVerifier | None = None
     max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS
+    # agent_enclave: the EXACT set of egress hosts the attested enclave may reach (the official
+    # base-model providers), and whether the enclave must pin their CA roots. This is the load-bearing
+    # anti-oracle pin for that profile — posture-bound below so a resume cannot widen it.
+    expected_egress_allowlist: frozenset[str] | None = None
+    require_tls_pinning: bool = True
 
 
 def cathedral_receipt_policy_manifest(policy: CathedralReceiptPolicy) -> dict[str, Any]:
@@ -217,6 +228,10 @@ def cathedral_receipt_policy_manifest(policy: CathedralReceiptPolicy) -> dict[st
         "max_age_seconds": int(max_age),
         "quote_verifier": policy.quote_verifier is not None,
         "receipt_verifier": policy.receipt_verifier is not None,
+        # the agent_enclave egress firewall is verdict-deciding: a resume that widened the allowlist
+        # (or dropped TLS pinning) would reopen the answer-oracle, so both are bound into the digest.
+        "expected_egress_allowlist": sorted(str(h).lower() for h in (policy.expected_egress_allowlist or ())),
+        "require_tls_pinning": bool(policy.require_tls_pinning),
     }
 
 
@@ -227,6 +242,33 @@ def cathedral_receipt_policy_digest(policy: CathedralReceiptPolicy | None) -> st
     return "sha256:" + hashlib.sha256(
         canonical_bytes(cathedral_receipt_policy_manifest(policy))
     ).hexdigest()
+
+
+def _verify_agent_egress(task_policy: Mapping[str, Any], *, expected_hosts, require_tls_pinning: bool) -> None:
+    """The agent-in-enclave egress firewall, verified from the receipt's task_policy. Fails closed.
+
+    The RUNTIME half of the base-url allowlist: it proves the agent, inside the enclave, could reach
+    ONLY the approved model hosts and had no out-of-band channel to a stored answer. Distinct from
+    `attest.v1`'s `egress == "none"` (a no-network differential workload) — a reasoning agent MUST
+    reach the model, so egress is 'restricted' to EXACTLY the approved hosts. The approved set comes
+    from the policy, so distill needs no dependency on the backend's provider table.
+    """
+    expected = {str(h).lower() for h in (expected_hosts or ())}
+    if not expected:
+        raise CyberGymAttestError("no approved egress hosts; refusing an unconstrained agent enclave")
+    egress = str(task_policy.get("egress", ""))
+    if egress != "restricted":
+        raise CyberGymAttestError(
+            f"agent-enclave egress must be 'restricted' to the provider allowlist, got {egress!r}: "
+            "'none' cannot serve a reasoning agent and 'any'/absent reopens the self-hosted oracle")
+    allow = task_policy.get("egress_allowlist")
+    if not isinstance(allow, (list, tuple)) or {str(h).lower() for h in allow} != expected:
+        raise CyberGymAttestError(
+            "agent-enclave egress_allowlist is not EXACTLY the approved provider hosts "
+            "(a broader allowlist reopens the answer-oracle)")
+    if require_tls_pinning and task_policy.get("tls_pinning") is not True:
+        raise CyberGymAttestError(
+            "agent-enclave must pin provider CA roots inside the enclave (tls_pinning=true)")
 
 
 def verify_submission_receipt(
@@ -282,6 +324,31 @@ def verify_submission_receipt(
             now=now, max_age_seconds=policy.max_age_seconds,
             receipt_verifier=policy.receipt_verifier,
         )
+    elif profile == PROFILE_AGENT_ENCLAVE:
+        # The AGENT ran in the enclave: same solve/miner/nonce binding as persistent_enclave, PLUS a
+        # verified restricted-egress firewall so the agent could not fetch a looked-up answer.
+        if not policy.expected_workload_sha256:
+            raise CyberGymAttestError(
+                "agent-enclave attestation requires an approved workload pin (expected_workload_sha256)")
+        if not policy.expected_egress_allowlist:
+            raise CyberGymAttestError(
+                "agent-enclave attestation requires an approved egress allowlist "
+                "(expected_egress_allowlist); without it the agent could reach a self-hosted "
+                "answer-oracle and the profile is no stronger than persistent_enclave")
+        _verify_agent_egress(receipt.get("task_policy", {}),
+                             expected_hosts=policy.expected_egress_allowlist,
+                             require_tls_pinning=policy.require_tls_pinning)
+        try:
+            result_bytes = base64.b64decode(str(payload.get("result_b64", "")), validate=True)
+        except (ValueError, TypeError) as exc:
+            raise CyberGymAttestError(f"enclave result_b64 is not valid base64: {exc}") from exc
+        result = verify_persistent_enclave_attestation(
+            receipt, task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id,
+            miner_hotkey=miner_hotkey, nonce=nonce, result_bytes=result_bytes,
+            expected_workload_sha256=policy.expected_workload_sha256,
+            now=now, max_age_seconds=policy.max_age_seconds,
+            receipt_verifier=policy.receipt_verifier,
+        )
     else:
         raise CyberGymAttestError(f"unknown submission attestation profile {profile!r}")
 
@@ -298,6 +365,7 @@ __all__ = [
     "RECEIPT_ATTESTATION_SCHEMA",
     "PROFILE_ATTEST_V1",
     "PROFILE_PERSISTENT_ENCLAVE",
+    "PROFILE_AGENT_ENCLAVE",
     "RECEIPT_POLICY_SCHEMA",
     "CyberGymAttestError",
     "CathedralReceiptPolicy",
