@@ -2,7 +2,7 @@
 
 The claim "N tests" appears in the README, two docs and two site pages. Nothing
 checked it, and it drifted into **three different values describing one suite** —
-670 in `docs/LAUNCH_COPY.md` and `docs/POSITIONING.md`, 678 in `README.md`, 721 on
+670 in `docs/LAUNCH_COPY.md`, 678 in `README.md`, 721 on
 the site — each written at a different moment and then left. A number that nobody
 verifies is worse than no number: it is a specific, checkable claim about the
 project that happens to be false, in the files a newcomer reads first.
@@ -50,7 +50,6 @@ CLAIM = re.compile(r"(\d[\d,]*)\s*(?:passing\s+)?(tests|passed)\b", re.IGNORECAS
 DOCUMENTED = (
     "README.md",
     "docs/LAUNCH_COPY.md",
-    "docs/POSITIONING.md",
     "site/index.html",
     "site/research.html",
 )
@@ -161,7 +160,7 @@ def test_reference_corpus_claim_matches_the_shipped_subset():
     from cathedral_distill.cybergym_repro import REPRO_SUBSET
 
     claim = f"{len(REPRO_SUBSET)} static ARVO tasks"
-    for relative in ("README.md", "docs/POSITIONING.md"):
+    for relative in ("README.md",):
         text = " ".join((ROOT / relative).read_text(encoding="utf-8").split())
         assert claim in text, f"{relative} must describe the shipped reference slice"
         assert "10-task dual-family" not in text

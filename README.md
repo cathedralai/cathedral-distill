@@ -247,8 +247,6 @@ tested:
 
 ## Launch and positioning
 
-- **[Positioning](docs/POSITIONING.md)**: what SN39 is, why verified discovery,
-  the miner contract, built versus to-build.
 - **[Competitive landscape](docs/COMPETITIVE_LANDSCAPE.md)**: versus Snyk,
   Semgrep, GitHub Advanced Security, Bitsec. Alert versus proof, with sources.
 - **[Launch copy](docs/LAUNCH_COPY.md)**: X thread, Discord announcement, FAQ.

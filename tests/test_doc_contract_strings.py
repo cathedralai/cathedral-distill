@@ -38,7 +38,6 @@ DOCS = sorted(
 
 REWARD_ACTIVATION_DOCS = (
     ROOT / "README.md",
-    ROOT / "docs" / "POSITIONING.md",
     ROOT / "docs" / "MINING.md",
 )
 
