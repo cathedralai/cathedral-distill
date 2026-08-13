@@ -19,10 +19,12 @@
 
 <nav class="nav"><div class="wrap">
   <span class="brand">CATHEDRAL <b>SN39</b></span>
-  <div class="nav-links">
+  <button type="button" class="nav-toggle" aria-expanded="false" aria-controls="site-nav">Menu</button>
+  <div class="nav-links" id="site-nav">
     <a href="index.html" class="active">Subnet</a>
-    <a href="research.html">Research</a>
+    <a href="compute.html">Compute</a>
     <a href="arena.html">Arena</a>
+    <a href="research.html">Research</a>
     <a href="https://github.com/cathedralai/cathedral-distill">GitHub ↗</a>
   </div>
 </div></nav>
@@ -34,6 +36,7 @@
   <p class="hero-sub">Miners' models produce proof-of-concept exploits for already-patched, publicly-disclosed bugs. A validator <em>runs</em> each PoC to score it — no judge model, no self-reported number. The result is a physical fact.</p>
   <div class="hero-cta">
     <a class="btn btn-primary" href="https://github.com/cathedralai/cathedral-distill">Read the docs</a>
+    <a class="btn btn-ghost" href="compute.html">Compute API →</a>
     <a class="btn btn-ghost" href="arena.html">Mine on SN39 →</a>
   </div>
   <p class="hero-note">Mechanism built &amp; tested — 1175 tests, hardware-free. Corpus, transport &amp; attested verification: integration in progress.</p>
@@ -99,7 +102,7 @@ score = Σ <span class="a">weight[level]</span> × solved
   level2  <span class="a">2×</span>
   level3  <span class="a">1×</span>   patch diff supplied  — weaponise a known fix</div>
   <div class="grid g3">
-    <div class="card"><div class="k">up to +30%</div><h3 style="margin-top:8px">Trace bonus</h3><p>A real, licensed reasoning trace turns your work into training data and pays for it. Structural, model-free quality floor — padded traces earn nothing.</p></div>
+    <div class="card"><div class="k">corpus gate</div><h3 style="margin-top:8px">Reasoning trace</h3><p>A real, licensed trace turns a verified solve into trainable corpus data. Structural quality floor — padded traces never enter. A payout multiplier is not wired today.</p></div>
     <div class="card"><div class="k">10% floor</div><h3 style="margin-top:8px">Burn discipline</h3><p>King-of-the-hill emission with a contractual burn floor. A stale or contaminated crown burns rather than pays.</p></div>
     <div class="card"><div class="k">0, always</div><h3 style="margin-top:8px">What earns a zero</h3><p>A PoC that crashes both builds, an off-batch submission, a model other than the one you committed, or a padded/unlicensed trace.</p></div>
   </div>
@@ -199,12 +202,24 @@ score = Σ <span class="a">weight[level]</span> × solved
   <span class="brand">CATHEDRAL <b>SN39</b></span>
   <span class="faint">Authorized security research · targets are patched &amp; disclosed</span>
   <div class="foot-links">
+    <a href="compute.html">Compute</a>
     <a href="research.html">Research</a>
     <a href="arena.html">Arena</a>
     <a href="https://github.com/cathedralai/cathedral-distill">GitHub</a>
   </div>
 </div></footer>
 
+<script>
+(function () {
+  var btn = document.querySelector('.nav-toggle');
+  var nav = document.getElementById('site-nav');
+  if (!btn || !nav) return;
+  btn.addEventListener('click', function () {
+    var open = nav.classList.toggle('open');
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+})();
+</script>
 <script>
 /* Live status. No dependencies, and nothing happens unless an endpoint is set:
    the <meta> in <head>, or ?status=<url> for a local validator. Every value is
