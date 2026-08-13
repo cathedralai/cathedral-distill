@@ -332,3 +332,14 @@ def test_observation_fields_are_size_capped_not_a_padding_surface():
     doc = _json.loads(blob)
     assert len(doc["steps"][0]["result"]["stdout"]) <= 64 * 1024 + 64        # stdout capped
     assert doc["steps"][0]["args"] == {"_truncated_bytes": len(_json.dumps({"pad": big}, separators=(",", ":")))}
+
+
+def test_build_execution_log_never_raises_on_a_non_json_native_arg():
+    """A str-coercible-but-not-JSON-native arg (Decimal/set/bytes) must serialize, not TypeError:
+    the size pre-check and the final dump must agree (both go through default=str)."""
+    from decimal import Decimal
+    blob = s1.build_execution_log(
+        task_id="arvo:1", terminal_reason=s1.EXIT_NO_OUTPUT,
+        steps=[{"seq": 0, "action": "run", "args": {"budget": Decimal("1.5"), "tags": {"a", "b"}}}])
+    doc = _json.loads(blob)  # round-trips cleanly
+    assert doc["steps"][0]["args"]["budget"] == "1.5"  # stringified, not exploded

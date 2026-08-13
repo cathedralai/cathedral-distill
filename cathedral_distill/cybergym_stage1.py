@@ -185,8 +185,11 @@ def build_execution_log(
             enc = json.dumps(raw_args, sort_keys=True, separators=(",", ":"),
                              ensure_ascii=True, default=str)
             # bound the serialised args: legit tool arguments are small; anything padded to bloat the
-            # log (or bury a narrative) is replaced by a marker rather than stored verbatim.
-            args: Any = raw_args if len(enc) <= _MAX_ARGS_BYTES else {"_truncated_bytes": len(enc)}
+            # log (or bury a narrative) is replaced by a marker rather than stored verbatim. Keep the
+            # value by round-tripping through the SAME default=str encoding, so it is JSON-native and
+            # the final document dump (which has no default=) can never raise on a str-coercible-but-
+            # not-JSON-native arg (bytes/Decimal/set/datetime) that slipped past this size gate.
+            args: Any = json.loads(enc) if len(enc) <= _MAX_ARGS_BYTES else {"_truncated_bytes": len(enc)}
         else:
             args = _cap(str(raw_args if raw_args is not None else ""), _MAX_ARGS_BYTES)
         norm_steps.append({
@@ -248,6 +251,12 @@ ArtifactProvider = Callable[[str], bytes]
 # retained exactly like one that solved (distill#142 / backend#3). The backend binds this to
 # ``AgentStore.store_log(round, miner, task, ...)``; failures are the most useful rows and must
 # never be silently dropped.
+#
+# CONTRACT: the sink MUST fail SOFT — it must not raise. It is called outside the per-task crash
+# isolation, so a raise aborts the whole batch (loudly, never silently). That is intentional for a
+# genuine storage failure (e.g. the disk is full: continuing to grade while unable to persist is
+# pointless), NOT something a size/format issue should ever trigger — ``store_log`` truncates-and-marks
+# rather than raising, exactly so one oversize log never aborts a grading run.
 LogSink = Callable[[str, bytes], None]
 
 

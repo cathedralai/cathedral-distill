@@ -56,7 +56,7 @@ The exploits aren't the product. The verified dataset is.
 
 **7/**
 Status: the mechanism, the real ARVO/OSS-Fuzz backend, and Intel-TDX attested
-verification are built and tested (1184 tests) — proven on real bugs,
+verification are built and tested (1185 tests) — proven on real bugs,
 including a real ARVO bug solved inside a TDX enclave. The full corpus at scale and
 the on-chain weight flip are the remaining work — in the open, documented.
 
@@ -90,7 +90,7 @@ The validator runs it — that's the whole score. No judge model, no opinion.
   there.
 
 **Status:** mechanism, real ARVO/OSS-Fuzz backend, and Intel-TDX attestation built
-and tested (1184 tests), proven on real bugs. Live participation still needs the full
+and tested (1185 tests), proven on real bugs. Live participation still needs the full
 corpus at scale + the on-chain weight-registration flip — integration in progress,
 tracked openly.
 
@@ -149,7 +149,7 @@ burns rather than pays. Contractual 10% burn floor.
 
 **Is it built?**
 The mechanism, the real ARVO/OSS-Fuzz backend, and Intel-TDX attested verification
-are — 1184 tests, proven on real bugs (including a real ARVO bug solved
+are — 1185 tests, proven on real bugs (including a real ARVO bug solved
 inside a TDX enclave). The full corpus at scale (~130 GB+) and a Bittensor axon are
 the remaining integration work, tracked openly. It runs end-to-end as a service.
 
