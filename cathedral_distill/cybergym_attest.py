@@ -28,6 +28,7 @@ from __future__ import annotations
 import base64
 import dataclasses
 import hashlib
+import hmac
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
@@ -71,7 +72,7 @@ PROFILE_AGENT_ENCLAVE = "agent_enclave"
 RECEIPT_POLICY_SCHEMA = "cathedral_cybergym_receipt_policy_v1"
 _RECEIPT_POLICY_FIELDS = frozenset(
     {"quote_verifier", "expected_workload_sha256", "receipt_verifier", "max_age_seconds",
-     "expected_egress_allowlist", "require_tls_pinning"}
+     "expected_egress_allowlist", "require_tls_pinning", "require_report_data_nonce"}
 )
 
 
@@ -187,6 +188,12 @@ class CathedralReceiptPolicy:
     # anti-oracle pin for that profile — posture-bound below so a resume cannot widen it.
     expected_egress_allowlist: frozenset[str] | None = None
     require_tls_pinning: bool = True
+    # When set, the receipt must prove its report_data is HARDWARE-bound to the dispatch nonce:
+    # `nonce_sha256 == sha256(ascii(nonce))` AND `report_data_match` (Cathedral verified the TDX quote's
+    # report_data[0:32] == sha256(ascii(nonce)||ascii(e2e_pubkey_b64))). This moves the nonce binding
+    # off the miner-supplied result envelope onto the enclave quote, so a receipt cannot be replayed
+    # for another dispatch. Posture-bound: a resume dropping it reopens cross-dispatch replay.
+    require_report_data_nonce: bool = False
 
 
 def cathedral_receipt_policy_manifest(policy: CathedralReceiptPolicy) -> dict[str, Any]:
@@ -232,6 +239,8 @@ def cathedral_receipt_policy_manifest(policy: CathedralReceiptPolicy) -> dict[st
         # (or dropped TLS pinning) would reopen the answer-oracle, so both are bound into the digest.
         "expected_egress_allowlist": sorted(str(h).lower() for h in (policy.expected_egress_allowlist or ())),
         "require_tls_pinning": bool(policy.require_tls_pinning),
+        # verdict-deciding: dropping it reopens cross-dispatch receipt replay.
+        "require_report_data_nonce": bool(policy.require_report_data_nonce),
     }
 
 
@@ -271,6 +280,36 @@ def _verify_agent_egress(task_policy: Mapping[str, Any], *, expected_hosts, requ
             "agent-enclave must pin provider CA roots inside the enclave (tls_pinning=true)")
 
 
+def _verify_report_data_nonce(receipt: Mapping[str, Any], *, nonce: str) -> None:
+    """Require the receipt's report_data to be HARDWARE-bound to THIS dispatch nonce. Fails closed.
+
+    Cathedral's `attest.v1` composes `report_data[0:32] = sha256(ascii(nonce_hex) || ascii(
+    e2e_pubkey_b64))` from the caller-supplied `nonce`, records `nonce_sha256 = sha256(ascii(nonce))`,
+    and sets `report_data_match` once it has verified the TDX quote carries that report_data. So a
+    receipt minted for the dispatch nonce proves — in the enclave quote, not the miner-supplied result
+    envelope — that it belongs to this dispatch, and cannot be replayed for another one. Both must
+    hold: `nonce_sha256 == sha256(ascii(nonce))` (the declared nonce IS this dispatch's) and
+    `report_data_match is True` (the quote actually carried it).
+    """
+    expected = hashlib.sha256(str(nonce).encode("utf-8")).hexdigest()
+    got = str(receipt.get("nonce_sha256", "")).lower()
+    # Validate the shape BEFORE compare_digest: a non-hex (e.g. non-ASCII) attacker-controlled value
+    # makes hmac.compare_digest raise TypeError, which would escape this verifier's raise-CyberGym
+    # AttestError contract and crash an intake loop. Reject it cleanly (fails closed) instead.
+    if len(got) != 64 or any(c not in "0123456789abcdef" for c in got):
+        raise CyberGymAttestError(
+            "receipt nonce_sha256 is not a 64-char hex digest — the enclave quote's report_data "
+            "carries no valid dispatch-nonce binding")
+    if not hmac.compare_digest(got, expected):
+        raise CyberGymAttestError(
+            "receipt nonce_sha256 is not sha256(ascii(dispatch nonce)) — the enclave quote's "
+            f"report_data is not bound to this dispatch ({got[:16]}… != {expected[:16]}…)")
+    if receipt.get("report_data_match") is not True:
+        raise CyberGymAttestError(
+            "receipt report_data_match is not true — Cathedral did not verify the quote's report_data "
+            "binds this nonce; send e2e_pubkey_b64 + nonce at attest.v1 mint time")
+
+
 def verify_submission_receipt(
     payload: Mapping[str, Any],
     *,
@@ -302,6 +341,13 @@ def verify_submission_receipt(
         raise CyberGymAttestError("submission receipt attestation carries no receipt")
 
     if profile == PROFILE_ATTEST_V1:
+        # attest.v1 binds only (task, poc, trace) — no miner, no nonce. Refuse the downgrade when the
+        # policy demands the dispatch-nonce hardware binding, or it would be satisfied vacuously and
+        # the cross-dispatch replay require_report_data_nonce closes would stay open.
+        if policy.require_report_data_nonce:
+            raise CyberGymAttestError(
+                "attest.v1 carries no dispatch-nonce report_data binding; it is refused when the "
+                "policy requires it (require_report_data_nonce) — use persistent_enclave/agent_enclave")
         result = verify_cathedral_attestation(
             receipt, task_id=task_id, poc_sha256=poc_sha256, trace_id=trace_id,
             now=now, max_age_seconds=policy.max_age_seconds,
@@ -313,6 +359,8 @@ def verify_submission_receipt(
                 "persistent-enclave attestation requires an approved workload pin "
                 "(expected_workload_sha256); without it any workload could self-sign"
             )
+        if policy.require_report_data_nonce:
+            _verify_report_data_nonce(receipt, nonce=nonce)
         try:
             result_bytes = base64.b64decode(str(payload.get("result_b64", "")), validate=True)
         except (ValueError, TypeError) as exc:
@@ -335,9 +383,18 @@ def verify_submission_receipt(
                 "agent-enclave attestation requires an approved egress allowlist "
                 "(expected_egress_allowlist); without it the agent could reach a self-hosted "
                 "answer-oracle and the profile is no stronger than persistent_enclave")
+        if policy.receipt_verifier is None:
+            # The egress firewall rides in the receipt's task_policy. That is only trustworthy when
+            # Cathedral's signature covers it — a trusted-issuer path (no receipt_verifier) would let a
+            # miner run with egress='any' and swap the plaintext task_policy to look 'restricted'.
+            raise CyberGymAttestError(
+                "agent-enclave requires trustless receipt verification (receipt_verifier): the egress "
+                "policy is only trustworthy when Cathedral's signature covers the receipt")
         _verify_agent_egress(receipt.get("task_policy", {}),
                              expected_hosts=policy.expected_egress_allowlist,
                              require_tls_pinning=policy.require_tls_pinning)
+        if policy.require_report_data_nonce:
+            _verify_report_data_nonce(receipt, nonce=nonce)
         try:
             result_bytes = base64.b64decode(str(payload.get("result_b64", "")), validate=True)
         except (ValueError, TypeError) as exc:
