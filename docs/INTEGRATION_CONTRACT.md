@@ -23,28 +23,48 @@ a verified result to the same contribution tuple:
 
 `work_units` is a canonical decimal string (no floats).
 
-> **Correction (2026-07-29): this is only true for two of the three lanes.** An
-> earlier version of this line claimed `work_units` is "derived by the validator,
-> never a number the miner or signer asserts". That holds for **Distill** (the
-> verifier requires `work_units == evaluation.passed_items`, so an inflated number
-> is a `FAIL`) and for **CyberGym** (units are re-derived from
-> `per_level_solved x level_weights` by the validator that scored the batch). It
-> does **not** hold for **Compute**: `compute_receipt` validates `work_units` as a
-> canonical decimal and forwards it unchanged into normalization, so whoever holds
-> the anchored signing key sets the number, and no quantity in the receipt body
-> (`challenge_id`, `manifest_digest`, `result_digest`, `status`) lets a validator
-> re-derive the work to check it against. The only bound today is the decimal
-> grammar (at most 30 integer digits and 12 decimal places, so the supremum is
-> `999999999999999999999999999999.999999999999`; a literal `10^30` has 31 digits and
-> is refused), which is input sanity, not a work bound: one receipt at that limit
-> takes essentially the whole Compute lane after normalization.
-> `tests/test_launch_surface.py` pins this behaviour as a documented gap.
+`work_units` is derived by the validator, never a number the miner or signer
+asserts. This now holds for **every** lane:
+
+- **Distill** — the verifier requires `work_units == evaluation.passed_items`.
+- **CyberGym** — units are re-derived from `per_level_solved x level_weights`
+  (`cybergym_protocol.derived_work_units`).
+- **Compute** — the signed receipt commits to the SHA-256 digests of a SAT work
+  item and result, and the `cathedral_compute_work_evidence_v1` sidecar
+  (`compute_work_evidence.py`) carries those exact canonical bytes bound to one
+  receipt id. `integrated_feed.verify_lane_receipt` replays them for every
+  `KIND_COMPUTE_CPU` / `KIND_COMPUTE_GPU` receipt: the SAT assignment must
+  satisfy every clause, and the signed units must equal the `sat_work_units_v1`
+  re-derivation. A correctly signed inflated claim is a `FAIL`, not a lane
+  takeover. The sidecar is mandatory; the signed number alone is never
+  creditable.
+
+> **Supersedes the 2026-07-29 correction.** That note recorded a real gap: at the
+> time `compute_receipt` shape-checked `work_units` as a canonical decimal and
+> forwarded it unchanged, so the anchored signer set the magnitude and one receipt
+> at the decimal supremum could take essentially the whole Compute lane. It also
+> concluded that closing the gap was an owner decision on the signed receipt
+> contract rather than something this repo could fix locally.
 >
-> Closing it is an **owner decision on the signed receipt contract**, not something
-> this repo can fix locally: either the issuer declares a per-challenge maximum (or
-> a re-derivable quantity) in the receipt body, or the operator accepts that the
-> Compute signer is trusted for the magnitude of its own claim. Inventing a cap here
-> would be inventing economics.
+> That gap is **closed**, and it was closed here. `compute_work_evidence.py`
+> (added in `266f7d8`) is the transport companion the note asked for: digests
+> alone cannot show that signed units were derived, so the sidecar supplies the
+> committed bytes and the validator derives the only creditable value itself. The
+> verifier is deliberately self-contained and mirrors Compute's
+> `sat_work_units_v1` verbatim rather than importing the Compute runtime, so
+> installing a package never becomes an unreviewed part of the security boundary.
+> A rule change requires a new evidence schema, not a reinterpretation.
+>
+> `tests/test_launch_surface.py` no longer pins a gap; it pins the fix.
+> `test_signed_compute_unit_inflation_fails_replayed_work_evidence` asserts that a
+> receipt claiming `"9" * 30` units `FAIL`s with `independently derived` in the
+> detail, while an honest receipt `PASS`es.
+>
+> Producer side, for cross-reference: `cathedral/lanes/sat.py:derived_work_units`
+> is the single versioned rule, and `cathedral/workproof.py` rejects any receipt
+> whose signed units differ from its own replay, with the message *"a signer-only
+> assertion never earns"*. Producer and independent replayer call the same rule, so
+> what the producer signs is exactly what a validator re-derives.
 
 | Lane id (example)            | Receipt schema                       | Module                        |
 |------------------------------|--------------------------------------|-------------------------------|
