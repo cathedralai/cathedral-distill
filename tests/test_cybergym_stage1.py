@@ -353,3 +353,7 @@ def test_execution_log_carries_the_declared_model_when_supplied():
     assert with_model["model"] == "deepseek-v4-pro"
     default = _json.loads(s1.build_execution_log(task_id="arvo:1", terminal_reason=s1.EXIT_SOLVED, steps=[]))
     assert default["model"] == ""
+    # capped like every other field so it can't be a padding vector
+    capped = _json.loads(s1.build_execution_log(
+        task_id="arvo:1", terminal_reason=s1.EXIT_SOLVED, steps=[], model="x" * 5000))
+    assert len(capped["model"]) == s1._MAX_MODEL_LEN

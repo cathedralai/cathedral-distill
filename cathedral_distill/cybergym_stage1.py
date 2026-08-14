@@ -44,6 +44,7 @@ from typing import Any, Callable, Mapping, Sequence
 # and the serialised args are bounded, and there is no free-text reasoning field at all.
 _MAX_FIELD_BYTES = 64 * 1024
 _MAX_ARGS_BYTES = 16 * 1024
+_MAX_MODEL_LEN = 128  # a model id is short; cap it like every other field so it can't be padded
 
 
 def _cap(s: str, n: int) -> str:
@@ -210,9 +211,10 @@ def build_execution_log(
         "task_family": task_family(task_id),
         "terminal_reason": str(terminal_reason),
         "duration_ms": (int(duration_ms) if duration_ms is not None else None),
-        # the miner's declared, registration-signed model (backend provenance); "" until the caller
-        # supplies it — an execution record can then say WHICH model produced this trajectory (#143)
-        "model": str(model),
+        # the DECLARED model the caller supplies (from the backend's registration provenance); "" if
+        # absent. Capped like every other field so it can't be a padding vector; NOT validated or
+        # attested here — attribution is the backend's job, this builder only records what it is given.
+        "model": str(model)[:_MAX_MODEL_LEN],
         "steps": norm_steps,
     }
     return json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
