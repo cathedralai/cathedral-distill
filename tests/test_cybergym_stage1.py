@@ -343,3 +343,13 @@ def test_build_execution_log_never_raises_on_a_non_json_native_arg():
         steps=[{"seq": 0, "action": "run", "args": {"budget": Decimal("1.5"), "tags": {"a", "b"}}}])
     doc = _json.loads(blob)  # round-trips cleanly
     assert doc["steps"][0]["args"]["budget"] == "1.5"  # stringified, not exploded
+
+
+def test_execution_log_carries_the_declared_model_when_supplied():
+    """Schema readiness for V1 provenance: the log records WHICH model produced the trajectory
+    (the miner's registration-signed model), and defaults to '' so existing callers are unaffected."""
+    with_model = _json.loads(s1.build_execution_log(
+        task_id="arvo:1", terminal_reason=s1.EXIT_SOLVED, steps=[], model="deepseek-v4-pro"))
+    assert with_model["model"] == "deepseek-v4-pro"
+    default = _json.loads(s1.build_execution_log(task_id="arvo:1", terminal_reason=s1.EXIT_SOLVED, steps=[]))
+    assert default["model"] == ""

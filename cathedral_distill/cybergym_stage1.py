@@ -151,7 +151,7 @@ def task_family(task_id: str) -> str:
 
 def build_execution_log(
     *, task_id: str, terminal_reason: str, steps: Sequence[Mapping[str, Any]],
-    duration_ms: int | None = None,
+    duration_ms: int | None = None, model: str = "",
 ) -> bytes:
     """Canonical bytes for one Stage-1 run's EXECUTION LOG (``EXECUTION_LOG_SCHEMA``).
 
@@ -210,6 +210,9 @@ def build_execution_log(
         "task_family": task_family(task_id),
         "terminal_reason": str(terminal_reason),
         "duration_ms": (int(duration_ms) if duration_ms is not None else None),
+        # the miner's declared, registration-signed model (backend provenance); "" until the caller
+        # supplies it — an execution record can then say WHICH model produced this trajectory (#143)
+        "model": str(model),
         "steps": norm_steps,
     }
     return json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
