@@ -28,6 +28,7 @@ unknown step keys, so a runner cannot smuggle a narrative field back in.
   "schema": "cathedral_stage1_execution_log_v1",
   "task_id": "arvo:900001",
   "task_family": "arvo",              // id prefix, so a corpus can group by domain (#143)
+  "model": "deepseek-v4-pro",         // the miner's registration-signed model (backend provenance); "" until supplied
   "terminal_reason": "no_output",     // solved | no_output | timeout | crash
   "duration_ms": 4213,
   "steps": [
