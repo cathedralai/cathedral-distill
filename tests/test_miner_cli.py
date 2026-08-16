@@ -48,6 +48,9 @@ def test_wire_messages_are_byte_identical_to_the_backend():
         assert mc.register_message(*args) == be.register_message(*args)
     assert mc.task_message("5M", 7) == be.task_message("5M", 7)
     assert mc.submit_message("b", "t", "5M", "sha256:p") == be.submit_message("b", "t", "5M", "sha256:p")
+    assert mc.agent_message("5M", 7) == be.agent_message("5M", 7)
+    assert (mc.agent_bundle_message("finney", 39, 7, "5M", "sha256:aa")
+            == be.agent_bundle_message("finney", 39, 7, "5M", "sha256:aa"))
 
 
 def test_oversize_agent_is_rejected_before_any_upload(tmp_path):
@@ -91,3 +94,97 @@ def test_dotenv_loads_without_overriding(monkeypatch, tmp_path):
     import os
     assert os.environ["MINER_HOTKEY"] == "already-set"          # not overridden
     assert os.environ["CYBERGYM_DISPATCH_URL"] == "http://x"    # loaded
+
+
+def _signed_agent_response(bundle=b"def solve_tasks(t):\n    return []\n", *, network="finney",
+                           netuid=39, round_id=7, miner="5M"):
+    """Build a genuine /v1/agent response: an Ed25519 key signs the round-bound bundle message."""
+    import base64
+    import hashlib
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    key = Ed25519PrivateKey.generate()
+    digest = "sha256:" + hashlib.sha256(bundle).hexdigest()
+    msg = mc.agent_bundle_message(network, netuid, round_id, miner, digest)
+    return {
+        "miner_hotkey": miner, "harness_digest": digest, "network": network, "netuid": netuid,
+        "round_id": round_id, "harness_bundle": base64.b64encode(bundle).decode(),
+        "backend_signature": key.sign(msg).hex(),
+        "public_key_base64": base64.b64encode(key.public_key().public_bytes_raw()).decode(),
+    }
+
+
+def _mc_verify(resp, trusted=None, expect_round=None, expect_miner=None):
+    return mc._verify_signed_agent(
+        resp, trusted if trusted is not None else resp["public_key_base64"],
+        expect_round=expect_round if expect_round is not None else resp["round_id"],
+        expect_miner=expect_miner if expect_miner is not None else resp["miner_hotkey"])
+
+
+def test_verify_signed_agent_accepts_a_valid_response():
+    pytest.importorskip("cryptography")
+    blob = _mc_verify(_signed_agent_response())
+    assert blob.startswith(b"def solve_tasks")               # returns the raw bundle bytes
+
+
+def test_verify_signed_agent_rejects_a_tampered_bundle():
+    pytest.importorskip("cryptography")
+    import base64
+    resp = _signed_agent_response()
+    resp["harness_bundle"] = base64.b64encode(b"def solve_tasks(t):\n    return [1]\n").decode()
+    with pytest.raises(mc.MinerCliError):                     # digest no longer matches
+        _mc_verify(resp)
+
+
+def test_verify_signed_agent_rejects_a_bad_signature():
+    pytest.importorskip("cryptography")
+    resp = _signed_agent_response()
+    resp["backend_signature"] = "00" * 64                    # wrong signature
+    with pytest.raises(mc.MinerCliError):
+        _mc_verify(resp)
+
+
+def test_verify_signed_agent_rejects_a_substituted_pubkey():
+    """A genuinely self-consistent artifact whose key is NOT the trusted producer key is refused —
+    verification is anchored to the trusted key, not the artifact's own embedded key."""
+    pytest.importorskip("cryptography")
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    other = base64.b64encode(Ed25519PrivateKey.generate().public_key().public_bytes_raw()).decode()
+    with pytest.raises(mc.MinerCliError):
+        _mc_verify(_signed_agent_response(), trusted=other)
+
+
+def test_verify_signed_agent_rejects_a_replayed_round():
+    """A genuinely-signed artifact for a DIFFERENT round than expected is refused (anti-replay is
+    anchored to the caller's expected round, not the artifact's own round_id)."""
+    pytest.importorskip("cryptography")
+    resp = _signed_agent_response(round_id=7)                 # validly signed for round 7
+    with pytest.raises(mc.MinerCliError):
+        _mc_verify(resp, expect_round=8)                     # but the miner expects round 8
+
+
+def test_verify_signed_agent_rejects_a_missing_field():
+    pytest.importorskip("cryptography")
+    resp = _signed_agent_response()
+    del resp["backend_signature"]
+    with pytest.raises(mc.MinerCliError):                     # clean reject, not a KeyError crash
+        _mc_verify(resp)
+
+
+def test_verify_signed_agent_rejects_a_different_miner():
+    """A genuinely-signed bundle for a DIFFERENT miner (same round + trusted key) is refused —
+    verification is anchored to your own hotkey."""
+    pytest.importorskip("cryptography")
+    with pytest.raises(mc.MinerCliError):
+        _mc_verify(_signed_agent_response(), expect_miner="5SomeoneElse")
+
+
+def test_verify_signed_agent_rejects_a_non_numeric_round():
+    """A present-but-non-numeric round_id is a clean MinerCliError, not a raw ValueError crash."""
+    pytest.importorskip("cryptography")
+    resp = _signed_agent_response()
+    resp["round_id"] = "not-an-int"
+    with pytest.raises(mc.MinerCliError):
+        _mc_verify(resp, expect_round=7)
