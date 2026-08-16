@@ -58,6 +58,16 @@ def agent_message(miner_hotkey: str, round_id: int) -> bytes:
     return f"cybergym:agent-download:{miner_hotkey}:{round_id}".encode()
 
 
+def agent_bundle_message(network: str, netuid: int, round_id: int, miner_hotkey: str,
+                         harness_digest: str) -> bytes:
+    # byte-identical to the backend: the bytes the BACKEND signs (Ed25519) to attest the exact
+    # approved bundle it serves. harness_digest content-addresses the bundle; (network, netuid,
+    # round) bind it so the attestation cannot be replayed onto another round or subnet. The miner
+    # rebuilds these bytes to VERIFY the served bundle before running it.
+    return (f"cybergym:agent-bundle:{network}:{netuid}:{round_id}:{miner_hotkey}:"
+            f"{harness_digest}").encode()
+
+
 def submit_message(batch_id: str, task_id: str, miner_hotkey: str, poc_sha256: str) -> bytes:
     return f"cybergym:submit:{batch_id}:{task_id}:{miner_hotkey}:{poc_sha256}".encode()
 
@@ -161,6 +171,70 @@ def _declared_from_zip(raw: bytes) -> dict[str, str]:
     return out
 
 
+# --------------------------------------------------------------------------- backend-signature verify
+def _ed25519_verify(public_key_base64: str, signature_hex: str, message: bytes) -> None:
+    """Fail-closed Ed25519 verify — raises MinerCliError on ANY failure (bad signature, malformed
+    key/sig, or no crypto lib). NEVER warn-and-continue: a bad backend signature must stop the miner
+    from running an unattested agent."""
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except Exception as exc:                                        # pragma: no cover
+        raise MinerCliError("cryptography is required to verify the backend signature "
+                            "(pip install cryptography)") from exc
+    try:
+        pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key_base64))
+        pub.verify(bytes.fromhex(signature_hex), message)
+    except (InvalidSignature, ValueError, TypeError) as exc:
+        raise MinerCliError(f"backend signature did NOT verify: {exc}") from exc
+
+
+def _verify_signed_agent(resp: dict, trusted_pubkey: str, *, expect_round: int,
+                         expect_miner: str) -> bytes:
+    """Fail-closed check of a /v1/agent response, ANCHORED to a trusted producer pubkey (pinned or
+    TOFU-fetched by the caller), an EXPECTED round, and YOUR OWN hotkey — NOT to values the artifact
+    carries about itself. Enforces: the response's pubkey IS the trusted one; it is for YOU and THIS
+    round; the served bytes hash to the claimed digest; and the backend's Ed25519 signature verifies
+    over the round-bound message USING THE TRUSTED KEY. Returns the raw agent-bundle bytes. Every
+    failure — including a missing/malformed/non-numeric field — raises MinerCliError; NEVER
+    warn-and-continue, so a substituted, cross-miner, or replayed bundle can never reach the run."""
+    try:
+        digest, sig = resp["harness_digest"], resp["backend_signature"]
+        pubkey, miner = resp["public_key_base64"], resp["miner_hotkey"]
+        network, netuid = resp["network"], resp["netuid"]
+        round_id = int(resp["round_id"])
+        blob = base64.b64decode(resp["harness_bundle"], validate=True)
+    except (KeyError, TypeError, ValueError, __import__("binascii").Error) as exc:
+        raise MinerCliError(f"malformed signed-agent response ({exc})") from exc
+    if pubkey != trusted_pubkey:
+        raise MinerCliError("agent bundle signed by a key that is NOT the trusted backend producer "
+                            "key — refusing (possible substitution)")
+    if miner != expect_miner:
+        raise MinerCliError(f"agent bundle is for miner {miner}, not you ({expect_miner}) — refusing")
+    if round_id != int(expect_round):
+        raise MinerCliError(f"agent bundle is for round {round_id}, not the expected {expect_round} "
+                            "(stale or replayed) — refusing")
+    got = "sha256:" + hashlib.sha256(blob).hexdigest()
+    if got != digest:
+        raise MinerCliError(f"served bundle digest {got} != claimed {digest}")
+    # verify against the TRUSTED key (not the pubkey embedded in the artifact) over the round-bound msg
+    _ed25519_verify(trusted_pubkey, sig, agent_bundle_message(network, netuid, round_id, miner, digest))
+    return blob
+
+
+def _trusted_pubkey(base: str) -> str:
+    """The backend producer pubkey (base64) to ANCHOR trust: PINNED via CYBERGYM_PRODUCER_PUBKEY if
+    set (recommended for production — a MITM cannot substitute a key), else fetched from /v1/pubkey
+    (trust-on-first-use, with a warning)."""
+    pinned = os.environ.get("CYBERGYM_PRODUCER_PUBKEY", "").strip()
+    if pinned:
+        return pinned
+    doc = _http(f"{base}/v1/pubkey", None)
+    print("note: trusting the backend pubkey fetched from /v1/pubkey (trust-on-first-use); set "
+          "CYBERGYM_PRODUCER_PUBKEY to pin it.", file=sys.stderr)
+    return doc["public_key_base64"]
+
+
 # --------------------------------------------------------------------------- subcommands
 def cmd_register_agent(args: argparse.Namespace) -> int:
     """Upload the agent bundle for this round. Size is checked BEFORE the upload."""
@@ -202,7 +276,10 @@ def cmd_register_agent(args: argparse.Namespace) -> int:
 
 
 def cmd_dispatch(args: argparse.Namespace) -> int:
-    """Draw this round's sealed task set and download your own (signed) agent bundle."""
+    """Draw this round's sealed task set and download your own backend-SIGNED agent bundle, verifying
+    the backend's signature over it before saving."""
+    import json
+    from urllib.parse import urlencode
     base = _require("CYBERGYM_DISPATCH_URL", args.dispatch_url).rstrip("/")
     hotkey, seed = _require("MINER_HOTKEY", args.miner), _require("MINER_HOTKEY_SEED")
     round_id = _current_round(base)
@@ -210,22 +287,45 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         "miner_hotkey": hotkey, "round_id": round_id,
         "signature": sign(seed, task_message(hotkey, round_id))})
     out = Path(args.out or "dispatch.json")
-    import json
     out.write_text(json.dumps(tasks, indent=2))
+
+    # download OUR OWN backend-signed agent (owner-only GET, authenticated by the hotkey sig), then
+    # ANCHOR trust in the backend pubkey (pinned or TOFU) and VERIFY the signature + digest.
+    query = urlencode({"miner_hotkey": hotkey,
+                       "signature": sign(seed, agent_message(hotkey, round_id))})
+    agent = _http(f"{base}/v1/agent?{query}", None)
+    # fail-closed: anchored to the trusted producer key, YOU, and THIS round (not the artifact's claims)
+    _verify_signed_agent(agent, _trusted_pubkey(base), expect_round=round_id, expect_miner=hotkey)
+    agent_out = Path(args.agent_out or "signed_agent.json")
+    agent_out.write_text(json.dumps(agent, indent=2))
     print(f"dispatched round {round_id}: {len(tasks.get('tasks', []))} tasks -> {out}. "
-          "(downloading the backend-SIGNED agent bundle lands in phase 4.)")
+          f"downloaded + VERIFIED your backend-signed agent {agent['harness_digest'][:19]}… "
+          f"-> {agent_out}.")
     return 0
 
 
 def cmd_submit(args: argparse.Namespace) -> int:
-    """Run the signed agent and stream its PoCs, each hash-chained. (phases 4/5 wire the signature
-    verification, the run, and the hash-chain; this validates the bundle you point it at.)"""
-    signed = Path(args.signed_agent)
-    if not signed.is_file():
-        raise MinerCliError(f"signed agent not found: {signed}")
-    agent_hash = "sha256:" + hashlib.sha256(signed.read_bytes()).hexdigest()
-    print(f"signed agent {agent_hash[:19]}… ready. Running the agent and streaming one hash-chained "
-          "PoC at a time (with the 1 h limit) lands in phases 4/5.")
+    """VERIFY the backend-signed agent, then run it and stream its PoCs hash-chained. This phase wires
+    the fail-closed verification; running the agent + the hash-chain + the 1 h limit is phase 5."""
+    import json
+    art = Path(args.signed_agent)
+    if not art.is_file():
+        raise MinerCliError(f"signed agent artifact not found: {art} (run `dispatch` first)")
+    try:
+        resp = json.loads(art.read_text())
+    except ValueError as exc:
+        raise MinerCliError(f"{art} is not the signed-agent JSON from dispatch: {exc}") from exc
+    # fail-closed BEFORE any run, RE-ANCHORED here (not trusting the artifact's own key/round): the
+    # bundle must be signed by the trusted producer key, be for THIS round, and hash to its digest —
+    # never run an agent the backend did not sign for you this round (catches a tampered/substituted
+    # signed_agent.json between dispatch and submit).
+    base = _require("CYBERGYM_DISPATCH_URL", args.dispatch_url).rstrip("/")
+    hotkey = _require("MINER_HOTKEY", args.miner)
+    _verify_signed_agent(resp, _trusted_pubkey(base), expect_round=_current_round(base),
+                         expect_miner=hotkey)
+    print(f"verified backend-signed agent {resp['harness_digest'][:19]}… "
+          "Running it and streaming one hash-chained PoC at a time (with the 1 h limit) lands in "
+          "phase 5.")
     return 0
 
 
@@ -251,10 +351,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_dis.add_argument("--dispatch-url", help="subnet endpoint (or CYBERGYM_DISPATCH_URL)")
     p_dis.add_argument("--miner", help="your hotkey ss58 (or MINER_HOTKEY)")
     p_dis.add_argument("--out", help="where to write the dispatched set (default: dispatch.json)")
+    p_dis.add_argument("--agent-out", help="where to write the verified signed agent "
+                       "(default: signed_agent.json)")
     p_dis.set_defaults(func=cmd_dispatch)
 
-    p_sub = sub.add_parser("submit", help="run your signed agent and stream hash-chained PoCs")
-    p_sub.add_argument("signed_agent", help="path to the backend-signed agent bundle from dispatch")
+    p_sub = sub.add_parser("submit", help="verify + run your signed agent and stream hash-chained PoCs")
+    p_sub.add_argument("signed_agent", help="the signed_agent.json artifact from dispatch")
     p_sub.add_argument("--dispatch-url", help="subnet endpoint (or CYBERGYM_DISPATCH_URL)")
     p_sub.add_argument("--miner", help="your hotkey ss58 (or MINER_HOTKEY)")
     p_sub.set_defaults(func=cmd_submit)
