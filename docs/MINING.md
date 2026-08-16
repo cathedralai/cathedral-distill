@@ -72,7 +72,7 @@ def solve_tasks(tasks):
 ### 2. Register your agent  *(building)*
 
 ```bash
-cathedral distill register-agent ./my-agent.zip
+cathedral-distill register-agent ./my-agent.zip
 ```
 
 Uploads your agent to the backend. **One agent per miner** — the backend stores it under
@@ -97,7 +97,7 @@ new set, so you never see the same bug twice.
 ### 4. Dispatch — download your signed agent + task set  *(building)*
 
 ```bash
-cathedral distill dispatch
+cathedral-distill dispatch
 ```
 
 Verifies your hotkey and downloads **only your own** material: the **agent bundle the backend
@@ -110,7 +110,7 @@ You don't run the signed agent by hand or hand-craft submissions. Put your **mod
 your **Cathedral API key**) in cathedral-distill's `.env`, then:
 
 ```bash
-cathedral distill submit ./my-agent.signed.zip
+cathedral-distill submit ./my-agent.signed.zip
 ```
 
 This:
