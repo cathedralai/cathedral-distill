@@ -6,10 +6,14 @@ has never seen; your job is to make it generate a PoC — a byte-string input �
 crashes the vulnerable build and not the patched one. Solve more than everyone else
 and you hold the frontier and earn emission.
 
-You may use any model or agent: the subnet's own distilled student, a frontier API,
-your own fine-tune, or a classic fuzzer. The validator only checks the PoC — it does
-not care how you produced it. **The dataset your work builds is the product; your
-model is how you contribute to it.**
+You bring your own **agent** and choose an **inference model**. For local development
+(`--local`) that model can be anything — a frontier API, the subnet's distilled student, a
+local GGUF, even a classic fuzzer. **Live participation, though, runs through the control-plane
+backend, which restricts the model to an *official provider*** (no OpenRouter/aggregators, no
+self-hosted, no miner-trained weights) **and signs the model you declare at registration** — see
+the control-plane [mining guide](https://github.com/cathedralai/cathedral-cybergym-backend/blob/main/docs/MINING.md).
+The validator only checks the PoC and how it was produced. **The verified dataset your work builds
+is the product; your agent and model are how you contribute to it.**
 
 > **Status.** The scoring, sealing, submission, verify, and TDX-attestation mechanism
 > is implemented, tested, and proven end-to-end (a real LLM miner over HTTP; a real
@@ -161,8 +165,10 @@ Every part of the miner is a seam — swap what you like, keep the rest.
 | `AGENT_MODEL` | the model id | `$MINER_MODEL` → `deepseek-v4-pro` |
 
 `--api-base` / `--model` override the env. The completer already handles 429/5xx with
-exponential backoff (2 s → 30 s, 5 tries). Bring a frontier API, your own fine-tune, the
-subnet's distilled student, or a local GGUF.
+exponential backoff (2 s → 30 s, 5 tries). For `--local` development bring anything — a frontier
+API, your own fine-tune, the subnet's distilled student, or a local GGUF. **For live scoring the
+control-plane backend accepts only an official-provider base model** (no aggregators/self-hosted/
+fine-tunes); the model rule is enforced at registration.
 
 **Your agent loop** — `run_agent(complete, *, task_id, workspace, backend, model_id,
 max_turns=10, on_step=…)` is fully injectable. `complete: list[dict] -> str` is *any*
@@ -235,12 +241,16 @@ Every one of these is enforced, not merely discouraged:
 - **A PoC that crashes both builds** — not the specific vulnerability.
 - **A solve with no valid TDX attestation** — solved-but-unattested credits zero.
 - **Submitting for a task not in your batch** — off-batch wins are rejected.
-- **A model other than the one you committed** — your commitment seals which
-  batch you draw, and it is pinned for the epoch. Be honest that this is a
-  *binding*, not a *proof*: `model_commitment` is not currently compared against
-  any digest of the bytes you actually executed, so it stops you re-drawing the
-  batch, not you running a different model behind it. Proving the executed model
-  needs the attestation to bind it (tracked in cathedral-distill#34).
+- **A model other than the one you declared** — model provenance is layered, and today only
+  the first layer is live. **Layer 1 (live, control-plane backend):** you declare
+  `(base_url, model)` from an *official provider only* at registration, and that declaration is
+  **signed and persisted** for the round — a non-repudiable fact you cannot later deny or
+  re-attribute, and a second registration with a different model is refused. **Layer 2
+  (deferred):** proving the model each inference call *actually* used needs the enclave to
+  observe and bind the per-call provider+model, so a declared model is a *binding*, not yet a
+  *proof* of what ran behind it (tracked in `cathedralai/cathedral-compute#108`). The live model
+  rule + registration flow are in the control-plane
+  [mining guide](https://github.com/cathedralai/cathedral-cybergym-backend/blob/main/docs/MINING.md).
 - **Pre-computing from public tasks** — the scored batch is disclosed *after* your
   commit; public ARVO/OSS-Fuzz tasks are for training only, and public canaries earn
   nothing (solving them just proves you're alive).
