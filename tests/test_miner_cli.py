@@ -48,6 +48,12 @@ def test_wire_messages_are_byte_identical_to_the_backend():
         assert mc.register_message(*args) == be.register_message(*args)
     assert mc.task_message("5M", 7) == be.task_message("5M", 7)
     assert mc.submit_message("b", "t", "5M", "sha256:p") == be.submit_message("b", "t", "5M", "sha256:p")
+    # the CHAINED submit message + the chain link are byte-identical to the backend (Phase 5)
+    assert (mc.submit_message("b", "t", "5M", "sha256:p", 3, "sha256:prev")
+            == be.submit_message("b", "t", "5M", "sha256:p", 3, "sha256:prev"))
+    assert (mc.chain_link("sha256:prev", "sha256:agent", "arvo:1", "sha256:poc", 4)
+            == be.chain_link("sha256:prev", "sha256:agent", "arvo:1", "sha256:poc", 4))
+    assert mc.chain_message("5M", 7) == be.chain_message("5M", 7)  # owner-only chain-head read (Phase 5)
     assert mc.agent_message("5M", 7) == be.agent_message("5M", 7)
     assert (mc.agent_bundle_message("finney", 39, 7, "5M", "sha256:aa")
             == be.agent_bundle_message("finney", 39, 7, "5M", "sha256:aa"))
@@ -188,3 +194,70 @@ def test_verify_signed_agent_rejects_a_non_numeric_round():
     resp["round_id"] = "not-an-int"
     with pytest.raises(mc.MinerCliError):
         _mc_verify(resp, expect_round=7)
+
+
+def test_cmd_submit_streams_hash_chained_pocs(tmp_path, monkeypatch):
+    """cmd_submit runs the verified agent and streams each PoC hash-chained: seq increments, prev
+    links to the previous chain_hash, and chain_hash matches chain_link — proving the chain wire."""
+    import base64
+    import hashlib
+    import json
+    agent_src = (b"def solve_tasks(tasks):\n"
+                 b"    for t in tasks:\n"
+                 b"        yield {'task_id': t['task_id'], 'poc': ('poc-' + t['task_id']).encode()}\n")
+    agent_hash = "sha256:" + hashlib.sha256(agent_src).hexdigest()
+    signed = {"harness_digest": agent_hash, "harness_bundle": base64.b64encode(agent_src).decode(),
+              "network": "finney", "netuid": 39, "round_id": 7, "miner_hotkey": "5M",
+              "public_key_base64": "PUB", "backend_signature": "sig"}
+    (tmp_path / "signed_agent.json").write_text(json.dumps(signed))
+    (tmp_path / "dispatch.json").write_text(json.dumps(
+        {"batch_id": "batch1", "tasks": [{"task_id": "arvo:1"}, {"task_id": "arvo:2"}]}))
+    monkeypatch.setenv("CYBERGYM_DISPATCH_URL", "http://x")
+    monkeypatch.setenv("MINER_HOTKEY", "5M")
+    monkeypatch.setenv("MINER_HOTKEY_SEED", "0x" + "11" * 32)
+    monkeypatch.setattr(mc, "_current_round", lambda base: 7)
+    monkeypatch.setattr(mc, "_trusted_pubkey", lambda base: "PUB")
+    monkeypatch.setattr(mc, "_verify_signed_agent",
+                        lambda resp, trusted, **kw: base64.b64decode(resp["harness_bundle"]))
+    monkeypatch.setattr(mc, "sign", lambda seed, msg: "deadbeef")
+    submits = []
+
+    def _fake_http(url, payload):
+        if "/v1/chain" in url:                              # resume-head read (genesis)
+            return {"last_chain_seq": 0, "last_hash": "", "broken": 0}
+        if url.endswith("/v1/submit"):
+            submits.append(payload)
+            return {"screening": "accepted"}
+        return {}
+    monkeypatch.setattr(mc, "_http", _fake_http)
+
+    args = SimpleNamespace(signed_agent=str(tmp_path / "signed_agent.json"), dispatch_url=None,
+                           miner=None, dispatch=str(tmp_path / "dispatch.json"))
+    assert mc.cmd_submit(args) == 0
+    assert len(submits) == 2
+    s1, s2 = submits
+    assert s1["chain_seq"] == 1 and s1["prev_hash"] == ""
+    assert s2["chain_seq"] == 2 and s2["prev_hash"] == s1["chain_hash"]      # links to the previous
+    d1 = "sha256:" + hashlib.sha256(b"poc-arvo:1").hexdigest()
+    assert s1["chain_hash"] == mc.chain_link("", agent_hash, "arvo:1", d1, 1)
+    assert s1["poc_base64"] == base64.b64encode(b"poc-arvo:1").decode()
+    assert s1["agent_digest"] == agent_hash and s1["trace"]["poc_sha256"] == d1
+
+
+def test_run_solve_tasks_arity_dispatch():
+    got = []
+    on = lambda tid, poc, tr=None: got.append((tid, poc))
+    tasks = [{"task_id": "t1"}, {"task_id": "t2"}]
+    # 1-arg generator (one at a time)
+    def gen(ts):
+        for t in ts:
+            yield {"task_id": t["task_id"], "poc": b"x"}
+    mc._run_solve_tasks(gen, tasks, on, probe=None)
+    assert [g[0] for g in got] == ["t1", "t2"]
+    # 3-arg streaming: the agent calls submit(task_id, poc) itself
+    got.clear()
+    def stream(ts, probe, submit):
+        for t in ts:
+            submit(t["task_id"], b"y")
+    mc._run_solve_tasks(stream, tasks, on, probe=None)
+    assert [g[0] for g in got] == ["t1", "t2"]
