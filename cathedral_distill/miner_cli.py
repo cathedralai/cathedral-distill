@@ -40,10 +40,14 @@ class MinerCliError(Exception):
 # The canonical wire messages — byte-identical to the backend's signing contract. Each is bound to
 # the round so a signature cannot be replayed into a later one.
 def register_message(miner_hotkey: str, harness_digest: str, round_id: int,
-                     base_url: str = "", model: str = "") -> bytes:
+                     base_url: str = "", model: str = "",
+                     agent_name: str = "", version: str = "") -> bytes:
+    # byte-identical to the backend: the signature commits the declared inference (base_url, model)
+    # AND the agent identity (agent_name, version) as a FIXED 4-field suffix (empties kept), present
+    # only when at least one is declared, so what you register is what the dashboard shows.
     base = f"cybergym:register:{miner_hotkey}:{harness_digest}:{round_id}"
-    base_url, model = base_url.strip(), model.strip()
-    return (f"{base}:{base_url}:{model}" if (base_url or model) else base).encode()
+    fields = [base_url.strip(), model.strip(), agent_name.strip(), version.strip()]
+    return (base + ":" + ":".join(fields)).encode() if any(fields) else base.encode()
 
 
 def task_message(miner_hotkey: str, round_id: int) -> bytes:
@@ -116,25 +120,45 @@ def _current_round(base: str) -> int:
     return int(_http(f"{base.rstrip('/')}/v1/round", None)["round_id"])
 
 
-def _model_from_zip(raw: bytes) -> tuple[str, str]:
-    """Read the agent's declared model + base_url from a ``.env`` inside the zip, so the registered
-    model is exactly what the agent will run. Returns ('', '') if the zip has no such .env."""
+#: Max length of the declared identity fields (agent_name, version) — mirrors the backend.
+MAX_IDENTITY_LEN = 64
+
+
+def _clean_identity(value: str, field: str) -> str:
+    """Normalise + bound a declared identity field, mirroring the backend so the value the miner
+    signs is the value the backend accepts (rejected locally BEFORE any upload)."""
+    v = (value or "").strip()
+    if len(v) > MAX_IDENTITY_LEN:
+        raise MinerCliError(f"{field} exceeds {MAX_IDENTITY_LEN} characters")
+    if any(ord(c) < 0x20 or c == ":" for c in v):
+        raise MinerCliError(f"{field} must not contain control characters or ':'")
+    return v
+
+
+def _declared_from_zip(raw: bytes) -> dict[str, str]:
+    """Read the agent's declared inference (model, base_url) + identity (agent_name, version) from a
+    ``.env`` inside the zip, so what is registered is exactly what the agent will run. Missing keys
+    come back ''."""
     try:
         zf = zipfile.ZipFile(io.BytesIO(raw))
     except zipfile.BadZipFile as exc:
         raise MinerCliError(f"agent is not a valid zip: {exc}") from exc
+    out = {"model": "", "base_url": "", "agent_name": "", "version": ""}
     name = next((n for n in zf.namelist() if Path(n).name == ".env"), None)
     if name is None:
-        return "", ""
-    model = base_url = ""
+        return out
     for line in zf.read(name).decode("utf-8", "replace").splitlines():
         k, _, v = line.strip().partition("=")
         k, v = k.strip(), v.strip().strip('"').strip("'")
         if k in ("AGENT_MODEL", "MODEL"):
-            model = v
+            out["model"] = v
         elif k in ("AGENT_BASE_URL", "BASE_URL", "AGENT_API_BASE"):
-            base_url = v
-    return base_url, model
+            out["base_url"] = v
+        elif k in ("AGENT_NAME", "NAME"):
+            out["agent_name"] = v
+        elif k in ("AGENT_VERSION", "VERSION"):
+            out["version"] = v
+    return out
 
 
 # --------------------------------------------------------------------------- subcommands
@@ -149,24 +173,31 @@ def cmd_register_agent(args: argparse.Namespace) -> int:
             f"agent is {len(raw)/1e6:.1f} MB, over the {MAX_AGENT_BYTES//(1024*1024)} MB limit — "
             "trim it before uploading (nothing was sent)")
     harness_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-    zip_base_url, zip_model = _model_from_zip(raw)
-    base_url = args.base_url or zip_base_url or os.environ.get("AGENT_BASE_URL", "")
-    model = args.model or zip_model or os.environ.get("AGENT_MODEL", "")
+    declared = _declared_from_zip(raw)
+    base_url = args.base_url or declared["base_url"] or os.environ.get("AGENT_BASE_URL", "")
+    model = args.model or declared["model"] or os.environ.get("AGENT_MODEL", "")
     if not (base_url and model):
         raise MinerCliError("declare your model — put AGENT_MODEL + AGENT_BASE_URL in the agent's "
                             ".env, or pass --model/--base-url (must be an official provider)")
+    # the agent's dashboard identity — optional, but if given it is signed + shown next to your UID.
+    # Validated locally (same rules as the backend) so a bad label is caught before any upload.
+    agent_name = _clean_identity(args.agent_name or declared["agent_name"], "agent_name")
+    version = _clean_identity(args.version or declared["version"], "version")
 
     base = _require("CYBERGYM_DISPATCH_URL", args.dispatch_url).rstrip("/")
     hotkey, seed = _require("MINER_HOTKEY", args.miner), _require("MINER_HOTKEY_SEED")
     round_id = _current_round(base)
-    signature = sign(seed, register_message(hotkey, harness_digest, round_id, base_url, model))
+    signature = sign(seed, register_message(hotkey, harness_digest, round_id, base_url, model,
+                                            agent_name, version))
     resp = _http(f"{base}/v1/register", {
         "miner_hotkey": hotkey, "harness_digest": harness_digest, "round_id": round_id,
         "harness_bundle": base64.b64encode(raw).decode(), "model": model, "base_url": base_url,
-        "signature": signature})
-    print(f"registered agent {harness_digest[:19]}… for round {round_id}: "
+        "agent_name": agent_name, "version": version, "signature": signature})
+    label = f" {agent_name} {version}".rstrip() if agent_name else ""
+    print(f"registered agent{label} {harness_digest[:19]}… for round {round_id}: "
           f"model={model} ({resp.get('inference', {}).get('provider', '?')}), "
-          f"signed={resp.get('signed')}. Screening verdict will show on the dashboard.")
+          f"signed={resp.get('signed')}, screen_state={resp.get('screen_state')}. "
+          "The approve/reject verdict will show on the dashboard.")
     return 0
 
 
@@ -210,6 +241,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--miner", help="your hotkey ss58 (or MINER_HOTKEY)")
     p_reg.add_argument("--model", help="declared model id (else read from the zip's .env)")
     p_reg.add_argument("--base-url", help="declared official-provider base_url (else the zip's .env)")
+    p_reg.add_argument("--agent-name", help="a name for your agent, shown on the dashboard "
+                       "(else AGENT_NAME in the zip's .env; optional)")
+    p_reg.add_argument("--version", help="your agent's version label, shown on the dashboard "
+                       "(else AGENT_VERSION in the zip's .env; optional)")
     p_reg.set_defaults(func=cmd_register_agent)
 
     p_dis = sub.add_parser("dispatch", help="draw your sealed task set + your signed agent")
