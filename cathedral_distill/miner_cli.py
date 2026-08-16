@@ -30,6 +30,11 @@ from pathlib import Path
 
 #: An agent bundle over this is rejected LOCALLY, before any upload — the miner is told at once.
 MAX_AGENT_BYTES = 20 * 1024 * 1024  # 20 MB
+#: The submission envelope schema the backend expects (cybergym_protocol.ENVELOPE_SCHEMA).
+ENVELOPE_SCHEMA = "cathedral_cybergym_submission_envelope_v1"
+#: Default hard wall-clock (seconds) for the whole solve run — overridable via
+#: CYBERGYM_SOLVE_TIME_LIMIT_SECONDS at submit time. The backend also rejects any PoC submitted late.
+SOLVE_TIME_LIMIT_SECONDS = 3600
 
 
 class MinerCliError(Exception):
@@ -68,8 +73,103 @@ def agent_bundle_message(network: str, netuid: int, round_id: int, miner_hotkey:
             f"{harness_digest}").encode()
 
 
-def submit_message(batch_id: str, task_id: str, miner_hotkey: str, poc_sha256: str) -> bytes:
-    return f"cybergym:submit:{batch_id}:{task_id}:{miner_hotkey}:{poc_sha256}".encode()
+def submit_message(batch_id: str, task_id: str, miner_hotkey: str, poc_sha256: str,
+                   chain_seq: int = 0, prev_hash: str = "") -> bytes:
+    # byte-identical to the backend: when the submission is chained, the signature also covers
+    # (chain_seq, prev_hash) so the ordering + link are authenticated; absent a chain the 4-field form.
+    base = f"cybergym:submit:{batch_id}:{task_id}:{miner_hotkey}:{poc_sha256}"
+    if chain_seq:
+        return f"{base}:{chain_seq}:{prev_hash}".encode()
+    return base.encode()
+
+
+def chain_link(prev_hash: str, agent_hash: str, task_id: str, poc_sha256: str,
+               chain_seq: int) -> str:
+    # byte-identical to the backend: h_i = sha256(h_{i-1} ‖ agent_hash ‖ task_id ‖ poc_sha256 ‖ seq),
+    # \x1f-separated; the genesis h_0 is the empty string. A test pins the parity.
+    pre = "\x1f".join([prev_hash, agent_hash, task_id, poc_sha256, str(chain_seq)]).encode()
+    return "sha256:" + hashlib.sha256(pre).hexdigest()
+
+
+def chain_message(miner_hotkey: str, round_id: int) -> bytes:
+    # byte-identical to the backend: reading your chain head to resume is owner-only, round-bound.
+    return f"cybergym:chain:{miner_hotkey}:{round_id}".encode()
+
+
+def probe_message(miner_hotkey: str, task_id: str, poc_sha256: str, round_id: int) -> bytes:
+    return f"cybergym:probe:{miner_hotkey}:{task_id}:{poc_sha256}:{round_id}".encode()
+
+
+def _poc_sha256(poc: bytes) -> str:
+    return "sha256:" + hashlib.sha256(poc).hexdigest()
+
+
+def _load_solve_tasks(bundle: bytes):
+    """Load solve_tasks from the VERIFIED signed bundle client-side — a zip whose top-level agent.py
+    binds it (helper modules importable), or a bare Python module. This is the miner's OWN code on
+    the miner's OWN machine, so it is not sandboxed here (the backend already screened it in
+    isolation); a zip-slip guard is still applied so a bad archive cannot write outside a temp dir."""
+    ns = {"__name__": "cathedral_agent"}
+    if bundle[:2] == b"PK":
+        import tempfile
+        work = tempfile.mkdtemp(prefix="cg-agent-run-")
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(bundle))
+        except zipfile.BadZipFile as exc:
+            raise MinerCliError(f"signed agent is not a valid zip: {exc}") from exc
+        dest = os.path.realpath(work)
+        for name in zf.namelist():
+            t = os.path.realpath(os.path.join(work, name))
+            if t != dest and not t.startswith(dest + os.sep):
+                raise MinerCliError(f"signed agent zip has an unsafe path: {name!r}")
+        zf.extractall(work)
+        entry = os.path.join(work, "agent.py")
+        if not os.path.isfile(entry):
+            raise MinerCliError("signed agent zip has no top-level agent.py")
+        sys.path.insert(0, work)
+        src = Path(entry).read_bytes()
+    else:
+        src = bundle
+    try:
+        exec(compile(src, "<agent>", "exec"), ns)             # noqa: S102 — miner runs its own code
+    except Exception as exc:
+        raise MinerCliError(f"signed agent failed to load: {exc}") from exc
+    fn = ns.get("solve_tasks")
+    if not callable(fn):
+        raise MinerCliError("signed agent has no callable solve_tasks")
+    return fn
+
+
+def _minimal_trace(task_id: str, poc_sha256: str, model_id: str) -> dict:
+    """A well-formed trace when the agent yields only {task_id, poc}. A capable agent should yield its
+    OWN reasoning trace; this is the floor so the submission is accepted on the wire (its quality is
+    the agent's job — the backend scores the trace downstream)."""
+    return {"task_id": task_id, "poc_sha256": poc_sha256, "model_id": model_id or "cathedral/agent",
+            "licence": "CC-BY-4.0",
+            "steps": [{"step": 1, "thought": "produced a candidate PoC for the dispatched task",
+                       "action": "write_poc", "output": ""}]}
+
+
+def _run_solve_tasks(fn, tasks, on_poc, probe) -> None:
+    """Arity-dispatch solve_tasks and deliver each PoC to on_poc(task_id, poc, trace) ONE AT A TIME:
+    3-arg -> streaming submit callback; 2-arg -> +probe oracle, iterate the return; 1-arg -> iterate
+    (a generator yields one at a time in production order)."""
+    import inspect
+    try:
+        n = len(inspect.signature(fn).parameters)
+    except (TypeError, ValueError):
+        n = 1
+
+    def _submit(task_id, poc, trace=None):
+        on_poc(task_id, poc, trace)
+
+    if n >= 3:
+        fn(tasks, probe, _submit)
+        return
+    results = fn(tasks, probe) if n == 2 else fn(tasks)
+    for item in (results or []):
+        if isinstance(item, dict):
+            on_poc(item.get("task_id"), item.get("poc"), item.get("trace"))
 
 
 def _keypair_cls():
@@ -305,9 +405,12 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 
 
 def cmd_submit(args: argparse.Namespace) -> int:
-    """VERIFY the backend-signed agent, then run it and stream its PoCs hash-chained. This phase wires
-    the fail-closed verification; running the agent + the hash-chain + the 1 h limit is phase 5."""
+    """VERIFY the backend-signed agent, then RUN it and stream its PoCs — one at a time, each
+    hash-chained to the previous, under a hard 1 h wall-clock. A broken chain (gap/reorder/tamper)
+    makes the backend reject that PoC and every one after; PoCs submitted past 1 h do not score."""
+    import base64
     import json
+    import signal
     art = Path(args.signed_agent)
     if not art.is_file():
         raise MinerCliError(f"signed agent artifact not found: {art} (run `dispatch` first)")
@@ -315,17 +418,98 @@ def cmd_submit(args: argparse.Namespace) -> int:
         resp = json.loads(art.read_text())
     except ValueError as exc:
         raise MinerCliError(f"{art} is not the signed-agent JSON from dispatch: {exc}") from exc
-    # fail-closed BEFORE any run, RE-ANCHORED here (not trusting the artifact's own key/round): the
-    # bundle must be signed by the trusted producer key, be for THIS round, and hash to its digest —
-    # never run an agent the backend did not sign for you this round (catches a tampered/substituted
-    # signed_agent.json between dispatch and submit).
     base = _require("CYBERGYM_DISPATCH_URL", args.dispatch_url).rstrip("/")
-    hotkey = _require("MINER_HOTKEY", args.miner)
-    _verify_signed_agent(resp, _trusted_pubkey(base), expect_round=_current_round(base),
-                         expect_miner=hotkey)
-    print(f"verified backend-signed agent {resp['harness_digest'][:19]}… "
-          "Running it and streaming one hash-chained PoC at a time (with the 1 h limit) lands in "
-          "phase 5.")
+    hotkey, seed = _require("MINER_HOTKEY", args.miner), _require("MINER_HOTKEY_SEED")
+    # fail-closed BEFORE any run (Phase 4): anchored to the trusted producer key + THIS round + your
+    # hotkey. Capture the verified bundle bytes to run.
+    round_id = _current_round(base)
+    bundle = _verify_signed_agent(resp, _trusted_pubkey(base), expect_round=round_id,
+                                  expect_miner=hotkey)
+    agent_hash = resp["harness_digest"]
+    dispatch = json.loads(Path(args.dispatch or "dispatch.json").read_text())
+    batch_id, tasks = dispatch["batch_id"], dispatch.get("tasks", [])
+    model_id = os.environ.get("AGENT_MODEL", "")
+    fn = _load_solve_tasks(bundle)
+
+    # RESUME from the durable per-miner chain head, so a re-run (after a crash / the 1 h limit / a
+    # network drop) continues at last_seq+1 instead of restarting at seq 1 and colliding with it.
+    from urllib.parse import urlencode
+    # the chain-head read is owner-only (the head is competitive intel) — sign it with our hotkey.
+    def _chain_query():
+        return urlencode({"miner_hotkey": hotkey,
+                          "signature": sign(seed, chain_message(hotkey, round_id))})
+    head = _http(f"{base}/v1/chain?{_chain_query()}", None)
+    if head.get("broken"):
+        raise MinerCliError("your submission chain is already broken for this round — no further PoC "
+                            "will be accepted; nothing to submit")
+    chain = {"seq": int(head.get("last_chain_seq", 0)), "prev": head.get("last_hash", "") or "",
+             "sent": 0, "accepted": 0}
+
+    def _resync():
+        h = _http(f"{base}/v1/chain?{_chain_query()}", None)
+        if h.get("broken"):
+            raise MinerCliError("submission chain broke — stopping; no further PoC will be accepted "
+                                "this round")
+        chain["seq"], chain["prev"] = int(h.get("last_chain_seq", 0)), h.get("last_hash", "") or ""
+
+    def _submit_one(task_id, poc, trace=None):
+        if not task_id or not isinstance(poc, (bytes, bytearray)) or not poc:
+            print(f"skipping a malformed result (task_id={task_id!r}, poc must be non-empty bytes)",
+                  file=sys.stderr)
+            return
+        poc = bytes(poc)
+        digest = _poc_sha256(poc)
+        seq, prev = chain["seq"] + 1, chain["prev"]         # do NOT consume the position until it lands
+        link = chain_link(prev, agent_hash, task_id, digest, seq)
+        tr = dict(trace) if isinstance(trace, dict) else _minimal_trace(task_id, digest, model_id)
+        tr["task_id"], tr["poc_sha256"] = task_id, digest   # bind the trace to THIS PoC
+        body = {"schema": ENVELOPE_SCHEMA, "batch_id": batch_id, "task_id": task_id,
+                "miner_hotkey": hotkey, "poc_base64": base64.b64encode(poc).decode(),
+                "trace": tr, "agent_digest": agent_hash,
+                "chain_seq": seq, "prev_hash": prev, "chain_hash": link,
+                "signature": sign(seed, submit_message(batch_id, task_id, hotkey, digest, seq, prev))}
+        try:
+            out = _http(f"{base}/v1/submit", body)
+        except MinerCliError as exc:
+            # a transient failure (or a duplicate/stale reject) MUST NOT burn the chain position and
+            # create a seq gap that would break the chain — re-read the durable head and continue.
+            print(f"submit #{seq} {task_id} failed ({exc}); resyncing chain head", file=sys.stderr)
+            _resync()
+            return
+        chain["seq"], chain["prev"] = seq, link             # advance ONLY after it landed
+        chain["sent"] += 1
+        chain["accepted"] += 1 if out.get("screening") == "accepted" else 0
+        print(f"#{seq} {task_id}: {out.get('screening', '?')}"
+              f"{' (' + out['reason'] + ')' if out.get('reason') else ''}")
+
+    def _probe(task_id, poc):                                      # the reproduce oracle (2/3-arg agents)
+        poc = bytes(poc)
+        body = {"miner_hotkey": hotkey, "task_id": task_id,
+                "candidate_base64": base64.b64encode(poc).decode(),
+                "signature": sign(seed, probe_message(hotkey, task_id, _poc_sha256(poc), round_id))}
+        try:
+            return bool(_http(f"{base}/v1/probe", body).get("crashed"))
+        except MinerCliError:
+            return False
+
+    limit = int(os.environ.get("CYBERGYM_SOLVE_TIME_LIMIT_SECONDS", SOLVE_TIME_LIMIT_SECONDS))
+    print(f"running signed agent {agent_hash[:19]}… on {len(tasks)} task(s), 1 h limit; streaming "
+          "one hash-chained PoC at a time.")
+    if hasattr(signal, "SIGALRM"):     # hard-kill the run at the limit (Unix); server rejects late anyway
+        def _stop(signum, frame):
+            raise TimeoutError("solve time limit reached")
+        prev_handler = signal.signal(signal.SIGALRM, _stop)
+        signal.alarm(max(1, limit))
+        try:
+            _run_solve_tasks(fn, tasks, _submit_one, _probe)
+        except TimeoutError:
+            print(f"reached the {limit}s solve limit — stopping.", file=sys.stderr)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, prev_handler)
+    else:                                                          # no SIGALRM (non-Unix): best effort
+        _run_solve_tasks(fn, tasks, _submit_one, _probe)
+    print(f"done: {chain['sent']} hash-chained PoC(s) submitted, {chain['accepted']} accepted.")
     return 0
 
 
@@ -359,6 +543,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sub.add_argument("signed_agent", help="the signed_agent.json artifact from dispatch")
     p_sub.add_argument("--dispatch-url", help="subnet endpoint (or CYBERGYM_DISPATCH_URL)")
     p_sub.add_argument("--miner", help="your hotkey ss58 (or MINER_HOTKEY)")
+    p_sub.add_argument("--dispatch", help="the dispatched task set from `dispatch` (default: dispatch.json)")
     p_sub.set_defaults(func=cmd_submit)
     return parser
 
