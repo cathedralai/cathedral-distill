@@ -22,15 +22,16 @@ capped). This deliberately avoids the 1 GiB ``RLIMIT_AS`` cap on the agent-scree
 driver path (``agent_contract._limits``), which would silently turn every real
 sanitizer crash into a "no crash".
 
+The reasoning trace is bound: the commitment's ``trace_id`` is derived in-enclave as the
+content hash of the trace the agent produced (``_trace_from_dict(result.trace).trace_id()``
+— schema, task, poc, model, EVERY step, licence, seal), the exact value the validator
+recomputes from the submitted trace, so a swapped or fabricated trace breaks the signature.
+
 WHAT THIS MODULE DOES NOT DO (enforced elsewhere / tracked):
   * Egress is not enforced here. The agent's model call rides ``complete``; in the
     enclave that must be pinned to the allowlisted model host by the container/enclave
     network layer (see ``AGENT_ENCLAVE_EGRESS`` / cathedral-compute#142). This module is
     transport- and network-agnostic.
-  * The reasoning trace is produced here (``AgentResult.trace``) but its BYTES are not
-    yet folded into ``enclave_commitment_bytes`` — only ``trace_id`` is bound. Binding
-    ``sha256(trace)`` into the signed commitment is a commitment-schema change tracked
-    for adversarial review, not done in this slice.
   * No live restricted-egress Cathedral profile exists yet to obtain a real receipt, so
     today this runs under the local simulation harness / a synthetic corpus, not attested
     TDX.
@@ -48,6 +49,7 @@ from cathedral_distill.cybergym_enclave_solver import (
     _required,
     solve,
 )
+from cathedral_distill.cybergym_protocol import _trace_from_dict
 from cathedral_distill.cybergym_verifier import VerifierBackend
 
 # The agent produced no PoC (budget exhausted / no crash found): there is nothing to
@@ -58,7 +60,6 @@ NO_POC_EXIT = 2
 def solve_with_agent(
     *,
     task_id: str,
-    trace_id: str,
     miner_hotkey: str,
     nonce: str,
     complete: Callable[[list[dict[str, Any]]], str],
@@ -75,10 +76,16 @@ def solve_with_agent(
     contents (at minimum the vulnerable build); ``backend`` is the shared ASan-safe
     differential runner used by BOTH the agent and ``solve()``.
 
-    Returns ``(agent_result, envelope)``. ``envelope`` is ``None`` iff the agent
-    produced no PoC — the caller then attests nothing. When a PoC is produced, the
-    envelope's verdict is re-derived by ``solve()`` from an independent vul/fix run, so
-    it is authoritative regardless of what the agent claimed.
+    The commitment's ``trace_id`` is the content hash of the reasoning trace THIS enclave
+    produced (``_trace_from_dict(result.trace).trace_id()`` — the exact value the validator
+    recomputes from the submitted trace in ``screen_submission``), so the trace is bound
+    into the enclave signature: a miner cannot swap a fabricated trace for the real one
+    without breaking the commitment. It is derived here, never taken from a dispatched label.
+
+    Returns ``(agent_result, envelope)``. ``envelope`` is ``None`` iff the agent produced no
+    PoC — the caller then attests nothing. When a PoC is produced, the envelope's verdict is
+    re-derived by ``solve()`` from an independent vul/fix run, so it is authoritative
+    regardless of what the agent claimed.
     """
     result = run_agent(
         complete,
@@ -95,7 +102,7 @@ def solve_with_agent(
     envelope = solve(
         task_id=task_id,
         poc_bytes=result.poc,
-        trace_id=trace_id,
+        trace_id=_trace_from_dict(result.trace).trace_id(),
         miner_hotkey=miner_hotkey,
         nonce=nonce,
         backend=backend,
@@ -150,23 +157,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     Inputs come from the protected, bound environment:
 
         CYBERGYM_TASK_ID          the dispatched task id
-        CYBERGYM_TRACE_ID         the reasoning-trace id bound into the commitment
         CYBERGYM_MINER_HOTKEY     the dispatched miner, bound into the commitment
         CYBERGYM_NONCE            the batch nonce, bound into the commitment
         CYBERGYM_MODEL            the model id (bound into the trace)
         CYBERGYM_INFERENCE_BASE   the enclave-pinned, allowlisted model endpoint
         CYBERGYM_INFERENCE_KEY    the provider key (optional; localhost gateway may inject)
         CYBERGYM_WORKSPACE_DIR    the unwrapped vulnerable build the agent reads
+        CYBERGYM_TRACE_OUT        where to persist the produced trace (REQUIRED — see below)
         CYBERGYM_REPRODUCE_CMD    the baked-binary differential (attest.v1), or
         CYBERGYM_CORPUS_MANIFEST  the digest-pinned image manifest (Docker path)
 
-    The signed envelope is written to stdout — its sha256 is what the Cathedral receipt
-    binds as ``result_sha256``. The reasoning trace is written to ``CYBERGYM_TRACE_OUT``
-    when set. Exit ``NO_POC_EXIT`` (no envelope) when the agent found no crash.
+    The trace id bound into the commitment is derived in-enclave from the trace the agent
+    produces (not a dispatched value), so the reasoning trace is bound by the signature — which
+    makes the trace the SOLE preimage of that id. It is therefore persisted to ``CYBERGYM_TRACE_OUT``
+    (required) BEFORE the envelope, failing closed if it cannot be written: a signed envelope must
+    never exist without the trace it commits to, or the solve would be permanently unredeemable.
+    The signed envelope is then written to stdout — its sha256 is what the Cathedral receipt binds
+    as ``result_sha256``. Exit ``NO_POC_EXIT`` (no envelope) when the agent found no crash.
     """
+    # The trace is the SOLE preimage of the signed commitment's trace_id (derived from it in
+    # solve_with_agent), so it is as load-bearing as the envelope itself — require its destination
+    # up front and fail fast if it is unset, rather than sign a solve that can never be redeemed.
+    trace_out = _required("CYBERGYM_TRACE_OUT")
     result, envelope = solve_with_agent(
         task_id=_required("CYBERGYM_TASK_ID"),
-        trace_id=_required("CYBERGYM_TRACE_ID"),
         miner_hotkey=_required("CYBERGYM_MINER_HOTKEY"),
         nonce=_required("CYBERGYM_NONCE"),
         complete=_completer_from_environment(),
@@ -177,18 +191,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if envelope is None:
         sys.stderr.write(f"no PoC produced ({result.reason}); nothing to attest\n")
         return NO_POC_EXIT
-    # Emit the authoritative signed result FIRST: the envelope is the receipt-bound
-    # output, so a later error on the OPTIONAL diagnostic trace write must never be
-    # able to drop a genuine solve.
+    # Persist the trace BEFORE emitting the envelope, and let a write error PROPAGATE (fail closed):
+    # a signed PASS envelope must never exist without the trace whose hash it commits to, or the
+    # solve is permanently unredeemable (the validator recomputes trace_id from the submitted trace)
+    # and the reasoning-trace data product is lost.
+    with open(trace_out, "w", encoding="utf-8") as handle:
+        json.dump(result.trace, handle, sort_keys=True, separators=(",", ":"))
     sys.stdout.buffer.write(envelope)
     sys.stdout.buffer.flush()
-    trace_out = os.environ.get("CYBERGYM_TRACE_OUT", "").strip()
-    if trace_out and result.trace is not None:
-        try:
-            with open(trace_out, "w", encoding="utf-8") as handle:
-                json.dump(result.trace, handle, sort_keys=True, separators=(",", ":"))
-        except OSError as exc:
-            sys.stderr.write(f"warning: could not write CYBERGYM_TRACE_OUT ({exc})\n")
     return 0
 
 
