@@ -38,6 +38,7 @@ from cathedral_distill.cybergym_attest import (
     cathedral_receipt_policy_digest,
 )
 from cathedral_distill.cybergym import DEFAULT_LEVEL_WEIGHTS, Level
+from cathedral_distill.cybergym_hidden_set import HiddenSetPolicy, hidden_set_policy_digest
 from cathedral_distill.cybergym_holdout import Holdout
 from cathedral_distill.cybergym_protocol import (
     DispatchMessage,
@@ -118,6 +119,7 @@ class CyberGymService:
         trace_policy: TraceQualityPolicy = TraceQualityPolicy(),
         attestation_policy: AttestationPolicy | None = None,
         cathedral_receipt_policy: CathedralReceiptPolicy | None = None,
+        hidden_set_policy: HiddenSetPolicy | None = None,
         attestation_now: datetime | None = None,
         attestation_required: bool = True,
         gate_policy: EmissionGatePolicy | None = None,
@@ -236,6 +238,23 @@ class CyberGymService:
         # (attest.v1 / persistent enclave), whose Intel DCAP root cannot live in an
         # AttestationPolicy's Ed25519 trusted_roots. None keeps the current behaviour.
         self._cathedral_receipt_policy = cathedral_receipt_policy
+        # The sanctioned backend-verified hidden-set posture (or None). Used only when no per-miner
+        # Intel-TDX policy is enforced; it makes such an epoch production-publishable under its own
+        # named policy. Fail closed at construction if its controls are off.
+        self._hidden_set_policy = hidden_set_policy
+        if hidden_set_policy is not None:
+            hidden_set_policy.require_secure()
+            # The posture ASSERTS gates_required — bind that claim to the runtime, or a gates-off
+            # service would stamp its epoch "backend-verified" and export it. require_secure() only
+            # checks the policy's own boolean; nothing else links it to this service's actual gate
+            # setting, so refuse the posture unless the anti-gaming emission gates are truly enforced.
+            if not (gates_required and gate_policy is not None):
+                raise ProtocolError(
+                    "the backend-verified hidden-set posture asserts gates_required, but this "
+                    "service has the anti-gaming emission gates OFF (gates_required=False or no "
+                    "gate_policy); refusing to stamp a gates-off epoch as verified. Enforce the "
+                    "gates, or run without the hidden_set_policy (the epoch stays unattested)."
+                )
         self._attestation_now = attestation_now
         self._gate_policy = gate_policy
         self._gates_required = gates_required
@@ -355,6 +374,17 @@ class CyberGymService:
             self._attestation_policy is not None
             or self._cathedral_receipt_policy is not None
         )
+        if not enforced and self._hidden_set_policy is not None:
+            # No per-miner Intel-TDX, but the sanctioned backend-verified hidden-set posture is on:
+            # stamp THAT (a named, production-publishable policy) instead of the bare unattested
+            # record, so the exporter accepts it while `detail` names it honestly (never Intel-TDX).
+            self._scores.record_attestation_posture(
+                self.chain.source_epoch,
+                enforced=True,
+                detail=self._hidden_set_policy.detail(),
+                policy_digest=hidden_set_policy_digest(self._hidden_set_policy),
+            )
+            return
         # No receipt policy -> the digest is byte-identical to the attestation-only
         # value the prior build wrote, so an epoch opened before this change resumes
         # cleanly. With one, the digest binds both, so swapping either is refused.
