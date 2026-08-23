@@ -273,6 +273,11 @@ def require_attested_epoch(
     """
     posture = score_store.attestation_posture(source_epoch)
     if posture is not None and posture["enforced"] and posture.get("policy_digest"):
+        # A sanctioned enforced posture that NAMES its policy (policy_digest) is publishable. Two
+        # qualify: per-miner Intel-TDX attestation, and the backend-verified hidden-set posture
+        # (cathedral_distill.cybergym_hidden_set) — server-side differential + never-repeat hidden
+        # sets + producer signature, no per-miner quote. Both are producer-trusted; `detail` names
+        # which. What stays refused below is an epoch that recorded NO enforced policy at all.
         return
     if allow_unattested:
         return
