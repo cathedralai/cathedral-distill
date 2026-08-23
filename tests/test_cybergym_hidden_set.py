@@ -38,6 +38,7 @@ def test_hidden_set_epoch_is_publishable_without_the_override(tmp_path):
     posture = store.attestation_posture(7)
     assert posture["enforced"] and posture["policy_digest"] == hidden_set_policy_digest(policy)
     assert "Intel-TDX" not in policy.detail().replace("NO per-miner Intel-TDX", "")  # never claims TDX
+    assert "recur" in policy.detail().lower()  # honest: states tasks recur, does NOT over-claim never-repeat
 
 
 def test_unattested_epoch_still_refuses(tmp_path):
@@ -57,7 +58,6 @@ def test_require_secure_refuses_a_gameable_posture():
     # a hidden-set posture with a control off, or with no corpus named, is NOT verified
     for weak in (
         HiddenSetPolicy(corpus_digest=CORPUS, real_differential=False),
-        HiddenSetPolicy(corpus_digest=CORPUS, never_repeat=False),
         HiddenSetPolicy(corpus_digest=CORPUS, opaque_handles=False),
         HiddenSetPolicy(corpus_digest=CORPUS, gates_required=False),
         HiddenSetPolicy(corpus_digest=""),  # controls on but no corpus bound -> refused
@@ -71,7 +71,7 @@ def test_digest_binds_the_controls_and_the_corpus():
     # weakening a control OR swapping the corpus changes the digest, so a resume that does either is
     # refused by the posture guard on the same terms a swapped Intel-TDX policy is.
     base = hidden_set_policy_digest(HiddenSetPolicy(corpus_digest=CORPUS))
-    assert base != hidden_set_policy_digest(HiddenSetPolicy(corpus_digest=CORPUS, never_repeat=False))
+    assert base != hidden_set_policy_digest(HiddenSetPolicy(corpus_digest=CORPUS, gates_required=False))
     assert base != hidden_set_policy_digest(HiddenSetPolicy(corpus_digest=CORPUS, real_differential=False))
     assert base != hidden_set_policy_digest(HiddenSetPolicy(corpus_digest="sha256:" + "ee" * 32))  # corpus swap
     assert hidden_set_policy_digest(None) == ""

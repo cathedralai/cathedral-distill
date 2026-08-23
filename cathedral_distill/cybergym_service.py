@@ -244,6 +244,17 @@ class CyberGymService:
         self._hidden_set_policy = hidden_set_policy
         if hidden_set_policy is not None:
             hidden_set_policy.require_secure()
+            # The posture ASSERTS gates_required — bind that claim to the runtime, or a gates-off
+            # service would stamp its epoch "backend-verified" and export it. require_secure() only
+            # checks the policy's own boolean; nothing else links it to this service's actual gate
+            # setting, so refuse the posture unless the anti-gaming emission gates are truly enforced.
+            if not (gates_required and gate_policy is not None):
+                raise ProtocolError(
+                    "the backend-verified hidden-set posture asserts gates_required, but this "
+                    "service has the anti-gaming emission gates OFF (gates_required=False or no "
+                    "gate_policy); refusing to stamp a gates-off epoch as verified. Enforce the "
+                    "gates, or run without the hidden_set_policy (the epoch stays unattested)."
+                )
         self._attestation_now = attestation_now
         self._gate_policy = gate_policy
         self._gates_required = gates_required
