@@ -270,3 +270,21 @@ def test_http_shim_dispatch_and_submit(tmp_path):
 
     # the solve made it into the corpus through the wire path
     assert svc._corpus.size() == 1
+
+
+def test_hidden_set_posture_refused_on_a_gates_off_service(tmp_path):
+    """The hidden-set posture ASSERTS gates_required; the service must refuse to stamp it when its
+    own anti-gaming gates are off, or a gates-off epoch would export as backend-verified."""
+    from cathedral_distill.cybergym_hidden_set import HiddenSetPolicy
+    with pytest.raises(ProtocolError, match="gates"):
+        CyberGymService(
+            load_holdout(_manifest()), _chain(),
+            backend=_backend({"arvo:1"}),
+            corpus_store=CyberGymCorpusStore(str(tmp_path / "corpus.sqlite")),
+            score_store=CyberGymScoreStore(str(tmp_path / "scores.sqlite")),
+            solve_store=CyberGymSolveStore(str(tmp_path / "solves.sqlite")),
+            validator_hotkey="5Val", private_key=KEY, signing_key_id="cybergym-1",
+            batch_size=2, cutoff=CUTOFF, as_of=NOW, attestation_required=False,
+            gates_required=False,  # gates OFF ...
+            hidden_set_policy=HiddenSetPolicy(corpus_digest="sha256:" + "cd" * 32),  # ... but posture claims them
+        )
