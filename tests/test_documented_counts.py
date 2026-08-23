@@ -1,11 +1,12 @@
 """Every documented test count must match the suite, or CI says so.
 
-The claim "N tests" appears in the README, two docs and two site pages. Nothing
-checked it, and it drifted into **three different values describing one suite** —
-670 in `docs/LAUNCH_COPY.md`, 678 in `README.md`, 721 on
-the site — each written at a different moment and then left. A number that nobody
-verifies is worse than no number: it is a specific, checkable claim about the
-project that happens to be false, in the files a newcomer reads first.
+The claim "N tests" appears in the README (and once drifted across launch/site copy
+too). Nothing checked it, and it drifted into **three different values describing one
+suite** — 670 in `docs/LAUNCH_COPY.md`, 678 in `README.md`, 721 on the site — each
+written at a different moment and then left. A number that nobody verifies is worse than
+no number: it is a specific, checkable claim about the project that happens to be false,
+in the files a newcomer reads first. The guard is pinned to the README; launch/site copy
+is marketing (reworked in its own PRs) and is deliberately no longer count-guarded here.
 
 So the number is pinned here. Adding a test now fails this, and the failure names
 the value to write. That is the intended cost: the claim is load-bearing marketing
@@ -47,11 +48,14 @@ ROOT = Path(__file__).resolve().parents[1]
 # collected-vs-passing distinction (see test_the_count_is_collected_rather_than_passing)
 # left an opening for exactly the kind of claim it says cannot be maintained.
 CLAIM = re.compile(r"(\d[\d,]*)\s*(?:passing\s+)?(tests|passed)\b", re.IGNORECASE)
+# Only README (and real contract docs) are count-guarded. Launch/site copy
+# (docs/LAUNCH_COPY.md, site/*.html) is marketing: it drifts, it is reworked in its
+# own PRs (e.g. the site rework), and forcing every added test to bump a number across
+# marketing files just re-creates merge conflicts with those PRs. So the guard holds the
+# claim true where a newcomer reads it first — the README — and leaves marketing copy to
+# be corrected or removed in the PRs that own it.
 DOCUMENTED = (
     "README.md",
-    "docs/LAUNCH_COPY.md",
-    "site/index.html",
-    "site/research.html",
 )
 
 
