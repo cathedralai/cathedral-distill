@@ -29,12 +29,33 @@ Do not skip because the Codex CLI is missing or unauthenticated. If the user exp
 7. Update the PR with the QA verdict and residuals.
 8. Only then declare the work pass complete.
 
+## Model and effort
+
+Pin both. Do not inherit `~/.codex/config.toml` defaults.
+
+| Path | Model | Effort |
+|---|---|---|
+| Codex CLI | `gpt-5.5` | `xhigh` via `model_reasoning_effort` |
+| Cursor Task fallback | `gpt-5.6-sol-xhigh` | `xhigh` is the slug suffix |
+
+Do not use `gpt-5.6-sol-high`, `gpt-5.6-sol-xhigh-fast`, or an unpinned CLI run. The Task tool has no separate effort argument; the slug is the effort pin.
+
 ## Runner
 
 Try in order. Do not stall on login.
 
-1. If `npx @openai/codex` is installed and `codex doctor` reports credentials, run Codex against the diff and the changed trust surfaces. If doctor or the Codex invocation exits nonzero, go to step 2 immediately. A set but invalid `OPENAI_API_KEY` is a failure, not a pass.
+1. If `npx @openai/codex` is installed and `codex doctor` reports credentials, run:
+
+   ```sh
+   npx @openai/codex review --base main \
+     -c model='"gpt-5.5"' \
+     -c model_reasoning_effort='"xhigh"'
+   ```
+
+   Use the PR base branch if it is not `main`. If doctor or the Codex invocation exits nonzero, go to step 2 immediately. A set but invalid `OPENAI_API_KEY` is a failure, not a pass.
+
 2. Launch a Cursor `Task` subagent with model `gpt-5.6-sol-xhigh`. That is the Codex-family fallback when the CLI is missing, unauthenticated, or failing.
+
 3. If the Task also fails, write an INCONCLUSIVE artifact naming the blocker and still produce a structured self-audit in the same finding format. Do not claim Codex QA passed.
 
 ## What to hand the reviewer

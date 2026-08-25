@@ -8,7 +8,8 @@ docs both say it is.
 
 After implementation and tests, before declaring work done or marking a PR
 ready, follow `.cursor/skills/codex-qa/SKILL.md`. Do not wait to be asked.
-Missing Codex CLI login is not a skip: fall back to a Cursor Task with model
+Missing Codex CLI login is not a skip: Codex CLI is `gpt-5.5` at
+`model_reasoning_effort=xhigh`; fall back to a Cursor Task with model
 `gpt-5.6-sol-xhigh`.
 
 Write the report to `/opt/cursor/artifacts/codex-qa-<topic>.md`. Fix
