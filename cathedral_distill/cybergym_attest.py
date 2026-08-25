@@ -184,8 +184,9 @@ class CathedralReceiptPolicy:
     receipt_verifier: ReceiptVerifier | None = None
     max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS
     # agent_enclave: the EXACT set of egress hosts the attested enclave may reach (the official
-    # base-model providers), and whether the enclave must pin their CA roots. This is the load-bearing
-    # anti-oracle pin for that profile — posture-bound below so a resume cannot widen it.
+    # base-model providers), and whether the receipt must carry tls_pinning=true. On Cathedral TDX
+    # that boolean means guest DNS plus CONNECT only to public IPv4 :443 — not an SPKI/CA pin set.
+    # Posture-bound below so a resume cannot widen the allowlist or drop the bit.
     expected_egress_allowlist: frozenset[str] | None = None
     require_tls_pinning: bool = True
     # When set, the receipt must prove its report_data is HARDWARE-bound to the dispatch nonce:
@@ -270,14 +271,20 @@ def _verify_agent_egress(task_policy: Mapping[str, Any], *, expected_hosts, requ
     # PolarIS guest jail uses allow:h1,h2. Cathedral mint maps that to restricted
     # plus egress_allowlist; accept the guest form so a signed PolarIS policy still
     # verifies if the mint copies the enforced string through.
-    if egress.startswith("allow:"):
+    if egress.lower().startswith("allow:"):
         polaris_hosts = [
             host.strip().lower().rstrip(".")
             for host in egress.split(":", 1)[1].split(",")
             if host.strip()
         ]
         egress = "restricted"
-        if not isinstance(allow, (list, tuple)):
+        if isinstance(allow, (list, tuple)):
+            listed = {str(h).lower().rstrip(".") for h in allow}
+            if listed != set(polaris_hosts):
+                raise CyberGymAttestError(
+                    "agent-enclave allow: string contradicts egress_allowlist"
+                )
+        else:
             allow = polaris_hosts
     if egress != "restricted":
         raise CyberGymAttestError(
@@ -289,7 +296,10 @@ def _verify_agent_egress(task_policy: Mapping[str, Any], *, expected_hosts, requ
             "(a broader allowlist reopens the answer-oracle)")
     if require_tls_pinning and task_policy.get("tls_pinning") is not True:
         raise CyberGymAttestError(
-            "agent-enclave must pin provider CA roots inside the enclave (tls_pinning=true)")
+            "agent-enclave tls_pinning=true means Cathedral TDX guest DNS plus CONNECT "
+            "only to public IPv4 :443, not an SPKI/CA pin set; PolarIS signs this boolean "
+            "for restricted allowlists"
+        )
 
 
 def _verify_report_data_nonce(receipt: Mapping[str, Any], *, nonce: str) -> None:
