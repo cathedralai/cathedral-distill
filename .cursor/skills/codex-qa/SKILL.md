@@ -16,7 +16,7 @@ Run this skill whenever you:
 - Are about to mark a PR ready for review
 - Are about to say the work is done, live, or shippable
 
-Skip only when the user explicitly says to skip QA. Missing Codex CLI login is not a skip.
+Do not skip because the Codex CLI is missing or unauthenticated. If the user explicitly cancels QA, write an INCOMPLETE report, keep the PR draft, and do not declare the work pass complete.
 
 ## Place in the work pass
 
@@ -24,7 +24,7 @@ Skip only when the user explicitly says to skip QA. Missing Codex CLI login is n
 2. Add or run focused tests.
 3. Commit and push a pre-testing revision when cloud-agent git rules require it.
 4. Run this Codex QA pass.
-5. Fix every Critical/High finding that is a fail-closed, honesty, or signed-policy mismatch in the same pass.
+5. Fix every fail-closed, honesty, contradictory-encoding, or signed-policy mismatch in the same pass, including findings labelled Medium or Low. Severity cannot convert those into residuals.
 6. Re-run focused tests.
 7. Update the PR with the QA verdict and residuals.
 8. Only then declare the work pass complete.
@@ -33,9 +33,9 @@ Skip only when the user explicitly says to skip QA. Missing Codex CLI login is n
 
 Try in order. Do not stall on login.
 
-1. If `npx @openai/codex` is installed and `codex doctor` reports credentials, or `OPENAI_API_KEY` is set, run Codex against the diff and the changed trust surfaces.
-2. Otherwise launch a Cursor `Task` subagent with model `gpt-5.6-sol-xhigh`. That is the Codex-family fallback when the CLI has no credentials.
-3. If both fail, write an INCONCLUSIVE artifact naming the blocker and still produce a structured self-audit in the same finding format. Do not claim Codex QA passed.
+1. If `npx @openai/codex` is installed and `codex doctor` reports credentials, run Codex against the diff and the changed trust surfaces. If doctor or the Codex invocation exits nonzero, go to step 2 immediately. A set but invalid `OPENAI_API_KEY` is a failure, not a pass.
+2. Launch a Cursor `Task` subagent with model `gpt-5.6-sol-xhigh`. That is the Codex-family fallback when the CLI is missing, unauthenticated, or failing.
+3. If the Task also fails, write an INCONCLUSIVE artifact naming the blocker and still produce a structured self-audit in the same finding format. Do not claim Codex QA passed.
 
 ## What to hand the reviewer
 
@@ -72,6 +72,8 @@ Fix in this pass:
 - Contradictory encodings that silently pick a winner
 - Docs or errors that claim a stronger guarantee than the code
 
+Those classes are `fix-now` even when labelled Medium or Low.
+
 Do not:
 
 - Invent unpublished measurements or solver digests
@@ -93,6 +95,8 @@ Write a markdown report:
 - Cloud agent runs: `/opt/cursor/artifacts/codex-qa-<topic>.md`
 - PolarIS: also `docs/qa-audits/YYYY-MM-DD-<topic>/` with the report plus evidence files
 
+Redact authorization headers, cookies, API keys, bearer tokens, raw hotkeys, and unredacted environment output. Do not commit those values.
+
 The report must include:
 
 - Verdict: live or not; ship-blocking or not
@@ -104,8 +108,8 @@ The report must include:
 
 The work pass is not complete if:
 
-- Unfixed C/H fail-closed or honesty findings remain
-- QA was skipped because credentials were missing
+- Any fail-closed, honesty, contradictory-encoding, or signed-policy finding remains unfixed
+- QA was skipped, INCOMPLETE, or INCONCLUSIVE
 - Production or live was claimed without a fresh catalog or receipt fetch
 
-A PR may be marked ready after QA when residuals are named in the PR body and are outside the claimed scope.
+A PR may be marked ready after QA when remaining residuals are named in the PR body and are outside the claimed scope.

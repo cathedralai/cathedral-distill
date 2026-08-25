@@ -18,9 +18,11 @@ fail-closed and honesty findings in the same pass.
 
 - Documented collected-test counts in `README.md` must match the suite.
   `tests/test_documented_counts.py` fails if they drift.
-- PolarIS `allow:` egress may map to `restricted` only when the allowlist
-  matches. Contradictory `allow:` versus `egress_allowlist` must reject.
-- `tls_pinning: true` is the SN39 boolean. On Cathedral-hosted TDX it means
-  guest DNS plus CONNECT to public IPv4 :443, not SPKI or CA pinning. Error
-  text must stay honest. Do not enable `agent_enclave` rewards on that bit
-  alone.
+- Trust copy must not claim a stronger guarantee than enforcement.
+  `tls_pinning: true` on Cathedral-hosted TDX means guest DNS plus CONNECT
+  to public IPv4 :443, not SPKI or CA pinning. Do not enable `agent_enclave`
+  rewards on that bit alone.
+- PolarIS `allow:` mapping is not on `main` until the consumer PR merges.
+  When that work is in scope, contradictory `allow:` versus
+  `egress_allowlist` must reject. Do not describe the mapping as already
+  shipped.
