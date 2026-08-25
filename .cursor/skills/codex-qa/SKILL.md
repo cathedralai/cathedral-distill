@@ -124,6 +124,7 @@ Redact authorization headers, cookies, API keys, bearer tokens, raw hotkeys, and
 The report must include:
 
 - Verdict: live or not; ship-blocking or not
+- Model and effort actually used, including any usage fallback
 - Findings
 - What was fixed in this pass versus residual
 - Commands and URLs used as evidence
