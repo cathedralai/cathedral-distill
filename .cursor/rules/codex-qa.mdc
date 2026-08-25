@@ -7,6 +7,6 @@ alwaysApply: true
 
 After implementation and tests, before declaring work done or marking a PR ready, follow `.cursor/skills/codex-qa/SKILL.md`. Do not wait to be asked.
 
-Missing Codex CLI login is not a skip. Pin model and effort: Codex CLI `gpt-5.5` with `-c model_reasoning_effort='"xhigh"'`; if `codex doctor` or the CLI exits nonzero, fall back to a Cursor Task with model `gpt-5.6-sol-xhigh` (effort is the slug). Write the report to `/opt/cursor/artifacts/codex-qa-<topic>.md`.
+Default model is GPT-5.6 extra high: Codex CLI `gpt-5.6-sol` with `-c model_reasoning_effort='"xhigh"'`, or Cursor Task `gpt-5.6-sol-xhigh`. Drop to GPT-5.6 high only when extra-high usage is exhausted (429/quota/rate limit). Missing CLI login is not usage exhaustion. Do not use GPT-5.5. Write `/opt/cursor/artifacts/codex-qa-<topic>.md`.
 
 Fix fail-closed and honesty findings in the same pass, including Medium or Low labels. Do not invent unpublished measurements, and do not claim a draft mint is live. If the user cancels QA, keep the PR draft and mark the pass INCOMPLETE.

@@ -31,14 +31,17 @@ Do not skip because the Codex CLI is missing or unauthenticated. If the user exp
 
 ## Model and effort
 
-Pin both. Do not inherit `~/.codex/config.toml` defaults.
+Default is GPT-5.6 extra high. Do not inherit `~/.codex/config.toml` defaults. Do not use GPT-5.5.
 
-| Path | Model | Effort |
-|---|---|---|
-| Codex CLI | `gpt-5.5` | `xhigh` via `model_reasoning_effort` |
-| Cursor Task fallback | `gpt-5.6-sol-xhigh` | `xhigh` is the slug suffix |
+| Priority | Path | Model | Effort |
+|---|---|---|---|
+| 1 | Codex CLI (if authenticated) | `gpt-5.6-sol` | `xhigh` (`Extra High`) |
+| 1 | Cursor Task | `gpt-5.6-sol-xhigh` | `xhigh` is the slug |
+| 2 | Usage fallback only | `gpt-5.6-sol` / `gpt-5.6-sol-high` | `high` |
 
-Do not use `gpt-5.6-sol-high`, `gpt-5.6-sol-xhigh-fast`, or an unpinned CLI run. The Task tool has no separate effort argument; the slug is the effort pin.
+Treat as extra-high usage exhaustion only when the error is quota, rate limit, HTTP 429, `insufficient_quota`, or an explicit usage-cap message. Missing CLI login is not usage exhaustion.
+
+Do not use `gpt-5.6-sol-xhigh-fast`, `gpt-5.6-luna-high`, or an unpinned CLI run as the first choice. The Task tool has no separate effort argument; the slug is the effort pin. If extra high is usage-exhausted, retry once at GPT-5.6 high and name that fallback in the QA report. If GPT-5.6 is entirely unavailable, write INCONCLUSIVE and self-audit. Do not silently drop to 5.5.
 
 ## Runner
 
@@ -48,15 +51,15 @@ Try in order. Do not stall on login.
 
    ```sh
    npx @openai/codex review --base main \
-     -c model='"gpt-5.5"' \
+     -c model='"gpt-5.6-sol"' \
      -c model_reasoning_effort='"xhigh"'
    ```
 
-   Use the PR base branch if it is not `main`. If doctor or the Codex invocation exits nonzero, go to step 2 immediately. A set but invalid `OPENAI_API_KEY` is a failure, not a pass.
+   Use the PR base branch if it is not `main`. If the CLI reports usage exhaustion, retry the same command with `model_reasoning_effort='"high"'` and continue. If doctor fails, credentials are missing, or the CLI exits nonzero for a non-usage reason, go to step 2 immediately. A set but invalid `OPENAI_API_KEY` is a failure, not a pass.
 
-2. Launch a Cursor `Task` subagent with model `gpt-5.6-sol-xhigh`. That is the Codex-family fallback when the CLI is missing, unauthenticated, or failing.
+2. Launch a Cursor `Task` subagent with model `gpt-5.6-sol-xhigh`. That is also the path when the CLI is missing or unauthenticated. If that Task fails with usage exhaustion, retry once with model `gpt-5.6-sol-high`.
 
-3. If the Task also fails, write an INCONCLUSIVE artifact naming the blocker and still produce a structured self-audit in the same finding format. Do not claim Codex QA passed.
+3. If both extra high and the usage fallback fail, write an INCONCLUSIVE artifact naming the blocker and still produce a structured self-audit in the same finding format. Do not claim Codex QA passed.
 
 ## What to hand the reviewer
 
