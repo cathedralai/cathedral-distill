@@ -1,23 +1,30 @@
 # CyberGym on Intel TDX — the attestation model
 
 A CyberGym solve earns only when it ran inside a genuine Intel TDX enclave and the
-validator can verify it. Three Cathedral profiles provide that, with complementary
-strengths; [`cybergym_cathedral_attest.py`](../cathedral_distill/cybergym_cathedral_attest.py)
-verifies all three, fail-closed.
+validator can verify it. `verify_submission_receipt`
+([`cybergym_attest.py`](../cathedral_distill/cybergym_attest.py)) routes **three** profiles,
+fail-closed — each attesting a strictly stronger property than the last:
 
-| | `attest.v1` — result quote | `custom.v1` — boot quote | `custom.v1` — persistent enclave key |
+| | `attest.v1` — result quote | `persistent_enclave` — baked-corpus worker | `agent_enclave` — in-enclave agent |
 |---|---|---|---|
-| **What runs** | one bounded command, stock image + uploaded workspace | a customer image on a sealed worker, SSH access | a persistent worker with the corpus baked in, an enclave-held signing key |
-| **Binds** | the exact `(task, poc, trace)` via `report_data[32:64]` | the machine boot + the customer SSH key | `workload_sha256` + `result_sha256` — the approved solver's result envelope signs `(task, poc, trace[, verdict])` |
-| **`workload_result_binding`** | yes | no | **yes** |
-| **Real corpus image?** | no (bounded; can't hold the ~4 GB arvo image) | **yes** — runs `n132/arvo:{id}` in TDX | **yes** — corpus baked into the sealed worker |
-| **Pricing** | $0.20 / completed receipt | ~$0.40 / worker-hour (Sealed CPU Small), from workload-ready | ~$0.40 / worker-hour, amortized across a long-lived worker |
-| **Adapter** | `verify_cathedral_attestation(...)` | `verify_boot_attestation(...)` | `verify_persistent_enclave_attestation(...)` |
+| **What runs** | one bounded command, stock image + uploaded workspace | a persistent worker with the corpus baked in and an enclave-held key runs the vul/fix differential on a **supplied** PoC | the reasoning agent **manufactures** the PoC inside a firewalled enclave, and the same enclave runs the differential |
+| **Binds** | the exact `(task, poc, trace)` via `report_data[32:64]` | `workload_sha256` + `result_sha256` — the approved solver's envelope signs `(task, poc, trace, verdict)` | the above **plus** a pinned workload and a **verified egress allowlist** |
+| **What it proves** | a bounded command ran attested — synthetic tasks only (a bounded enclave can't hold the ~4 GB arvo image) | an approved solver **verified** this PoC in a real enclave. The PoC is an **input**, so this does *not* prove the PoC was found there | the PoC was **discovered** inside the firewalled enclave — the anti-lookup control |
+| **Real corpus image?** | no | **yes** | **yes** |
+| **Adapter** | `verify_cathedral_attestation(...)` | `verify_persistent_enclave_attestation(...)` | routed in `verify_submission_receipt`; worker `cybergym_agent_enclave_solver.py` |
 
-`attest.v1` and `custom.v1` are proven live on real hardware (real Intel DCAP quotes).
-The persistent-enclave **verifier** is implemented and tested; its enclave **worker**
-(boot-time keygen, in-enclave differential) is the remaining infrastructure build
-(#94/#95).
+`attest.v1` is proven live on real hardware (real Intel DCAP quotes). The persistent-enclave
+verifier **and** its worker (`cybergym_enclave_solver.py`) are implemented and tested — but
+because the PoC is supplied to that worker, it attests **verification, not discovery**: a
+miner can look up a PoC and feed it in. The `agent_enclave` profile is the control that
+closes that gap by attesting discovery, and it is **not yet live** — no restricted-egress
+Cathedral profile exists to obtain a real receipt (`cybergym_agent_enclave_solver` runs under
+a simulation harness today; egress is not enforced). That is the remaining anti-lookup
+build, tracked as `cathedral-compute#142`.
+
+> **`custom.v1` boot quote** (`verify_boot_attestation`) binds only the machine boot and the
+> customer SSH key — `workload_result_binding` is always false — so it is **not** a submission
+> credit path: `verify_submission_receipt` does not route it.
 
 ## `attest.v1` — result-bound solve
 
@@ -38,6 +45,13 @@ with an out-of-enclave trace. Because the enclave is bounded, this path runs **s
 tasks (the un-cheatable holdout), which solve fully in-enclave.
 
 ## `custom.v1` — real corpus image, in TDX
+
+> **Background / design note.** This section walks through the `custom.v1` boot-quote
+> mechanics and their evolution into the persistent enclave. Per the routing table above,
+> the boot quote is **not** a submission credit path (`verify_submission_receipt` does not
+> route it); the live credit paths are `attest.v1` / `persistent_enclave` / `agent_enclave`;
+> and the persistent enclave attests *verification*, not *discovery* — the `agent_enclave`
+> profile (`cathedral-compute#142`), not yet live, is the anti-lookup control.
 
 A sealed TDX worker keeps the **real** `n132/arvo:{id}-vul` build running with SSH access
 after a *verified boot*. The miner SSHes in and runs the genuine reproduction
