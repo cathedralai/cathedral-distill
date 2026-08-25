@@ -84,6 +84,18 @@ def test_provider_restricted_egress_is_attested():
     assert "attested_intel_tdx_enclave_result_bound" in result["reason"]
 
 
+def test_polaris_allow_egress_string_is_treated_as_restricted():
+    result = _verify(
+        {
+            "hardware_class": "tdx_cpu",
+            "reuse": "forbidden",
+            "egress": "allow:api.deepseek.com,api.openai.com",
+            "tls_pinning": True,
+        }
+    )
+    assert result["profile"] == PROFILE_AGENT_ENCLAVE
+
+
 def test_broader_or_missing_egress_is_refused():
     for task_policy in (
         {**GOOD_POLICY, "egress": "none"},                       # cannot serve a reasoning agent

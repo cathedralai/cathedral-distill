@@ -266,11 +266,23 @@ def _verify_agent_egress(task_policy: Mapping[str, Any], *, expected_hosts, requ
     if not expected:
         raise CyberGymAttestError("no approved egress hosts; refusing an unconstrained agent enclave")
     egress = str(task_policy.get("egress", ""))
+    allow = task_policy.get("egress_allowlist")
+    # PolarIS guest jail uses allow:h1,h2. Cathedral mint maps that to restricted
+    # plus egress_allowlist; accept the guest form so a signed PolarIS policy still
+    # verifies if the mint copies the enforced string through.
+    if egress.startswith("allow:"):
+        polaris_hosts = [
+            host.strip().lower().rstrip(".")
+            for host in egress.split(":", 1)[1].split(",")
+            if host.strip()
+        ]
+        egress = "restricted"
+        if not isinstance(allow, (list, tuple)):
+            allow = polaris_hosts
     if egress != "restricted":
         raise CyberGymAttestError(
             f"agent-enclave egress must be 'restricted' to the provider allowlist, got {egress!r}: "
             "'none' cannot serve a reasoning agent and 'any'/absent reopens the self-hosted oracle")
-    allow = task_policy.get("egress_allowlist")
     if not isinstance(allow, (list, tuple)) or {str(h).lower() for h in allow} != expected:
         raise CyberGymAttestError(
             "agent-enclave egress_allowlist is not EXACTLY the approved provider hosts "
