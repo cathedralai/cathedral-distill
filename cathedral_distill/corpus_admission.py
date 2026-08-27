@@ -111,6 +111,32 @@ _SOURCE_LOCATION_RE = re.compile(
 _SOURCE_LOCATION_FIELDS = frozenset({"sanitizer_trace"})
 
 
+#: ``arvo:<n>`` / ``oss-fuzz:<n>`` name a publicly pullable image (``n132/arvo:<n>-vul``,
+#: ``cybergym/oss-fuzz:<n>-vul``) whose baked ``/tmp/poc`` any miner can read (e.g.
+#: ``docker run --rm --entrypoint cat n132/arvo:<n>-vul /tmp/poc``). The id is therefore
+#: an origin fingerprint IN ITSELF — independent of the
+#: disclosed context (which :func:`disclosed_origin_fingerprints` covers) and of whether
+#: OUR image is private (which the public-answer probe covers). Case-insensitive so an
+#: ``ARVO:``-cased id cannot evade; ``\b`` before the keyword so ``harvo:`` / ``boss-fuzz:``
+#: do not false-match. Issue #157 — the smallest close before v3; seal-time origin
+#: genericisation is the full fix (#131).
+_PUBLIC_CATALOG_TASK_ID_RE = re.compile(r"\b(?:arvo|oss-fuzz):\d+", re.IGNORECASE)
+
+
+def public_catalog_task_id(task_id: str) -> str | None:
+    """The public-catalog reference embedded in ``task_id`` (normalised), or ``None``.
+
+    A non-``None`` return means the id names a publicly pullable ``n132/<id>-vul`` image,
+    so the reference reproducer can be read without solving. Admission refuses such a task
+    on BOTH the tag path (:func:`admit`) and the private-v2 path
+    (:func:`admit_private_manifest`) because both funnel through :func:`_admit`; putting
+    the check anywhere else would leave the other path leaking through the same id
+    (issue #157). A private image carrying a NON-catalog id is unaffected.
+    """
+    match = _PUBLIC_CATALOG_TASK_ID_RE.search(task_id or "")
+    return match.group(0).lower() if match else None
+
+
 def disclosed_origin_fingerprints(
     level: int,
     context: Mapping[str, str],
@@ -182,6 +208,13 @@ class Admission:
     #: (which is about our own image being pullable): the leak here is the metadata,
     #: not the image.
     disclosure_leaks_origin: bool = False
+    #: The task_id ITSELF names a public catalog entry (``arvo:<n>`` / ``oss-fuzz:<n>``),
+    #: so a miner can pull ``n132/<id>-vul`` and read ``/tmp/poc`` without solving. A
+    #: distinct axis from `disclosure_leaks_origin` (the disclosed metadata) and
+    #: `answer_is_public` (our own image being pullable): here the id string is the leak,
+    #: and the refusal needs no registry probe, so it holds even when the probe cannot run.
+    #: Issue #157.
+    task_id_leaks_origin: bool = False
     reasons: tuple[str, ...] = field(default_factory=tuple)
 
     def as_dict(self) -> dict:
@@ -193,6 +226,7 @@ class Admission:
             "answer_is_public": self.answer_is_public,
             "answer_probe_errored": self.answer_probe_errored,
             "disclosure_leaks_origin": self.disclosure_leaks_origin,
+            "task_id_leaks_origin": self.task_id_leaks_origin,
             "reasons": list(self.reasons),
         }
 
@@ -434,17 +468,28 @@ def _admit(task_id: str, *, reference: Callable[[], bytes | None],
             "identifiers) or lower the disclosure level"
         )
 
+    catalog_id = public_catalog_task_id(task_id)
+    if catalog_id:
+        reasons.append(
+            f"the task_id names the public catalog entry {catalog_id}; its reference "
+            "reproducer is readable straight from the public catalog image without "
+            "solving. The id itself fingerprints the public origin (issue #157), "
+            "independent of whether our own image is private and without any registry "
+            "probe — refused at admission. Genericise the id at seal time (#131)"
+        )
+
     return Admission(
         task_id=task_id,
         scoreable=(
             discriminates and solvable and not probe.public and not probe.errored
-            and not fingerprints
+            and not fingerprints and not catalog_id
         ),
         discriminates=discriminates,
         solvable=solvable,
         answer_is_public=probe.public,
         answer_probe_errored=probe.errored,
         disclosure_leaks_origin=bool(fingerprints),
+        task_id_leaks_origin=bool(catalog_id),
         reasons=tuple(reasons),
     )
 

@@ -688,7 +688,8 @@ def test_private_artifact_directories_are_digest_addressed(tmp_path):
 
 
 def test_v2_admission_reads_the_validator_held_reference_not_the_image():
-    manifest = _manifest("arvo:368", reward_ready=True)
+    # sealed non-catalog id: a bare `arvo:<n>` is refused at admission (#157)
+    manifest = _manifest("synthvuln:deadbeef:368", reward_ready=True)
     _, references = _private_stores(manifest)
     seen = []
 
@@ -699,7 +700,7 @@ def test_v2_admission_reads_the_validator_held_reference_not_the_image():
         raise AssertionError("v2 admission must not read /tmp/poc from a verifier image")
 
     def backend(task_id, poc, mode, *, manifest, **kwargs):
-        assert manifest is not None and task_id == "arvo:368"
+        assert manifest is not None and task_id == "synthvuln:deadbeef:368"
         return int(poc == CRASHING and mode == "vul")
 
     admission = admit_private_manifest(
