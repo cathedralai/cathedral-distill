@@ -98,15 +98,20 @@ def _stamp(entries, **over):
 
 
 class TestStampingHappyPath:
-    def test_an_affirmed_task_is_stamped_with_verdict_time_and_digest(self):
+    def test_a_public_catalog_id_is_stamped_refused_as_leaking(self):
+        # #157 retires the tag-path affirm: a public-catalog id (the only kind the stamp
+        # tool can map) is refused at admission, so the stamp RECORDS the refusal
+        # (admitted:false) with the leak reason rather than dropping it, and never binds
+        # an image digest for a task it will not score. Affirming a scoreable holdout now
+        # belongs to the sealed private-manifest flow (`synthvuln:` ids), not this tool.
         [stamped] = _stamp([_entry()])
-        assert stamped["admitted"] is True
+        assert stamped["admitted"] is False
         record = stamped["admission"]
-        assert record["admitted"] is True
+        assert record["admitted"] is False
         assert record["probe"] == "not_public"
-        assert record["reasons"] == []
+        assert record["image_digest"] is None
         assert record["admitted_at"] == "2026-08-04T12:00:00Z"
-        assert record["image_digest"] == _DIGEST
+        assert any("public catalog entry arvo:10400" in reason for reason in record["reasons"])
 
     def test_the_entry_body_and_context_survive_the_stamp(self):
         context = {"description": "heap overflow in the length parser"}
@@ -117,15 +122,15 @@ class TestStampingHappyPath:
         assert stamped["disclosed_at"] == "2026-07-20T00:00:00Z"
         assert stamped["context"] == context
 
-    def test_the_stamp_round_trips_through_load_holdout(self):
-        """The digest written at admission is the digest exposed at scoring —
-        the whole point: a runtime that later pulls the tag has something the
-        gate actually inspected to compare against."""
+    def test_a_refused_catalog_id_round_trips_through_load_holdout(self):
+        """A stamped refusal (admitted:false) is still a valid manifest the loader
+        accepts — the refusal is auditable in the artifact — and no image digest is
+        bound for a task that will not be scored (#157)."""
         stamped = _stamp([_entry()])
         holdout = load_holdout(stamped)
         [task] = holdout.pool._tasks
-        assert task.admitted is True
-        assert holdout.image_digest("arvo:10400") == _DIGEST
+        assert task.admitted is False
+        assert holdout.image_digest("arvo:10400") is None
         assert holdout.image_digest("arvo:absent") is None
 
 
@@ -150,16 +155,18 @@ class TestStampingFailsClosed:
         assert any("publicly pullable" in reason
                    for reason in stamped["admission"]["reasons"])
 
-    def test_an_unresolvable_digest_refuses_an_otherwise_admitted_task(self):
-        """The gate said yes but the decision cannot name the bytes it saw:
-        stamping it true would be exactly the unbound honor-system claim the
-        tool exists to retire, so the verdict flips to refused."""
+    def test_a_public_catalog_id_is_refused_before_any_digest_resolution(self):
+        """#157 short-circuits before the digest-binding branch: the gate already
+        refused the catalog id, so `resolve_image_digest` is never reached and the
+        'cannot be bound' reason (which only fires for a scoreable-but-unbindable task)
+        does not appear — the leak reason does."""
         [stamped] = _stamp([_entry()], _run=_runner(digest=None))
         assert stamped["admitted"] is False
-        assert stamped["admission"]["probe"] == "not_public"
         assert stamped["admission"]["image_digest"] is None
-        assert any("cannot be bound" in reason
+        assert any("public catalog entry" in reason
                    for reason in stamped["admission"]["reasons"])
+        assert not any("cannot be bound" in reason
+                       for reason in stamped["admission"]["reasons"])
 
     def test_a_prior_stamp_is_rederived_not_trusted(self):
         """Re-stamping re-decides from scratch: a stale admitted-true stamp on a
@@ -300,11 +307,11 @@ class TestFileRoundTripAndCli:
         written = json.loads(out.read_text())
         assert written["schema"] == "cathedral-holdout-v1"  # other top-level keys survive
         [stamped] = written["tasks"]
-        assert stamped["admitted"] is True
-        assert stamped["admission"]["image_digest"] == _DIGEST
-        # And the artifact on disk is loadable, digest intact.
+        assert stamped["admitted"] is False  # catalog id refused (#157)
+        assert stamped["admission"]["image_digest"] is None
+        # And the artifact on disk is loadable, the refusal intact.
         holdout = load_holdout(written["tasks"])
-        assert holdout.image_digest("arvo:10400") == _DIGEST
+        assert holdout.image_digest("arvo:10400") is None
 
     def test_a_bare_list_manifest_stays_a_bare_list(self, tmp_path):
         source = tmp_path / "holdout.json"
@@ -312,7 +319,7 @@ class TestFileRoundTripAndCli:
         source.write_text(json.dumps([_entry()]))
         stamp_holdout_file(source, out, _run=_runner(), _backend=_backend, now=_clock)
         written = json.loads(out.read_text())
-        assert isinstance(written, list) and written[0]["admitted"] is True
+        assert isinstance(written, list) and written[0]["admitted"] is False  # catalog id refused (#157)
 
     def test_overwriting_the_input_is_refused(self, tmp_path):
         source = tmp_path / "holdout.json"

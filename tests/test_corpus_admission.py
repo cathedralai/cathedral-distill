@@ -24,6 +24,7 @@ from cathedral_distill.corpus_admission import (
     disclosed_origin_fingerprints,
     answer_is_public,
     probe_public_answer_image,
+    public_catalog_task_id,
     reference_poc,
     require_admitted_private_manifest,
     scoreable,
@@ -98,10 +99,12 @@ class TestDiscrimination:
         assert any("control inputs" in r for r in result.reasons)
 
     def test_a_well_formed_task_is_admitted(self):
+        # A bare `arvo:<n>` id is refused (#157) and the tag path only maps catalog kinds,
+        # so a scoreable task is a private manifest with a sealed, NON-catalog id.
         real = b"\xff\xfe crash me"
-        result = admit(
-            "arvo:10400",
-            _run=_runner(poc=real, manifest_ok=False),  # not publicly pullable
+        (result,) = admit_private_manifest(
+            _private_manifest("synthvuln:deadbeef:1"),
+            _run=_runner(poc=real, manifest_ok=False),  # our image is not publicly pullable
             _backend=_backend(crashes_on=lambda poc, mode: poc == real and mode != "fix"),
         )
         assert result.discriminates is True
@@ -300,22 +303,20 @@ class TestReferenceExtraction:
 
 
 class TestScoreableFilter:
-    def test_only_admitted_tasks_survive(self):
+    def test_public_catalog_ids_are_all_refused_by_the_filter(self):
+        # #157: every public-catalog id is refused at admission regardless of quality, so
+        # the tag-path `scoreable()` filter now yields nothing — the scoreable path is a
+        # sealed private manifest (see TestPublicCatalogTaskId). The discrimination axis
+        # itself is covered by TestDiscrimination.
         real = b"good"
 
-        def run_for(task_id):
-            return _runner(poc=real if task_id != "arvo:3938" else b"", manifest_ok=False)
-
         def backend(task_id, poc, mode, **kwargs):
-            if task_id == "arvo:3938":
-                return 1 if mode != "fix" else 0      # crashes on anything
             return 1 if poc == real and mode != "fix" else 0
 
-        kept = [
-            t for t in ("arvo:368", "arvo:3938", "arvo:10400")
-            if admit(t, _run=run_for(t), _backend=backend).scoreable
-        ]
-        assert kept == ["arvo:368", "arvo:10400"]
+        ids = ("arvo:368", "oss-fuzz:9", "arvo:10400")
+        verdicts = [admit(t, _run=_runner(poc=real, manifest_ok=False), _backend=backend) for t in ids]
+        assert all(v.task_id_leaks_origin and not v.scoreable for v in verdicts)
+        assert scoreable(list(ids), _run=_runner(poc=real, manifest_ok=False), _backend=backend) == []
 
 
 def _private_manifest_ctx(task_id: str, context: dict, *, level: int = 2, origin_terms=None):
@@ -431,7 +432,8 @@ class TestDisclosureFingerprint:
         assert any("cffparse.c:440" in r and "public" in r for r in result.reasons)
 
     def test_genericising_the_disclosure_restores_scoreability(self):
-        manifest = _private_manifest_ctx("arvo:900001", _CLEAN_TRACE)
+        # sealed non-catalog id so the DISCLOSURE axis is isolated from the #157 id-leak axis
+        manifest = _private_manifest_ctx("synthvuln:aabbccdd:0", _CLEAN_TRACE)
         real = b"known differential crash"
 
         def run(argv, **kwargs):
@@ -499,11 +501,11 @@ class TestDisclosureFingerprint:
         """The seal-time genericised context (no hidden term present) passes, and the
         private origin_terms are never in the dispatched context."""
         manifest = _private_manifest_ctx(
-            "arvo:900001",
+            "synthvuln:aabbccdd:0",  # non-catalog id: isolate the disclosure axis from #157
             {"description": "re-sealed bug", "sanitizer_trace": "AddressSanitizer: heap-use-after-free"},
             origin_terms=["freetype2", "cff_parse_num", "cffparse.c"],
         )
-        task = manifest.task("arvo:900001")
+        task = manifest.task("synthvuln:aabbccdd:0")
         assert "origin_terms" not in task.context  # private, never dispatched
         real = b"known differential crash"
 
@@ -544,8 +546,8 @@ class TestDisclosureFingerprint:
 
 class TestPrivateManifestAdmission:
     def test_checks_the_manifests_pinned_images_and_bound_backend(self):
-        manifest = _private_manifest("arvo:10400")
-        task = manifest.task("arvo:10400")
+        manifest = _private_manifest("synthvuln:deadbeef:1")  # non-catalog id (a bare arvo:<n> is refused, #157)
+        task = manifest.task("synthvuln:deadbeef:1")
         real = b"known differential crash"
         seen = {"images": [], "backend": []}
 
@@ -580,8 +582,8 @@ class TestPrivateManifestAdmission:
         passing a probe runner must not starve the reproduction backend of a real runner
         (the reseal-on-rig bug — docker_reproduce_backend would run its differential
         through a function that only answers `manifest inspect`)."""
-        manifest = _private_manifest("arvo:10400")
-        task = manifest.task("arvo:10400")
+        manifest = _private_manifest("synthvuln:deadbeef:1")  # non-catalog id (a bare arvo:<n> is refused, #157)
+        task = manifest.task("synthvuln:deadbeef:1")
         real = b"known differential crash"
         routed = {"backend_run": [], "probe": []}
 
@@ -620,3 +622,69 @@ class TestPrivateManifestAdmission:
         with pytest.raises(ReproManifestError, match="arvo:3938") as excinfo:
             require_admitted_private_manifest(manifest, _run=run, _backend=backend)
         assert "control inputs" in str(excinfo.value)
+
+
+class TestPublicCatalogTaskId:
+    """#157: a `task_id` that names a public catalog entry is refused at admission.
+
+    The id itself is an origin fingerprint — `n132/arvo:<n>-vul` is publicly pullable and
+    its `/tmp/poc` is the answer — so it must be refused on BOTH the tag path and the
+    private-v2 path, independent of whether OUR image is private and without any registry
+    probe. This is the smallest close before v3 (seal-time genericisation is #131).
+    """
+
+    @staticmethod
+    def _good():
+        real = b"real crash"
+        return dict(
+            _run=_runner(poc=real, manifest_ok=False),  # our image is NOT publicly pullable
+            _backend=_backend(crashes_on=lambda poc, mode: poc == real and mode != "fix"),
+        )
+
+    def test_a_public_catalog_arvo_id_is_refused_though_the_image_is_private(self):
+        result = admit("arvo:900001", **self._good())
+        assert result.discriminates is True and result.solvable is True
+        assert result.answer_is_public is False       # the IMAGE is private...
+        assert result.task_id_leaks_origin is True     # ...but the ID names the public twin
+        assert result.scoreable is False
+        assert any("names the public catalog entry arvo:900001" in r for r in result.reasons)
+
+    def test_an_oss_fuzz_id_is_also_refused(self):
+        result = admit("oss-fuzz:41337", **self._good())
+        assert result.task_id_leaks_origin is True
+        assert result.scoreable is False
+
+    def test_the_refuse_holds_with_no_registry_probe(self):
+        # the id alone decides it; the answer-probe verdict is irrelevant to this axis
+        result = admit("arvo:900001", **{**self._good(), "_run": _runner(poc=b"real crash",
+                                                                         manifest_ok=True)})
+        assert result.task_id_leaks_origin is True and result.scoreable is False
+
+    def test_the_same_leak_closes_on_the_private_v2_path(self):
+        # #157's core: putting the refuse in _admit() closes the manifest path too
+        results = admit_private_manifest(
+            _private_manifest("arvo:900001"),
+            _run=_runner(poc=b"real crash", manifest_ok=False),
+            _backend=_backend(crashes_on=lambda poc, mode: mode != "fix"),
+        )
+        assert results[0].task_id_leaks_origin is True and results[0].scoreable is False
+
+    def test_a_private_non_catalog_id_still_scores(self):
+        # the production path: a sealed, non-catalog id with its own pinned private images
+        real = b"real crash"
+        (result,) = admit_private_manifest(
+            _private_manifest("synthvuln:cafebabe:0"),
+            _run=_runner(poc=real, manifest_ok=False),
+            _backend=_backend(crashes_on=lambda poc, mode: poc == real and mode != "fix"),
+        )
+        assert result.task_id_leaks_origin is False
+        assert result.scoreable is True
+        assert result.reasons == ()
+
+    def test_case_and_suffix_do_not_evade_the_helper(self):
+        for tid in ("arvo:900001", "ARVO:900001", "Arvo:900001", "oss-fuzz:1", "arvo:900001-vul"):
+            assert public_catalog_task_id(tid) is not None
+
+    def test_lookalikes_that_are_not_the_catalog_form_are_not_flagged(self):
+        for tid in ("synthvuln:cafebabe:0", "harvo:1", "boss-fuzz:2", "arvox:3", "arvo-1", "arvo:", "arvofuzz"):
+            assert public_catalog_task_id(tid) is None
