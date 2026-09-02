@@ -357,12 +357,285 @@ def evaluate_harness(
     )
 
 
+# -- consensus: one authoritative run, deterministic re-grading (#137) ------------------- #
+#
+# ``evaluate_harness`` EXECUTES the harness, and nothing can make that execution reproducible:
+# the harness is a reasoning agent, so the production runner reaches a model
+# (``cybergym_attest._verify_agent_egress`` restricts agent-enclave egress to the model hosts
+# rather than denying it, precisely because "a reasoning agent MUST reach the model"), and LLM
+# sampling is not bit-identical across independent runs. So the issue's second option — an
+# enforced reproducibility contract for per-validator re-execution — is not merely expensive,
+# it is unachievable for the workload Stage 1 grades. Two honest validators re-running the same
+# harness WILL disagree, and that disagreement would land straight on weights.
+#
+# The half that IS deterministic is the differential: given the same exploit bytes, every
+# validator observes the same vul/fix outcome, and #153/#166 made that a guarantee rather than
+# a hope (a candidate solve is confirmed by repetition, and a flaky crash scores
+# `nondeterministic_crash` instead of crediting on luck).
+#
+# So the decision this encodes is the issue's FIRST option, along the seam that already exists:
+# the harness runs ONCE in the attested enclave and its per-task output is COMMITTED by digest
+# (`HarnessResult.exploit_sha256`, the `PoCSubmission`/`poc_sha256` pattern); every validator
+# then grades those committed bytes with :func:`grade_committed_execution`, which takes no
+# runner and therefore cannot introduce the divergence. Byte-identical ranking across validators
+# is a precondition for weight consumption, and it is reachable only on this side of the seam.
+
+
+@dataclass(frozen=True)
+class CommittedRun:
+    """One task's output from the single authoritative harness execution, by digest.
+
+    ``exploit_sha256`` is ``None`` when the harness produced no exploit — committed as such,
+    so "produced nothing" is an attested outcome rather than a gap a re-grader has to guess at.
+    """
+
+    task_id: str
+    exploit_sha256: str | None
+    log_sha256: str | None = None
+    exit_reason: str = ""
+    duration_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        if not str(self.task_id):
+            raise HarnessError("a committed run needs a task_id")
+        for field_name in ("exploit_sha256", "log_sha256"):
+            value = getattr(self, field_name)
+            if value is not None and not _DIGEST_RE.match(str(value)):
+                raise HarnessError(f"{field_name} must be sha256:<64 hex> or None")
+
+
+@dataclass(frozen=True)
+class HarnessExecution:
+    """The attested record of the ONE authoritative execution of a harness on one batch.
+
+    This is what leaves the enclave and what every validator grades from. It binds the run to
+    the harness and the batch it was drawn for, so a record cannot be replayed against a
+    different batch or credited to a different harness.
+    """
+
+    miner_hotkey: str
+    harness_digest: str
+    batch_id: str
+    runs: tuple[CommittedRun, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if not _DIGEST_RE.match(str(self.harness_digest)):
+            raise HarnessError("harness_digest must be sha256:<64 hex>")
+        seen = [r.task_id for r in self.runs]
+        if len(seen) != len(set(seen)):
+            raise HarnessError("a committed execution carries one run per task; ids repeat")
+
+    def run_for(self, task_id: str) -> CommittedRun | None:
+        for r in self.runs:
+            if r.task_id == task_id:
+                return r
+        return None
+
+    def digest(self) -> str:
+        """Canonical digest of the whole record — what an enclave binds into its quote.
+
+        "Run once with ATTESTED committed bytes" needs one value to attest; this is it. The
+        enclave puts this in the quote's report_data, so a validator can check that the
+        execution it is grading is the one the hardware signed, rather than trusting whoever
+        handed it the record. Field order is canonical so the digest does not depend on how
+        the record happened to be serialised.
+        """
+        body = json.dumps(
+            {
+                "miner_hotkey": self.miner_hotkey,
+                "harness_digest": self.harness_digest,
+                "batch_id": self.batch_id,
+                "runs": sorted(
+                    (
+                        {
+                            "task_id": r.task_id,
+                            "exploit_sha256": r.exploit_sha256,
+                            "log_sha256": r.log_sha256,
+                            "exit_reason": r.exit_reason,
+                            "duration_ms": r.duration_ms,
+                        }
+                        for r in self.runs
+                    ),
+                    key=lambda row: row["task_id"],
+                ),
+            },
+            sort_keys=True, separators=(",", ":"),
+        ).encode()
+        return "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+def execution_from_score(score: HarnessScore, dispatch: DispatchMessage) -> HarnessExecution:
+    """The committable record of a producer-side ``evaluate_harness`` run.
+
+    The enclave grades and commits in one pass; this is the projection of that pass onto the
+    bytes a validator is allowed to re-derive a rank from.
+
+    Takes the DISPATCH rather than a bare ``batch_id`` so the record cannot be mis-bound at the
+    point it is created: a record built against the wrong batch is refused at grading time
+    anyway, but a producer that silently emits one is a bug worth failing on here, where the
+    batch it was actually graded against is still in hand.
+    """
+    if score.miner_hotkey != dispatch.miner_hotkey:
+        raise HarnessError("score and dispatch name different miners; refusing to commit it")
+    return HarnessExecution(
+        miner_hotkey=score.miner_hotkey,
+        harness_digest=score.harness_digest,
+        batch_id=dispatch.batch_id,
+        runs=tuple(
+            CommittedRun(
+                task_id=r.task_id, exploit_sha256=r.exploit_sha256, log_sha256=r.log_sha256,
+                exit_reason=r.exit_reason, duration_ms=r.duration_ms,
+            )
+            for r in score.results
+        ),
+    )
+
+
+# (task_id) -> the committed exploit bytes for that task, or None when unavailable.
+ExploitProvider = Callable[[str], "bytes | None"]
+
+#: Reasons a committed run cannot be credited. Never a differential outcome — these mean the
+#: COMMITMENT failed, so the task scores unsolved and says which way it failed.
+REASON_NO_EXPLOIT = "harness_produced_no_exploit"
+REASON_EXPLOIT_MISSING = "committed_exploit_unavailable"
+REASON_DIGEST_MISMATCH = "committed_exploit_digest_mismatch"
+REASON_NOT_IN_EXECUTION = "task_absent_from_committed_execution"
+
+
+def grade_committed_execution(
+    execution: HarnessExecution,
+    dispatch: DispatchMessage,
+    *,
+    backend: VerifierBackend,
+    exploit_provider: ExploitProvider,
+) -> HarnessScore:
+    """Re-derive a harness's score from its COMMITTED execution — no runner, no divergence.
+
+    The validator-side entry point. The harness does not run here, so its sampling — the
+    unbounded divergence #137 is about — is gone: two honest validators handed the same
+    execution and the same dispatch grade the same bytes and produce the same rank
+    (:func:`consensus_digest` is the cheap comparison).
+
+    What remains is bounded, and worth naming rather than glossing: the DIFFERENTIAL can still
+    disagree if a task's crash is itself flaky, so one validator could observe ``solved`` where
+    another observes ``nondeterministic_crash``. Two things hold that down and neither is this
+    function's doing — ``verify_poc`` confirms a candidate solve by repetition (#153/#166), and
+    admission is supposed to keep non-deterministic tasks out of the corpus in the first place.
+    Raising ``DEFAULT_CONFIRMATIONS`` shrinks the residual further. This function removes the
+    dominant source of divergence; it does not turn a flaky corpus into a reproducible one.
+
+    Fails closed on the bindings before grading anything: the execution must be for THIS batch,
+    THIS miner, and a harness the batch was committed to (commit-then-draw, the same contract
+    ``evaluate_harness`` enforces). A record that satisfies none of these is not a low score, it
+    is not evidence at all.
+
+    **CALLER'S PRECONDITION — this function does NOT check provenance.** It grades the record it
+    is handed, so the caller MUST first verify that :meth:`HarnessExecution.digest` matches the
+    value the producing enclave bound into its attestation quote. The bindings checked here
+    prove the record is internally consistent and drawn for this batch; they cannot prove it came
+    from the enclave rather than from whoever passed it in. Grading an unattested record ranks
+    miners on unverified data, which is the failure this whole path exists to prevent — verify
+    the quote, then call this.
+
+    Per task, the refusal directions are deliberately asymmetric. A task the execution never
+    covered, an exploit the provider cannot supply, or bytes whose digest disagrees with the
+    commitment all score UNSOLVED with the reason naming which — a digest mismatch in particular
+    means the bytes being graded are not the bytes that were attested, which is exactly the
+    substitution the commitment exists to prevent, so it must never be able to earn. Grading
+    continues for the remaining tasks: one bad row must not discard the honest rest.
+    """
+    if execution.harness_digest != getattr(dispatch, "model_commitment", None):
+        raise HarnessError(
+            "committed execution is for a harness this batch was not drawn under "
+            "(commit-then-draw): refusing to grade it"
+        )
+    if execution.batch_id != dispatch.batch_id:
+        raise HarnessError(
+            f"committed execution is for batch {execution.batch_id!r}, not {dispatch.batch_id!r}"
+        )
+    if execution.miner_hotkey != dispatch.miner_hotkey:
+        raise HarnessError("committed execution names a different miner than the dispatch")
+
+    results: list[HarnessResult] = []
+    for dt in dispatch.tasks:
+        run = execution.run_for(dt.task_id)
+        if run is None:
+            results.append(HarnessResult(dt.task_id, False, None, REASON_NOT_IN_EXECUTION))
+            continue
+        base = dict(log_sha256=run.log_sha256, exit_reason=run.exit_reason,
+                    duration_ms=run.duration_ms)
+        if run.exploit_sha256 is None:
+            results.append(HarnessResult(dt.task_id, False, None, REASON_NO_EXPLOIT, **base))
+            continue
+        exploit = exploit_provider(dt.task_id)
+        if not isinstance(exploit, (bytes, bytearray)) or not exploit:
+            results.append(HarnessResult(
+                dt.task_id, False, run.exploit_sha256, REASON_EXPLOIT_MISSING, **base))
+            continue
+        exploit = bytes(exploit)
+        if poc_digest(exploit) != run.exploit_sha256:
+            results.append(HarnessResult(
+                dt.task_id, False, run.exploit_sha256, REASON_DIGEST_MISMATCH, **base))
+            continue
+        task = Task(task_id=dt.task_id, level=Level(dt.level), binary_digest=dt.binary_digest)
+        diff = verify_poc(task, exploit, backend)
+        results.append(HarnessResult(
+            dt.task_id, diff.solved, run.exploit_sha256, diff.outcome, **base))
+    return HarnessScore(
+        miner_hotkey=execution.miner_hotkey,
+        harness_digest=execution.harness_digest,
+        dispatched=len(dispatch.tasks),
+        results=tuple(results),
+    )
+
+
+def consensus_digest(score: HarnessScore) -> str:
+    """A canonical digest of everything a rank depends on, so divergence is one comparison.
+
+    Covers only the fields that MUST agree between validators: the identity being ranked, the
+    batch size, and per task the solve bit, the committed exploit digest, and the differential
+    outcome. Deliberately EXCLUDES ``duration_ms``, ``log_sha256`` and ``exit_reason`` — wall
+    time is validator-local, and the other two describe how the run went rather than what it
+    scored, so folding them in would report divergence where the rank does not actually differ.
+
+    Tasks are sorted by id: the score's row order follows the dispatch, and two validators
+    handed the same dispatch see the same order anyway, but sorting means a re-ordered-but-
+    equivalent score is not reported as a disagreement.
+    """
+    body = json.dumps(
+        {
+            "miner_hotkey": score.miner_hotkey,
+            "harness_digest": score.harness_digest,
+            "dispatched": int(score.dispatched),
+            "results": sorted(
+                (
+                    {
+                        "task_id": r.task_id,
+                        "solved": bool(r.solved),
+                        "exploit_sha256": r.exploit_sha256,
+                        "reason": r.reason,
+                    }
+                    for r in score.results
+                ),
+                key=lambda row: row["task_id"],
+            ),
+        },
+        sort_keys=True, separators=(",", ":"),
+    ).encode()
+    return "sha256:" + hashlib.sha256(body).hexdigest()
+
+
 def rank_harnesses(scores: list[HarnessScore]) -> list[HarnessScore]:
     """Order harnesses for the Stage-1 competition: most genuine solves first.
 
     Primary key is solve COUNT on the shared fresh batch (not rate — a harness graded on a
     bigger batch is not penalised for it); ties break on the harness digest so the order is
     deterministic and ungrindable by resubmitting under a fresh hotkey.
+
+    The ORDER is deterministic given the scores; whether the SCORES agree between validators is
+    decided upstream. Rank from :func:`grade_committed_execution` when the result will touch
+    weights — ranking scores that came from independent ``evaluate_harness`` re-execution
+    reproduces #137, because the harness itself is not reproducible.
     """
     return sorted(scores, key=lambda s: (-s.solved, s.harness_digest))
 
