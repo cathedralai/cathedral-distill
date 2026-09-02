@@ -13,7 +13,7 @@ import json
 import os
 import stat
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -25,6 +25,11 @@ from cathedral_distill import signed_config as sc  # noqa: E402
 from cathedral_distill.cybergym_scores import EPOCH_CLOSED, CyberGymScoreStore  # noqa: E402
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
+# `sign-registry` checks the validity window against the REAL clock, so a hardcoded
+# `valid_until` silently expires and reds CI for the whole repo — the previous
+# 2026-08-28 lapsed on that date and broke main. Derived from the clock so it cannot
+# rot, while still spanning the fixed NOW the verifications below resolve at.
+VALID_UNTIL = (datetime.now(UTC) + timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _read_pub(path) -> bytes:
@@ -58,13 +63,13 @@ def test_signed_registry_verifies_against_the_root(tmp_path):
         "release": "sn39-2026-07-28",
         "generated_at": "2026-07-28T11:00:00Z",
         "valid_from": "2026-07-28T00:00:00Z",
-        "valid_until": "2026-08-28T00:00:00Z",
+        "valid_until": VALID_UNTIL,
         "registry_key_id": "cathedral-root-1",
         "keys": [{
             "key_id": "cathedral-config-1",
             "public_key_base64": base64.b64encode(issuer_pub).decode(),
             "valid_from": "2026-07-28T00:00:00Z",
-            "valid_until": "2026-08-28T00:00:00Z",
+            "valid_until": VALID_UNTIL,
             "status": "active",
         }],
     }
@@ -89,7 +94,7 @@ def test_signed_burn_and_allocation_configs_verify(tmp_path):
         doc = {
             "schema": body["schema"], "config_version": 3, "network": "finney", "netuid": 39,
             "generated_at": "2026-07-28T11:00:00Z", "valid_from": "2026-07-28T00:00:00Z",
-            "valid_until": "2026-08-28T00:00:00Z", "signing_key_id": "cathedral-config-1",
+            "valid_until": VALID_UNTIL, "signing_key_id": "cathedral-config-1",
             **{k: v for k, v in body.items() if k != "schema"},
         }
         p = tmp_path / f"{name}.json"
