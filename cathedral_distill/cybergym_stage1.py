@@ -10,9 +10,25 @@ actually solve. The trace-manufacturing dataset is Stage 2.
 WHY A HIGH STAGE-1 SCORE MEANS "GENUINE CAPABILITY" — three requirements, each stated where
 it is enforced or, honestly, only required:
 
-1. **COMMIT-THEN-DRAW (enforced here).** The harness digest IS the dispatch commitment that
-   freezes the batch draw, so a harness cannot be tuned to the exact tasks it is graded on.
-   `evaluate_harness` refuses a dispatch whose `model_commitment` is not this harness's digest.
+1. **COMMIT-THEN-DRAW (enforced here ONLY when the caller supplies the anchor block).**
+   `evaluate_harness` refuses a dispatch whose `model_commitment` is not this harness's
+   digest — but that equality alone is IDENTITY CONSISTENCY, not freshness (issue #136). It
+   proves the dispatch is labelled with this harness; it does not prove the batch was drawn
+   after the harness was committed. It cannot: the shared epoch draw uses
+   `derive_epoch_batch_nonce`, which deliberately excludes the commitment so every miner
+   receives the SAME batch — a common frontier and a per-miner commitment cannot both bind
+   one nonce.
+
+   The property that actually rules out tuning is an ORDERING: the harness was committed at
+   a block that PRECEDES the anchor block the batch was drawn from, so the tasks did not
+   exist as a known set when the harness was frozen. That is what `commitment_block` and
+   `anchor_block` enforce here. When the caller supplies both, the ordering is checked and
+   `HarnessScore.commitment_verified` is True. When it does not, the score is still produced
+   but carries `commitment_verified=False`, because a freshness claim that was never checked
+   must not be indistinguishable from one that was — **a consumer that moves weight MUST
+   refuse an unverified score.** For the fresh corpus the stronger guarantee is
+   `oss_fuzz_supply.eligible_for` (the bug was not public when the harness committed), which
+   subsumes this one; block ordering is what covers everything else.
 
 2. **NO EGRESS (required of the runner, not enforceable here).** The runner MUST execute the
    harness with network isolation. A general harness with open egress fetches the public
@@ -84,6 +100,13 @@ class HarnessSubmission:
     miner_hotkey: str
     harness_digest: str
     version: str
+    #: Block height at which this harness digest was committed on-chain. Paired with the
+    #: draw's anchor block it is what makes commit-then-draw REAL rather than decorative
+    #: (issue #136): a harness committed before the anchor cannot have been tuned to the
+    #: batch that anchor drew. Optional only so existing callers keep working — a
+    #: submission without it can never be `commitment_verified`, so it cannot be paid by a
+    #: consumer that checks.
+    commitment_block: int | None = None
 
     def __post_init__(self) -> None:
         if not self.miner_hotkey:
@@ -92,6 +115,37 @@ class HarnessSubmission:
             raise HarnessError("harness_digest must be sha256:<64 hex>")
         if not self.version or len(self.version) > 32:
             raise HarnessError("version must be 1..32 chars")
+        _check_block(self.commitment_block, "commitment_block")
+
+
+def _check_block(value: object, name: str) -> None:
+    """A block height is a non-negative int, or absent. Never a bool, never negative."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise HarnessError(f"{name} must be a non-negative integer or None")
+
+
+def _verify_commitment_ordering(commitment_block: int | None, anchor_block: int | None) -> bool:
+    """Whether commit-then-draw is PROVEN for this pair. Never silently 'probably'.
+
+    Both heights are needed: without the commitment there is nothing to order, and without
+    the anchor there is nothing to order it against. Missing either returns False — the
+    property is unproven, which is a different thing from disproven and a very different
+    thing from proven.
+
+    Strictly less-than. A harness committed IN the anchor block is not provably ignorant of
+    what that block drew, and an anti-tuning rule whose boundary is loose is not a rule.
+    """
+    if commitment_block is None or anchor_block is None:
+        return False
+    if commitment_block >= anchor_block:
+        raise HarnessError(
+            f"harness was committed at block {commitment_block}, which does not precede the "
+            f"batch anchor block {anchor_block}: the batch was drawable when the harness was "
+            "frozen, so the score would not be evidence of untuned capability (#136)"
+        )
+    return True
 
 
 @dataclass(frozen=True)
@@ -228,6 +282,19 @@ class HarnessScore:
     harness_digest: str
     dispatched: int
     results: tuple[HarnessResult, ...] = field(default_factory=tuple)
+    #: Commit-then-draw was PROVEN for this score: the harness's commitment block precedes
+    #: the batch's anchor block (#136). False means the ordering was never checked — the
+    #: caller supplied no anchor, or the submission carries no commitment block — NOT that
+    #: it failed, which raises. Defaults False so a score is never presumed verified, and it
+    #: rides in `consensus_digest` so a verified score cannot tie with an unverified one.
+    #: **A consumer that moves weight must refuse a score with this False.**
+    commitment_verified: bool = False
+    #: The submission's commitment block, carried so the attested record is built from the
+    #: SAME height this score was judged on. It lives here rather than being passed to
+    #: `execution_from_score` separately because a free-typed block could name an earlier
+    #: height than the submission actually had, and a re-grader would then "verify" a
+    #: commitment that never happened.
+    commitment_block: int | None = None
 
     @property
     def solved(self) -> int:
@@ -313,12 +380,15 @@ def evaluate_harness(
     backend: VerifierBackend,
     artifact_provider: ArtifactProvider | None = None,
     log_sink: LogSink | None = None,
+    anchor_block: int | None = None,
 ) -> HarnessScore:
     """Run the committed harness on a FRESH dispatched batch and score it by solve count.
 
-    Fails closed on commit-then-draw: the dispatch's `model_commitment` MUST equal this
-    harness's digest, i.e. the batch was frozen to this harness before it was drawn, so the
-    harness cannot have been tuned to the tasks it is graded on. Each task's exploit is
+    Fails closed on identity: the dispatch's `model_commitment` MUST equal this harness's
+    digest. Pass ``anchor_block`` — the block the batch was drawn from — to also prove
+    commit-then-draw: with the submission's `commitment_block` it establishes that the
+    harness was frozen before the batch existed, and sets `commitment_verified`. Without it
+    the score is produced but marked unverified, never silently presumed fresh (#136). Each task's exploit is
     checked by the same differential verifier the reward path uses; a harness that produces
     no output, or one whose output does not crash the vul build and spare the fix, does not
     score for that task.
@@ -335,6 +405,8 @@ def evaluate_harness(
             "dispatch was not committed to this harness (commit-then-draw): the batch must be "
             "drawn under the harness digest, or the harness could be tuned to its own graded set"
         )
+    _check_block(anchor_block, "anchor_block")
+    verified = _verify_commitment_ordering(submission.commitment_block, anchor_block)
     results: list[HarnessResult] = []
     for dt in dispatch.tasks:
         # Per-task, exception-isolated: a raising runner/verifier yields a synthesised crash log,
@@ -354,6 +426,8 @@ def evaluate_harness(
         harness_digest=submission.harness_digest,
         dispatched=len(dispatch.tasks),
         results=tuple(results),
+        commitment_verified=verified,
+        commitment_block=submission.commitment_block,
     )
 
 
@@ -417,8 +491,13 @@ class HarnessExecution:
     harness_digest: str
     batch_id: str
     runs: tuple[CommittedRun, ...] = field(default_factory=tuple)
+    #: The submission's commitment block, carried into the attested record so a validator
+    #: can re-check commit-then-draw against the anchor without holding the submission
+    #: (#136). It is inside `digest()`, so the enclave attests it like everything else.
+    commitment_block: int | None = None
 
     def __post_init__(self) -> None:
+        _check_block(self.commitment_block, "commitment_block")
         if not _DIGEST_RE.match(str(self.harness_digest)):
             raise HarnessError("harness_digest must be sha256:<64 hex>")
         seen = [r.task_id for r in self.runs]
@@ -445,6 +524,7 @@ class HarnessExecution:
                 "miner_hotkey": self.miner_hotkey,
                 "harness_digest": self.harness_digest,
                 "batch_id": self.batch_id,
+                "commitment_block": self.commitment_block,
                 "runs": sorted(
                     (
                         {
@@ -477,10 +557,21 @@ def execution_from_score(score: HarnessScore, dispatch: DispatchMessage) -> Harn
     """
     if score.miner_hotkey != dispatch.miner_hotkey:
         raise HarnessError("score and dispatch name different miners; refusing to commit it")
+    if score.commitment_verified and score.commitment_block is None:
+        # Cannot happen through `evaluate_harness` (verification requires the block), so this
+        # catches a hand-built score claiming a proof it carries no basis for.
+        raise HarnessError(
+            "score is commitment_verified but carries no commitment_block: the attested "
+            "record would drop the proof it was verified under (#136)"
+        )
     return HarnessExecution(
         miner_hotkey=score.miner_hotkey,
         harness_digest=score.harness_digest,
         batch_id=dispatch.batch_id,
+        # From the SCORE, never a caller-supplied height: a free-typed block could name an
+        # earlier commitment than the submission had, and a re-grader would then verify a
+        # commitment that never happened.
+        commitment_block=score.commitment_block,
         runs=tuple(
             CommittedRun(
                 task_id=r.task_id, exploit_sha256=r.exploit_sha256, log_sha256=r.log_sha256,
@@ -508,6 +599,7 @@ def grade_committed_execution(
     *,
     backend: VerifierBackend,
     exploit_provider: ExploitProvider,
+    anchor_block: int | None = None,
 ) -> HarnessScore:
     """Re-derive a harness's score from its COMMITTED execution — no runner, no divergence.
 
@@ -555,6 +647,8 @@ def grade_committed_execution(
         )
     if execution.miner_hotkey != dispatch.miner_hotkey:
         raise HarnessError("committed execution names a different miner than the dispatch")
+    _check_block(anchor_block, "anchor_block")
+    verified = _verify_commitment_ordering(execution.commitment_block, anchor_block)
 
     results: list[HarnessResult] = []
     for dt in dispatch.tasks:
@@ -586,6 +680,8 @@ def grade_committed_execution(
         harness_digest=execution.harness_digest,
         dispatched=len(dispatch.tasks),
         results=tuple(results),
+        commitment_verified=verified,
+        commitment_block=execution.commitment_block,
     )
 
 
@@ -607,6 +703,7 @@ def consensus_digest(score: HarnessScore) -> str:
             "miner_hotkey": score.miner_hotkey,
             "harness_digest": score.harness_digest,
             "dispatched": int(score.dispatched),
+            "commitment_verified": bool(score.commitment_verified),
             "results": sorted(
                 (
                     {

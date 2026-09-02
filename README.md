@@ -264,7 +264,7 @@ pip install -e '.[dev]'
 pytest
 ```
 
-The suite collects 1342 tests, all hardware-free: the verifier backend is
+The suite collects 1364 tests, all hardware-free: the verifier backend is
 injected, so the full mechanism is exercised without the CyberGym binary corpus.
 How many of them *run* depends on the machine, which is why no passing total is
 claimed here. `tests/test_cybergym_hw.py` skips without `CYBERGYM_RUN_HW=1` and
