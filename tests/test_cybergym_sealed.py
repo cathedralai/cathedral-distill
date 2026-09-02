@@ -16,9 +16,13 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from cathedral_distill import cybergym as cg  # noqa: E402
-from cathedral_distill.corpus_admission import public_catalog_task_id  # noqa: E402
+from cathedral_distill.corpus_admission import (  # noqa: E402
+    disclosed_origin_fingerprints,
+    public_catalog_task_id,
+)
 from cathedral_distill.cybergym_sealed import (  # noqa: E402
     SEALED_NONCE_HEX,
     SealedTaskError,
@@ -107,12 +111,10 @@ class TestDeterminism:
         assert (sealed_task_id("arvo:012345", seal_key=KEY)
                 == sealed_task_id("arvo:12345", seal_key=KEY))
 
-    def test_a_non_canonical_spelling_still_polices_the_as_written_digits(self):
+    def test_a_non_canonical_spelling_is_still_policed(self):
         """The id normalises, but a disclosed field may carry whichever spelling the
         upstream metadata used — an unlisted term is one admission does not police."""
-        terms = sealed_origin_terms("arvo:012345")
-        assert "12345" in terms and "012345" in terms
-        assert "arvo:12345" in terms and "arvo:012345" in terms
+        assert sealed_origin_terms("arvo:012345") == ("arvo:12345", "arvo:012345")
 
     def test_case_and_surrounding_space_do_not_change_the_id(self):
         """`ARVO:12345` is the same bug; minting a second identity for it would
@@ -140,13 +142,34 @@ class TestNonceWidthDoesNotRepeatIssue118:
 
 
 class TestOriginTermsAreHandedBackForThePrivateField:
-    def test_both_the_reference_and_the_bare_number_are_returned(self):
-        """The bare number is the likelier accidental leak: a trace or description can
-        carry `12345` without looking like a catalog id."""
-        assert sealed_origin_terms("arvo:12345") == ("arvo:12345", "12345")
+    def test_the_qualified_reference_is_returned(self):
+        assert sealed_origin_terms("arvo:12345") == ("arvo:12345",)
 
     def test_terms_are_normalised(self):
-        assert sealed_origin_terms("OSS-Fuzz:99") == ("oss-fuzz:99", "99")
+        assert sealed_origin_terms("OSS-Fuzz:99") == ("oss-fuzz:99",)
+
+    def test_the_bare_number_is_deliberately_not_a_term(self):
+        """Measured, not stylistic: real ARVO ids are 3-5 digits and terms match as
+        case-insensitive SUBSTRINGS, so a bare number in a corpus of crash traces
+        (`256`, `512`, `65536`, sizes, offsets) is not evidence of a leak. Including it
+        both false-refuses honest tasks off an already-thin fresh supply and lets
+        `genericise_disclosure` redact digits out of honest prose."""
+        from reseal_task import genericise_disclosure
+
+        terms = sealed_origin_terms("arvo:256")
+        assert "256" not in terms
+        context = {"description": "heap overflow of 1 byte past a 256-entry table"}
+        # The honest description survives sealing intact...
+        assert genericise_disclosure(context, terms) == context
+        # ...and admission does not read it as fingerprinting the origin.
+        assert disclosed_origin_fingerprints(2, context, forbidden_terms=terms) == ()
+
+    def test_the_qualified_form_is_still_caught(self):
+        """Dropping the bare number must not drop the real signal: nothing writes
+        `arvo:256` by accident."""
+        terms = sealed_origin_terms("arvo:256")
+        leaky = {"sanitizer_trace": "re-sealed from arvo:256 upstream"}
+        assert disclosed_origin_fingerprints(2, leaky, forbidden_terms=terms) == ("arvo:256",)
 
 
 class TestItRefusesWhatItCannotSeal:
@@ -178,7 +201,7 @@ class TestTheSealerHelper:
 
         task_id, terms = seal_identity(ORIGIN, seal_key=KEY)
         assert task_id == sealed_task_id(ORIGIN, seal_key=KEY)
-        assert terms == ("arvo:12345", "12345")
+        assert terms == ("arvo:12345",)
 
     def test_admit_resealed_refuses_a_public_catalog_id_up_front(self):
         """Fail at the top of the seal, not after a build and a registry push."""

@@ -130,25 +130,38 @@ def sealed_task_id(origin_id: str, *, seal_key: bytes, index: int = 0) -> str:
 def sealed_origin_terms(origin_id: str) -> tuple[str, ...]:
     """Identifiers of the hidden origin, for the manifest's PRIVATE ``origin_terms``.
 
-    Both the full reference (``arvo:12345``) and the bare number (``12345``) are
-    returned: a disclosed field that names either one hands a miner the upstream bug
-    just as completely, and the bare number is the likelier accidental leak because
-    a sanitizer trace or a description can carry it without looking like a catalog
-    id. Admission unions these into ``forbidden_terms`` automatically (#131/#132),
-    so recording them here is what makes the check enforce itself.
+    Only the QUALIFIED reference (``arvo:12345``) is returned -- never the bare number.
+    That is deliberate and it is measured: real ARVO ids are 3 to 5 digits (21 of the
+    4,993 archived cases are 3-digit) and OSS-Fuzz issue ids run 3-5 or 8-9, while
+    ``origin_terms`` are matched as case-insensitive SUBSTRINGS against every disclosed
+    field. In a corpus whose descriptions and sanitizer traces are made of integers --
+    ``256``, ``512``, ``65536``, sizes, offsets, line numbers -- a bare id number is not
+    evidence of a leak, and treating it as one costs twice over:
+
+    * ``disclosed_origin_fingerprints`` reports a false leak and admission drops a
+      legitimate task, off a fresh supply that is already thin; and
+    * ``genericise_disclosure`` scrubs the same terms at seal time, so the digits are
+      redacted out of honest prose first -- ``version 2.1`` becomes ``version 2.<redacted>``.
+
+    ``corpus_admission`` makes exactly this argument about its own scan ("NOT the
+    free-text description ... would over-refuse", "do not fake wider coverage with a
+    heuristic that over-refuses"); a bare integer is that heuristic. The qualified form
+    is high-confidence: nothing writes ``arvo:12345`` by accident. A sealer that knows a
+    specific task's metadata really does carry the raw number can still pass it through
+    ``admit_private_manifest(..., forbidden_terms=...)``, which is unioned with these.
 
     When the caller wrote a non-canonical number (``arvo:012345``), the AS-WRITTEN
-    digits are included alongside the canonical ones: the id normalises so that one
-    bug seals to one identity, but a disclosed field could still carry whichever
-    spelling the upstream metadata used, and a term that is not listed is a term
-    admission does not police.
+    spelling is included alongside the canonical one: the id normalises so that one bug
+    seals to one identity, but a disclosed field could still carry whichever spelling the
+    upstream metadata used, and a term that is not listed is a term admission does not
+    police.
 
     These are for the private field ONLY -- returning them alongside the id is not
     an invitation to disclose them.
     """
     catalog, number = parse_origin(origin_id)
-    terms = [f"{catalog}:{number}", number]
+    terms = [f"{catalog}:{number}"]
     written = _ORIGIN_RE.match((origin_id or "").strip()).group(2)
     if written != number:
-        terms += [f"{catalog}:{written}", written]
+        terms.append(f"{catalog}:{written}")
     return tuple(terms)
