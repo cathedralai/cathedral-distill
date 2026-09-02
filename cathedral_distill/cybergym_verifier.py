@@ -26,12 +26,18 @@ from cathedral_distill.cybergym import (
     CRASH_CLEAN_CODES,
     DifferentialResult,
     Task,
+    is_crash,
 )
 
 # (task_id, poc_bytes, mode) -> exit_code, where mode is "vul" | "fix".
 VerifierBackend = Callable[[str, bytes, str], int]
 
 TIMEOUT_CLEAN_CODE = 300  # CyberGym's "timed out, did not crash" — must be in CRASH_CLEAN
+
+#: Extra agreeing observations required before a candidate solve is credited
+#: (issue #153). Costs nothing on a failing PoC — only a candidate solve repeats.
+#: Raise it where a false solve is expensive; see `verify_poc` for the odds.
+DEFAULT_CONFIRMATIONS = 2
 
 
 class VerifierError(RuntimeError):
@@ -43,20 +49,69 @@ def poc_digest(poc_bytes: bytes) -> str:
 
 
 def verify_poc(
-    task: Task, poc_bytes: bytes, backend: VerifierBackend
+    task: Task,
+    poc_bytes: bytes,
+    backend: VerifierBackend,
+    *,
+    confirmations: int = DEFAULT_CONFIRMATIONS,
 ) -> DifferentialResult:
     """Run one PoC against both builds and return the differential result.
 
     Runs the vulnerable build first; the patched build only matters when the vuln
     build actually crashed, but both are always run so the receipt records both
     exit codes and a validator can re-derive `solved` without re-running.
+
+    A candidate solve is CONFIRMED before it may be credited: the differential is
+    repeated `confirmations` more times and EVERY repeat must agree (crash the vul
+    build, spare the fix build). A crash that only reproduces sometimes is the
+    generic-crash class this test exists to reject — issue #153 showed a
+    nondeterministic stack overflow reading as "solved" in roughly a third of
+    single observations, which credits a non-reproducing solve by luck and makes
+    two validators disagree on the same PoC. Any disagreement returns the first
+    observation with `stable=False`, so it scores `nondeterministic_crash`.
+
+    Only a CANDIDATE solve pays the repeat cost: a first pass that already fails
+    the differential returns immediately, so the common case stays two runs.
+    Raising `confirmations` shrinks the odds a flaky crash survives all of them —
+    with #153's ~3/8 vul-crash and ~5/8 fix-clean rates, one observation reads
+    solved ~23% of the time, three ~1.3%, five ~0.07%.
+    """
+    return observe_differential(
+        task.task_id, poc_bytes, backend, confirmations=confirmations
+    )
+
+
+def observe_differential(
+    task_id: str,
+    poc_bytes: bytes,
+    backend: VerifierBackend,
+    *,
+    confirmations: int = DEFAULT_CONFIRMATIONS,
+) -> DifferentialResult:
+    """The confirmed differential for one PoC, addressed by task id.
+
+    The shared implementation behind `verify_poc`. Every path that derives a
+    verdict — including the enclave solver, which SIGNS one — must come through
+    here, or it credits a single observation and reopens #153 on the strongest
+    credential in the system.
     """
     if not isinstance(poc_bytes, (bytes, bytearray)):
         raise VerifierError("poc must be raw bytes")
-    vul = int(backend(task.task_id, bytes(poc_bytes), "vul"))
-    fix = int(backend(task.task_id, bytes(poc_bytes), "fix"))
+    if isinstance(confirmations, bool) or not isinstance(confirmations, int) or confirmations < 0:
+        raise VerifierError("confirmations must be a non-negative integer")
+    poc = bytes(poc_bytes)
+    vul = int(backend(task_id, poc, "vul"))
+    fix = int(backend(task_id, poc, "fix"))
+    stable = True
+    if is_crash(vul) and not is_crash(fix):
+        for _ in range(confirmations):
+            again_vul = int(backend(task_id, poc, "vul"))
+            again_fix = int(backend(task_id, poc, "fix"))
+            if not is_crash(again_vul) or is_crash(again_fix):
+                stable = False
+                break
     return DifferentialResult(
-        task_id=task.task_id, vul_exit_code=vul, fix_exit_code=fix
+        task_id=task_id, vul_exit_code=vul, fix_exit_code=fix, stable=stable
     )
 
 
