@@ -529,6 +529,14 @@ def grade_committed_execution(
     ``evaluate_harness`` enforces). A record that satisfies none of these is not a low score, it
     is not evidence at all.
 
+    **CALLER'S PRECONDITION — this function does NOT check provenance.** It grades the record it
+    is handed, so the caller MUST first verify that :meth:`HarnessExecution.digest` matches the
+    value the producing enclave bound into its attestation quote. The bindings checked here
+    prove the record is internally consistent and drawn for this batch; they cannot prove it came
+    from the enclave rather than from whoever passed it in. Grading an unattested record ranks
+    miners on unverified data, which is the failure this whole path exists to prevent — verify
+    the quote, then call this.
+
     Per task, the refusal directions are deliberately asymmetric. A task the execution never
     covered, an exploit the provider cannot supply, or bytes whose digest disagrees with the
     commitment all score UNSOLVED with the reason naming which — a digest mismatch in particular
