@@ -53,6 +53,25 @@ _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 # must never be rewardable. ``freshvuln`` is likewise non-rewardable while its
 # rendered reversible artifact allows mechanical trigger recovery; it needs a
 # separate, miner-safe delivery admission path before it can earn emission.
+#
+# sealedvuln:<nonce>:<n> is a REAL upstream bug re-sealed into a private,
+# answer-stripped image pair with a validator-held reference PoC
+# (``scripts/reseal_task.py``). It is a FOURTH prefix rather than a reuse of
+# ``freshvuln`` because provenance decides rewardability and the two must stay
+# independently gateable: ``freshvuln``'s bar is its generator's reversible
+# artifact, while a re-sealed task delivers its PoC by run-time bind mount and
+# bakes no answer at all, so it clears admission on the ordinary gates. Sharing
+# one prefix across both would force a single rewardability rule to be correct
+# for two different safety arguments -- the exact conflation ``synthvuln`` is
+# kept separate to avoid.
+#
+# It also exists because a re-sealed task MUST NOT keep its upstream id: an
+# ``arvo:<n>`` id names a publicly pullable ``n132/arvo:<n>-vul`` whose baked
+# ``/tmp/poc`` is the answer, so ``corpus_admission.public_catalog_task_id``
+# refuses it however private our own image is (issue #157/#165). The id is
+# derived under a validator-held seal key, so it is stable for one bug (a
+# re-seal is reproducible and a duplicate is detectable) while being
+# unlinkable to the origin by anyone without the key.
 # ONE definition of what a synthetic nonce may contain. The task-ID grammar and the
 # nonce check below are both built from it, so a caller that validates a nonce and a
 # parser that validates the resulting task id cannot disagree. They did: the agent CLI
@@ -62,10 +81,11 @@ _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 _SYNTH_NONCE_CHARS = "[0-9a-z]+"
 SYNTHETIC_NONCE_RE = re.compile(rf"\A{_SYNTH_NONCE_CHARS}\Z")
 _TASK_ID_RE = re.compile(
-    rf"\A((arvo|oss-fuzz):[0-9]+|(synthvuln|freshvuln):{_SYNTH_NONCE_CHARS}:[0-9]+)\Z")
+    rf"\A((arvo|oss-fuzz):[0-9]+"
+    rf"|(synthvuln|freshvuln|sealedvuln):{_SYNTH_NONCE_CHARS}:[0-9]+)\Z")
 _TASK_ID_HELP = (
     "task_id must be arvo:<n>, oss-fuzz:<n>, synthvuln:<nonce>:<n>, "
-    "or freshvuln:<nonce>:<n>"
+    "freshvuln:<nonce>:<n>, or sealedvuln:<nonce>:<n>"
 )
 
 
