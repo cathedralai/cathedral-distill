@@ -32,12 +32,15 @@ from typing import Sequence
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from cathedral_distill.cybergym import DifferentialResult
 from cathedral_distill.cybergym_cathedral_attest import (
     enclave_commitment_bytes,
     enclave_result_bytes,
 )
-from cathedral_distill.cybergym_verifier import VerifierBackend, poc_digest
+from cathedral_distill.cybergym_verifier import (
+    VerifierBackend,
+    observe_differential,
+    poc_digest,
+)
 
 VERDICT_PASS = "pass"
 VERDICT_FAIL = "fail"
@@ -64,9 +67,9 @@ def solve(
     `signing_key` is omitted (the private half never leaves the enclave).
     """
     key = signing_key or Ed25519PrivateKey.generate()
-    vul = int(backend(task_id, bytes(poc_bytes), "vul"))
-    fix = int(backend(task_id, bytes(poc_bytes), "fix"))
-    result = DifferentialResult(task_id=task_id, vul_exit_code=vul, fix_exit_code=fix)
+    # Confirmed, never a single observation: this path SIGNS the verdict, so a
+    # flaky crash credited here is the hardest kind to unwind (#153).
+    result = observe_differential(task_id, poc_bytes, backend)
     verdict = VERDICT_PASS if result.solved else VERDICT_FAIL
     pd = poc_digest(poc_bytes)
     signature = key.sign(

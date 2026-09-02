@@ -49,7 +49,7 @@ def test_canonical_result_bytes_has_no_trailing_newline_and_sorted_keys():
     decoded = json.loads(raw)
     assert decoded == {
         "task_id": TASK_ID, "vul_exit_code": 1, "fix_exit_code": 0,
-        "solved": True, "outcome": "solved",
+        "stable": True, "solved": True, "outcome": "solved",
     }
     # deterministic across calls -> the quote's stdout binding is reproducible
     assert raw == cli.canonical_result_bytes(result)
@@ -96,7 +96,7 @@ def test_main_prints_only_the_canonical_result_to_stdout(tmp_path, monkeypatch, 
     assert err == ""
     assert json.loads(out) == {
         "task_id": TASK_ID, "vul_exit_code": 1, "fix_exit_code": 0,
-        "solved": True, "outcome": "solved",
+        "stable": True, "solved": True, "outcome": "solved",
     }
 
 
