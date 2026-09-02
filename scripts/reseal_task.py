@@ -36,7 +36,10 @@ from datetime import datetime, timezone
 from cathedral_distill.cybergym_private_artifacts import PrivateReferencePoCStore
 from cathedral_distill.cybergym_repro_manifest import (
     build_private_repro_manifest, load_private_repro_manifest)
-from cathedral_distill.corpus_admission import admit_private_manifest
+from cathedral_distill.corpus_admission import (
+    admit_private_manifest, public_catalog_task_id)
+from cathedral_distill.cybergym_sealed import (
+    is_sealed_task, sealed_origin_terms, sealed_task_id)
 
 # --- the re-seal engine (parameterized; the same call works local-demo or on the rig) ---
 
@@ -65,6 +68,19 @@ def genericise_disclosure(context, origin_terms):
     return scrubbed
 
 
+def seal_identity(origin_id, *, seal_key, index=0):
+    """The sealed ``(task_id, origin_terms)`` for one upstream bug.
+
+    The one call a sealer needs: it mints an id that does not name the origin and,
+    in the same breath, hands back the origin identifiers to record PRIVATELY so
+    admission polices them. Keeping the two together is deliberate — an id sealed
+    without its terms recorded looks safe and silently disables the disclosure
+    check for that task.
+    """
+    return sealed_task_id(origin_id, seal_key=seal_key, index=index), \
+        sealed_origin_terms(origin_id)
+
+
 def admit_resealed(task_id, *, level, vul_image, fix_image, reference_poc, challenge_artifact,
                    source_epoch=21, backend, probe_run, docker="docker",
                    context=None, origin_terms=()):
@@ -81,7 +97,33 @@ def admit_resealed(task_id, *, level, vul_image, fix_image, reference_poc, chall
     patch); ``origin_terms`` are the public-origin identifiers the sealer is hiding. The
     context is GENERICISED against those terms before it can be dispatched, and the terms
     are recorded PRIVATELY so admission enforces non-leakage by construction (#131).
+
+    ``task_id`` must already be sealed (:func:`seal_identity`). A public-catalog id is
+    refused HERE rather than left to admission: the id names a publicly pullable image
+    whose baked ``/tmp/poc`` is the answer (#157/#165), so a manifest built under one
+    can never be scoreable, and failing at the top of the seal names the fix instead of
+    spending a build and a registry push on a task that is already dead.
     """
+    catalog = public_catalog_task_id(task_id)
+    if catalog:
+        raise ValueError(
+            f"refusing to seal under the public-catalog id {catalog}: its reference "
+            "reproducer is readable straight from the public catalog image, so "
+            "admission refuses the task however private our own images are "
+            "(#157/#165). Mint the id with seal_identity(origin_id, seal_key=...), "
+            "which also returns the origin_terms to record privately."
+        )
+    if is_sealed_task(task_id) and not origin_terms:
+        # A sealed id is proof there IS a hidden origin. Recording none leaves
+        # `forbidden_terms` empty for this task, so the symbol/project/upstream-id
+        # channels go unpoliced and only the narrow sanitizer_trace regex fires —
+        # the task looks sealed and is not. `seal_identity` returns the terms with
+        # the id precisely so this cannot be forgotten (#131/#132).
+        raise ValueError(
+            f"{task_id} is sealed but no origin_terms were recorded: admission would "
+            "police nothing for this task. Pass the terms seal_identity() returned "
+            "alongside the id."
+        )
     disclosed = genericise_disclosure(
         context if context is not None else {"description": f"re-sealed task {task_id}"},
         origin_terms,
@@ -203,10 +245,15 @@ def run_demo(docker="docker"):
             if r.returncode != 0:
                 print(r.stderr.decode()[-800:]); return 1
 
-        task = "oss-fuzz:90001"  # opaque numeric id; does not reveal the source bug
+        # A numeric catalog id is NOT opaque enough: `oss-fuzz:90001` (what this demo
+        # used before) names a publicly pullable image, so admission refuses it on the
+        # id alone (#157/#165) and the demo failed. Mint a sealed id the same way the
+        # real flow does. The demo key is a fixed literal so the run is reproducible;
+        # a real seal key is validator-held and never in the tree.
+        task, origin_terms = seal_identity("oss-fuzz:90001", seal_key=b"reseal-demo-key")
         reference_poc = b"CATH" + bytes([0x00, 0x20]) + b"A" * 32   # magic + len=32 -> overflow
         doc, admissions = admit_resealed(
-            task, level=0,
+            task, level=0, origin_terms=origin_terms,
             vul_image="reseal.local/demo-vul@sha256:" + "0" * 64,
             fix_image="reseal.local/demo-fix@sha256:" + "1" * 64,
             reference_poc=reference_poc, challenge_artifact=_DEMO_C.encode(),
