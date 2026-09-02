@@ -13,6 +13,9 @@ dependencies = ["cryptography>=42"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Reading the OSS-Fuzz feed (operator tooling). Deliberately NOT a runtime dependency:
+# nothing on the reward path parses YAML.
+ingest = ["pyyaml>=6"]
 
 [project.scripts]
 cathedral-distill = "cathedral_distill.miner_cli:main"
