@@ -27,12 +27,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Mapping, Sequence
 
-#: The fuzz target line in a generated ``/bin/arvo``: ``/out/<name> /tmp/poc``. The name ends in
-#: ``fuzzer`` but the separator varies across projects — ``coder_MNG_fuzzer`` (underscore),
-#: ``file-fuzzer`` (hyphen), ``ftfuzzer`` (none). Matching only ``_fuzzer`` dropped 5 of 6 corpus
-#: tasks at build time; this matches any ``/out/<...>fuzzer`` token. ARVO repeats the line across
-#: its command branches; any occurrence names the same target.
-_TARGET_RE = re.compile(r"(/out/[A-Za-z0-9_.\-]*fuzzer)\b")
+#: The fuzz target line in a generated ``/bin/arvo`` is ``<binary> /tmp/poc``, and the binary
+#: lives in ``/out``. The NAME is not a reliable anchor — a first cut keyed on ``_fuzzer`` then
+#: on ``fuzzer`` still dropped real targets (``fuzz_ndpi_reader_pl7m``, ``dtls-client``, which
+#: contain no ``fuzzer`` suffix at all). The invariant is the ``/tmp/poc`` argument: whatever
+#: ``/out/<x>`` is invoked with the reproducer input IS the target. Anchor on that.
+_TARGET_RE = re.compile(r"(/out/[^\s]+)\s+/tmp/poc\b")
 
 #: A libFuzzer coder target is ``coder_<FORMAT>_fuzzer``; the FORMAT is the file type the agent
 #: must synthesise (MNG, TIFF, ...). Only a hint — not every project uses this convention, and a

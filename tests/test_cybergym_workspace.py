@@ -63,12 +63,13 @@ class TestRecoveringTheTarget:
     def test_a_non_coder_target_has_no_hint_rather_than_a_wrong_one(self):
         assert format_hint("/out/parser_fuzzer") == ""
 
-    def test_targets_with_any_fuzzer_separator_are_recovered(self):
-        """A real sweep found 5/6 tasks used file-fuzzer / ftfuzzer, not <name>_fuzzer — the
-        underscore-only pattern dropped them at build time."""
-        assert parse_arvo_target("  /out/file-fuzzer /tmp/poc") == "/out/file-fuzzer"
-        assert parse_arvo_target("  /out/ftfuzzer /tmp/poc") == "/out/ftfuzzer"
-        assert parse_arvo_target("  /out/coder_MNG_fuzzer /tmp/poc") == "/out/coder_MNG_fuzzer"
+    def test_the_target_is_anchored_on_the_poc_argument_not_the_name(self):
+        """A real sweep proved the NAME is no anchor: file-fuzzer, ftfuzzer, fuzz_ndpi_reader_pl7m
+        and dtls-client all reproduce, and the last two contain no 'fuzzer' at all. The invariant
+        is the /tmp/poc argument — whatever /out/<x> is run with it is the target."""
+        for name in ("coder_MNG_fuzzer", "file-fuzzer", "ftfuzzer", "fuzz_ndpi_reader_pl7m",
+                     "dtls-client"):
+            assert parse_arvo_target(f"  /out/{name} /tmp/poc") == f"/out/{name}"
 
     def test_non_coder_fuzzers_have_no_format_hint(self):
         assert format_hint("/out/file-fuzzer") == ""
