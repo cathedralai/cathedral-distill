@@ -63,6 +63,17 @@ class TestRecoveringTheTarget:
     def test_a_non_coder_target_has_no_hint_rather_than_a_wrong_one(self):
         assert format_hint("/out/parser_fuzzer") == ""
 
+    def test_targets_with_any_fuzzer_separator_are_recovered(self):
+        """A real sweep found 5/6 tasks used file-fuzzer / ftfuzzer, not <name>_fuzzer — the
+        underscore-only pattern dropped them at build time."""
+        assert parse_arvo_target("  /out/file-fuzzer /tmp/poc") == "/out/file-fuzzer"
+        assert parse_arvo_target("  /out/ftfuzzer /tmp/poc") == "/out/ftfuzzer"
+        assert parse_arvo_target("  /out/coder_MNG_fuzzer /tmp/poc") == "/out/coder_MNG_fuzzer"
+
+    def test_non_coder_fuzzers_have_no_format_hint(self):
+        assert format_hint("/out/file-fuzzer") == ""
+        assert format_hint("/out/ftfuzzer") == ""
+
 
 class TestTheWorkspaceCarriesSourceNotTheAnswer:
     def test_the_harness_comes_before_the_library(self):

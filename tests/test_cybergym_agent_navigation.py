@@ -148,3 +148,36 @@ class TestTheExplorationBudgetForcesAnAttempt:
                   miner_hotkey="5m", model_id="m", max_turns=len(calls), max_output_chars=4000)
         # 4 reads (<8) then reset then 3 reads (<8) => never nudged
         assert nudged["seen"] is False
+
+
+class TestTheHardReadCapIsStructural:
+    def test_reads_are_refused_after_the_hard_cap(self):
+        """The soft nudge was ignored on a real level-3 task (14 reads, 0 attempts). Past the
+        hard cap, read tools must be refused outright until the agent attempts."""
+        from cathedral_distill.cybergym_agent import HARD_READ_CAP
+        refused = {"seen": False}
+        def complete(messages):
+            for msg in reversed(messages):
+                if msg["role"] == "user" and "reading is disabled" in msg.get("content", ""):
+                    refused["seen"] = True; break
+            return '<tool_call>{"name":"read_range","arguments":{"path":"png.c","start":1,"end":1}}</tool_call>'
+        res = run_agent(complete, task_id="arvo:1", workspace=WORKSPACE, backend=lambda *a: 0,
+                        miner_hotkey="5m", model_id="m", max_turns=HARD_READ_CAP + 5,
+                        max_output_chars=4000)
+        assert refused["seen"] is True
+        # after the cap, no further read step is recorded (they are refused as "reason" steps)
+        reads = [s for s in res.steps_raw if s["action"] == "read_file"]
+        assert len(reads) <= HARD_READ_CAP
+
+    def test_run_poc_still_works_past_the_cap(self):
+        """The cap blocks reads, never attempts — the agent can always make progress."""
+        from cathedral_distill.cybergym_agent import HARD_READ_CAP
+        crashing = bytes([0x41] * 8)
+        script = ([('<tool_call>{"name":"read_range","arguments":{"path":"png.c","start":1,"end":1}}</tool_call>')]
+                  * (HARD_READ_CAP + 2)
+                  + ['<tool_call>{"name":"run_poc","arguments":{"hex":"' + crashing.hex() + '"}}</tool_call>'])
+        it = iter(script)
+        res = run_agent(lambda m: next(it), task_id="arvo:1", workspace=WORKSPACE,
+                        backend=lambda tid, poc, mode: 1 if poc == crashing else 0,
+                        miner_hotkey="5m", model_id="m", max_turns=len(script), max_output_chars=4000)
+        assert res.solved is True
