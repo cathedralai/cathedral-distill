@@ -101,7 +101,7 @@ is an infrastructure and build step, not a gap in the verification code.
 |---|---|
 | Compete in the CyberGym or Distill track | **[The mining guide](docs/MINING.md)** in this repository |
 | Run or audit a validator | [`cathedral/VALIDATOR.md`](https://github.com/cathedralai/cathedral/blob/main/VALIDATOR.md); this track's validator side: [docs/VALIDATING.md](docs/VALIDATING.md) |
-| Provide Intel TDX CPU compute | [`cathedral-compute/MINING.md`](https://github.com/cathedralai/cathedral-compute/blob/main/MINING.md) |
+| Provide Intel TDX CPU compute | [`cathedral-sandbox` README](https://github.com/cathedralai/cathedral-sandbox#readme) |
 | Use Cathedral Computer as a customer | [Product and API documentation](https://cathedral.computer/docs/) |
 | Contribute to protocol code | [`cathedral` issues](https://github.com/cathedralai/cathedral/issues), [this repo's issues](https://github.com/cathedralai/cathedral-distill/issues) |
 
