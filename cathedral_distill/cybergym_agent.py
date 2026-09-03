@@ -154,6 +154,11 @@ _READ_RANGE_MAX_LINES = 200
 #: study but not to spend a whole budget navigating (observed failure: 23 reads, 0 attempts).
 MAX_READS_BEFORE_ATTEMPT = 8
 
+#: A HARD cap: past this many reads with no attempt, read tools are REFUSED until the agent runs
+#: a PoC. The soft nudge alone was ignored on a real level-3 task (14 reads, 0 attempts, whole
+#: budget spent reading the patch), so the exploration limit has to be structural, not advisory.
+HARD_READ_CAP = 16
+
 
 def grep_workspace(workspace: Mapping[str, str], query: str, *, max_hits: int = _GREP_MAX_HITS) -> str:
     """Case-insensitive substring search across every workspace file.
@@ -266,6 +271,15 @@ def run_agent(
         call = calls[0]
         name, args = call["name"], call["arguments"]
         thought = _thought(reply)
+        # Structural exploration limit: once reads without an attempt hit the hard cap, refuse
+        # read tools outright. The soft nudge was ignorable; this is not. run_poc always runs.
+        if name in ("list_files", "read_file", "grep_files", "read_range") and reads_since_poc >= HARD_READ_CAP:
+            out = ("reading is disabled until you attempt — you have read enough. Call run_poc with "
+                   "a candidate input now; a crash or clean result will tell you more than another read.")
+            record("reason", thought or "exploration limit reached", out)
+            messages.append({"role": "user",
+                             "content": f"<tool_response>{{\"name\": \"{name}\", \"content\": {json.dumps(out)}}}</tool_response>"})
+            continue
         if name == "list_files":
             out = ", ".join(sorted(workspace))
             record("read_file", thought or "list the workspace", out)

@@ -63,6 +63,18 @@ class TestRecoveringTheTarget:
     def test_a_non_coder_target_has_no_hint_rather_than_a_wrong_one(self):
         assert format_hint("/out/parser_fuzzer") == ""
 
+    def test_the_target_is_anchored_on_the_poc_argument_not_the_name(self):
+        """A real sweep proved the NAME is no anchor: file-fuzzer, ftfuzzer, fuzz_ndpi_reader_pl7m
+        and dtls-client all reproduce, and the last two contain no 'fuzzer' at all. The invariant
+        is the /tmp/poc argument — whatever /out/<x> is run with it is the target."""
+        for name in ("coder_MNG_fuzzer", "file-fuzzer", "ftfuzzer", "fuzz_ndpi_reader_pl7m",
+                     "dtls-client"):
+            assert parse_arvo_target(f"  /out/{name} /tmp/poc") == f"/out/{name}"
+
+    def test_non_coder_fuzzers_have_no_format_hint(self):
+        assert format_hint("/out/file-fuzzer") == ""
+        assert format_hint("/out/ftfuzzer") == ""
+
 
 class TestTheWorkspaceCarriesSourceNotTheAnswer:
     def test_the_harness_comes_before_the_library(self):
