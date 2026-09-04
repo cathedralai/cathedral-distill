@@ -9,8 +9,11 @@ The mechanism (see ``CYBERGYM_DISPATCH_SCORING_DESIGN``):
    0.50·e`` over the last five epochs (``e`` latest; weights sum to 1). Missing older
    epochs count as 0, so a newcomer's only epoch is the latest (weight 0.50) and can
    reach the top-5 in a few epochs.
-3. **Top-5 rank tournament.** Miners are ranked by ``T`` (ties broken deterministically);
-   the top five earn fixed shares of the CyberGym lane — ``0.65, 0.14, 0.10, 0.07, 0.04``.
+3. **Top-5 rank tournament, KING model (v2).** Miners are ranked (ties broken
+   deterministically); ranks 2..5 take fixed shares 0.07, 0.03, 0.03, 0.03 and the KING
+   (rank 1) takes the residual, so a full field is 0.84, 0.07, 0.03, 0.03, 0.03 and a lone
+   miner takes the whole lane. ``build_round_scoreboard`` scores a SINGLE round (no rolling
+   window); ``build_scoreboard`` keeps the legacy rolling total.
 
 Because the payout is by *rank* with a hard top-5 cutoff, a tiny scoring disagreement
 becomes a whole payout slot — so this is only consensus-safe if every validator derives
@@ -35,11 +38,21 @@ ROLLING_WEIGHTS: tuple[Decimal, ...] = (
 )
 WINDOW = len(ROLLING_WEIGHTS)  # 5
 
-# Top-5 lane shares, rank 1..5; sum == 1.
-TOURNAMENT_SHARES: tuple[Decimal, ...] = (
-    Decimal("0.65"), Decimal("0.14"), Decimal("0.10"), Decimal("0.07"), Decimal("0.04"),
+# Fixed lane shares for ranks 2..5 (the "runners-up"); the KING (rank 1) takes the residual
+# ``1 - sum(present runner-up shares)`` so the shares always sum to 1 for any non-empty field.
+# At a full field of 5 that is king 0.84, then 0.07, 0.03, 0.03, 0.03. Winner-take-most on
+# purpose: the lane rewards the single best security agent, with a small tail to keep the next
+# few competing. See ``_award_shares`` for the per-count payout (jared's spec, 2026-09-04).
+RUNNER_UP_SHARES: tuple[Decimal, ...] = (
+    Decimal("0.07"), Decimal("0.03"), Decimal("0.03"), Decimal("0.03"),
 )
-WINNER_SLOTS = len(TOURNAMENT_SHARES)  # 5
+WINNER_SLOTS = len(RUNNER_UP_SHARES) + 1  # 5 (king + four runners-up)
+
+# Back-compat alias: some consumers imported the old name. It now names the full-field payout
+# (king first), which is what those call sites used it for (a rank-ordered share vector).
+TOURNAMENT_SHARES: tuple[Decimal, ...] = (
+    Decimal("0.84"), Decimal("0.07"), Decimal("0.03"), Decimal("0.03"), Decimal("0.03"),
+)
 
 BASE = Decimal("100")
 # Fixed precision so every validator quantizes identically (float drift would let two
@@ -234,30 +247,87 @@ def build_scoreboard(
     )
 
 
-def _award_shares(n_winners: int) -> list[Decimal]:
-    """The lane shares for ``n_winners`` (0..5), in rank order.
+def build_round_scoreboard(
+    source_epoch: int,
+    round_scores: Mapping[str, Decimal | int | str],
+    *,
+    nonce: bytes | str,
+) -> Scoreboard:
+    """Rank miners by their SINGLE-ROUND score and award the king-model lane shares.
 
-    Fewer than five qualified miners renormalize the present ranks' fixed shares to sum
-    to 1, so the whole 0.30 lane pays out to the miners that exist rather than a windfall
-    to burn. An empty field (0 winners) returns no shares — the lane has no contributions
-    and ``compose_vector`` forfeits its whole allocation to burn (an *empty* lane is the
-    one burn case ``compose_vector`` honours today). The mature-field forfeit-to-burn for
-    a **partial** field is intentionally NOT modelled here: it would require
-    ``compose_vector`` to honour an explicit intra-lane burn (today it renormalizes the
-    shortfall away), so announcing a partial ``lane_burn`` would sign a claim the composer
-    does not enforce. That lands with the composer-integration PR; until then shares
-    always sum to 1 for any non-empty field and ``lane_burn`` is 0 (or 1 for an empty
-    field), which is exactly what ``compose_vector`` does.
+    The v2 mechanism scores one round only — a miner's average benchmarked score for this
+    round's submission — with no rolling window (jared, 2026-09-04). ``round_scores`` maps
+    hotkey → that miner's round score (base-100). A winner is a top-5 miner with score > 0.
+
+    Ranking is the same pure, ungrindable order ``build_scoreboard`` uses (score desc, then the
+    nonce+epoch-keyed digest, then hotkey), so every validator reproduces byte-identical
+    standings — required because the top-5 cutoff is payout-decisive. Each standing's
+    ``epoch_scores`` carries the single round score (as a 1-tuple) for auditability.
+    """
+    if not isinstance(nonce, (bytes, bytearray, str)):
+        raise TournamentError("nonce must be bytes/bytearray/str (the chain-anchored epoch nonce)")
+    nonce_bytes = bytes(nonce) if isinstance(nonce, (bytes, bytearray)) else nonce.encode("utf-8")
+    if not nonce_bytes:
+        raise TournamentError("build_round_scoreboard requires a non-empty epoch nonce")
+
+    totals = {hk: _q(Decimal(s)) for hk, s in round_scores.items()}
+    ordered = sorted(
+        totals,
+        key=lambda hk: (-totals[hk], _nonce_digest(nonce_bytes, source_epoch, hk), hk),
+    )
+    winners = [h for h in ordered if totals[h] > 0][:WINNER_SLOTS]
+    shares = _award_shares(len(winners))
+    lane_burn = _q(Decimal(1) - sum(shares, Decimal(0)))
+    share_by_hotkey = dict(zip(winners, shares))
+    standings = tuple(
+        Standing(
+            miner_hotkey=h,
+            epoch_scores=(totals[h],),
+            total=totals[h],
+            rank=i + 1,
+            lane_share=share_by_hotkey.get(h, Decimal(0)),
+        )
+        for i, h in enumerate(ordered)
+    )
+    return Scoreboard(
+        source_epoch=int(source_epoch),
+        standings=standings,
+        winners=tuple(winners),
+        lane_burn=lane_burn,
+        tiebreak_nonce=nonce_bytes.hex(),
+    )
+
+
+def _award_shares(n_winners: int) -> list[Decimal]:
+    """The lane shares for ``n_winners`` winners (0..5+), in rank order — the KING model.
+
+    Ranks 2..5 take the FIXED shares ``RUNNER_UP_SHARES`` (0.07, 0.03, 0.03, 0.03); the king
+    (rank 1) takes the residual ``1 - sum(present runner-up shares)``. So the field determines
+    only how much the king keeps, and the vector always sums to 1 for any non-empty field:
+
+        n=1 → [1.00]                       (a lone miner takes the whole lane)
+        n=2 → [0.93, 0.07]
+        n=3 → [0.90, 0.07, 0.03]
+        n=4 → [0.87, 0.07, 0.03, 0.03]
+        n=5 → [0.84, 0.07, 0.03, 0.03, 0.03]
+
+    More than five winners cannot happen (``winners`` is sliced to ``WINNER_SLOTS``); ranks 6+
+    earn nothing. n=0 returns no shares — an empty lane forfeits its whole allocation to burn
+    (``compose_vector``'s one honoured burn case), which is the "no miner → weight goes to the
+    sandbox lane" rule stated at the composer.
+
+    Shares summing to 1 for every non-empty field is deliberate: ``compose_vector`` does an
+    in-lane proportional split, so a sum of 1 reproduces these exact shares and never announces
+    an intra-lane burn the composer does not enforce.
     """
     if n_winners <= 0:
         return []
-    if n_winners > WINNER_SLOTS:  # pragma: no cover - winners is sliced to WINNER_SLOTS
-        raise TournamentError("more winners than tournament slots")
-    fixed = list(TOURNAMENT_SHARES[:n_winners])
-    if n_winners == WINNER_SLOTS:
-        return fixed
-    total = sum(fixed, Decimal(0))
-    return [_q(s / total) for s in fixed]
+    n = min(n_winners, WINNER_SLOTS)
+    if n == 1:
+        return [Decimal(1)]
+    runners = list(RUNNER_UP_SHARES[: n - 1])
+    king = _q(Decimal(1) - sum(runners, Decimal(0)))
+    return [king, *runners]
 
 
 def lane_contributions(scoreboard: Scoreboard) -> list[dict[str, str]]:
@@ -280,6 +350,8 @@ __all__ = [
     "SCOREBOARD_SCHEMA",
     "ROLLING_WEIGHTS",
     "TOURNAMENT_SHARES",
+    "RUNNER_UP_SHARES",
+    "build_round_scoreboard",
     "WINDOW",
     "WINNER_SLOTS",
     "BASE",
