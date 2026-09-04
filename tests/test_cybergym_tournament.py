@@ -123,10 +123,10 @@ def test_worked_example_totals_ranking_and_payout():
     assert sb.winners == ("M1", "M3", "M2", "M4", "M5")
     shares = {s.miner_hotkey: s.lane_share for s in sb.standings}
     assert shares == {
-        "M1": Decimal("0.65"), "M3": Decimal("0.14"), "M2": Decimal("0.10"),
-        "M4": Decimal("0.07"), "M5": Decimal("0.04"), "M6": Decimal("0"),
+        "M1": Decimal("0.84"), "M3": Decimal("0.07"), "M2": Decimal("0.03"),
+        "M4": Decimal("0.03"), "M5": Decimal("0.03"), "M6": Decimal("0"),
     }
-    assert sb.lane_burn == Decimal("0")  # 5 winners -> full lane pays out
+    assert sb.lane_burn == Decimal("0")  # 5 winners -> full lane pays out (king model)
 
 
 def test_effective_emission_is_share_times_the_lane():
@@ -134,7 +134,7 @@ def test_effective_emission_is_share_times_the_lane():
     sb = build_scoreboard(21, WORKED, nonce=NONCE)
     lane = Decimal("0.30")
     top = next(s for s in sb.standings if s.rank == 1)
-    assert top.lane_share * lane == Decimal("0.1950")
+    assert top.lane_share * lane == Decimal("0.2520")  # king 0.84 x 0.30 lane
 
 
 # --------------------------------------------------------------------------- #
@@ -228,16 +228,14 @@ def test_zero_score_miners_never_win():
     assert {s.miner_hotkey: s.lane_share for s in sb.standings}["5idle"] == Decimal("0")
 
 
-def test_short_field_renormalises_and_lane_burn_matches_compose_vector():
-    # <5 winners: renormalise present ranks to sum to 1 (full lane pays out, burn 0) —
-    # and shares summing to 1 is exactly what compose_vector applies, so the signed
-    # lane_burn=0 is not a false claim. (The mature-field *partial burn* is deferred to
-    # the composer-integration PR; announcing it here would sign a burn the composer
-    # renormalises away.)
+def test_short_field_king_absorbs_the_residual_and_lane_burn_is_zero():
+    # <5 winners: the king (rank 1) absorbs the residual so the vector sums to 1 (full lane
+    # pays out, burn 0) — exactly what compose_vector applies. Two miners: 0.07 to the
+    # runner-up, 0.93 to the king (king model, NOT renormalised fixed shares).
     sb = build_scoreboard(1, {"5a": [90], "5b": [80]}, nonce=NONCE)
     shares = {s.miner_hotkey: s.lane_share for s in sb.standings}
-    assert shares["5a"] == Decimal("0.822785")   # 0.65 / 0.79
-    assert shares["5b"] == Decimal("0.177215")   # 0.14 / 0.79
+    assert shares["5a"] == Decimal("0.93")   # king
+    assert shares["5b"] == Decimal("0.07")   # runner-up
     assert sum(shares.values()) == Decimal("1")
     assert sb.lane_burn == Decimal("0")
 
@@ -254,7 +252,88 @@ def test_lane_contributions_map_shares_to_work_units():
     sb = build_scoreboard(21, WORKED, nonce=NONCE)
     contribs = {c["miner_hotkey"]: Decimal(c["work_units"]) for c in lane_contributions(sb)}
     assert contribs == {
-        "M1": Decimal("0.65"), "M3": Decimal("0.14"), "M2": Decimal("0.10"),
-        "M4": Decimal("0.07"), "M5": Decimal("0.04"),
+        "M1": Decimal("0.84"), "M3": Decimal("0.07"), "M2": Decimal("0.03"),
+        "M4": Decimal("0.03"), "M5": Decimal("0.03"),
     }
     assert "M6" not in contribs  # non-winners carry no contribution
+
+
+# --------------------------------------------------------------------------- #
+# v2 single-round KING model (jared's spec, 2026-09-04)
+# --------------------------------------------------------------------------- #
+from cathedral_distill.cybergym_tournament import build_round_scoreboard, RUNNER_UP_SHARES
+
+
+def _round_shares(scores):
+    sb = build_round_scoreboard(1, scores, nonce=NONCE)
+    return {s.miner_hotkey: s.lane_share for s in sb.standings}, sb
+
+
+class TestKingModelPerMinerCount:
+    def test_one_miner_takes_the_whole_lane(self):
+        shares, sb = _round_shares({"a": 50})
+        assert shares == {"a": Decimal("1")}
+        assert sb.lane_burn == Decimal("0")
+
+    def test_two_miners_runner_up_007_king_093(self):
+        shares, _ = _round_shares({"a": 90, "b": 80})
+        assert shares == {"a": Decimal("0.93"), "b": Decimal("0.07")}
+
+    def test_three_miners(self):
+        shares, _ = _round_shares({"a": 90, "b": 80, "c": 70})
+        assert shares == {"a": Decimal("0.90"), "b": Decimal("0.07"), "c": Decimal("0.03")}
+
+    def test_four_miners(self):
+        shares, _ = _round_shares({"a": 90, "b": 80, "c": 70, "d": 60})
+        assert shares == {"a": Decimal("0.87"), "b": Decimal("0.07"),
+                          "c": Decimal("0.03"), "d": Decimal("0.03")}
+
+    def test_five_miners_king_084(self):
+        shares, _ = _round_shares({"a": 90, "b": 80, "c": 70, "d": 60, "e": 50})
+        assert shares == {"a": Decimal("0.84"), "b": Decimal("0.07"), "c": Decimal("0.03"),
+                          "d": Decimal("0.03"), "e": Decimal("0.03")}
+
+    def test_six_or_more_only_top_five_paid_king_still_084(self):
+        shares, sb = _round_shares({"a": 90, "b": 80, "c": 70, "d": 60, "e": 50, "f": 40})
+        assert shares["a"] == Decimal("0.84")
+        assert shares["f"] == Decimal("0")           # rank 6 earns nothing
+        assert sb.winners == ("a", "b", "c", "d", "e")
+        assert sum(shares.values()) == Decimal("1")  # king absorbs; lane fully paid
+
+    def test_every_nonempty_field_sums_to_one(self):
+        for n in range(1, 8):
+            scores = {f"m{i}": 100 - i for i in range(n)}
+            shares, _ = _round_shares(scores)
+            assert sum(shares.values()) == Decimal("1"), n
+
+    def test_no_miner_burns_the_whole_lane(self):
+        # "if no miner, set all weight on sandbox lane" — the CyberGym lane forfeits to burn.
+        shares, sb = _round_shares({})
+        assert sb.winners == () and sb.lane_burn == Decimal("1")
+
+    def test_only_zero_scores_burn_the_lane(self):
+        shares, sb = _round_shares({"idle": 0})
+        assert sb.winners == () and sb.lane_burn == Decimal("1")
+
+
+class TestSingleRoundHasNoRollingMemory:
+    def test_score_is_the_round_score_not_a_weighted_window(self):
+        # v2 is single-round: the standing's total IS this round's score, undiscounted
+        # (the rolling build_scoreboard would have applied the 0.50 latest weight).
+        sb = build_round_scoreboard(1, {"a": 95, "b": 40}, nonce=NONCE)
+        assert next(s for s in sb.standings if s.miner_hotkey == "a").total == Decimal("95")
+        assert next(s for s in sb.standings if s.miner_hotkey == "a").epoch_scores == (Decimal("95"),)
+
+    def test_ranking_is_deterministic_and_nonce_keyed(self):
+        a = build_round_scoreboard(1, {"a": 50, "b": 50}, nonce=b"n1").winners
+        again = build_round_scoreboard(1, {"a": 50, "b": 50}, nonce=b"n1").winners
+        assert a == again  # reproducible
+
+    def test_a_bad_nonce_is_refused(self):
+        for bad in (None, 0, b"", ""):
+            with pytest.raises(TournamentError):
+                build_round_scoreboard(1, {"a": 50}, nonce=bad)
+
+
+def test_runner_up_shares_constant_matches_spec():
+    assert RUNNER_UP_SHARES == (Decimal("0.07"), Decimal("0.03"), Decimal("0.03"), Decimal("0.03"))
