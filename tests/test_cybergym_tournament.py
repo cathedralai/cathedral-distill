@@ -228,18 +228,36 @@ def test_zero_score_miners_never_win():
     assert {s.miner_hotkey: s.lane_share for s in sb.standings}["5idle"] == Decimal("0")
 
 
-def test_short_field_renormalises_and_lane_burn_matches_compose_vector():
-    # <5 winners: renormalise present ranks to sum to 1 (full lane pays out, burn 0) —
-    # and shares summing to 1 is exactly what compose_vector applies, so the signed
-    # lane_burn=0 is not a false claim. (The mature-field *partial burn* is deferred to
-    # the composer-integration PR; announcing it here would sign a burn the composer
-    # renormalises away.)
+def test_short_field_fills_bottom_ranks_and_leader_takes_remainder():
+    # <5 winners: the bottom ranks take their fixed level shares from the bottom up and
+    # rank 1 absorbs the remainder (winner-take-most), so the lane still pays out its
+    # full 1.0 and lane_burn stays 0. Two winners -> rank 1 = 1 - S5 = 0.96, rank 2 = S5.
     sb = build_scoreboard(1, {"5a": [90], "5b": [80]}, nonce=NONCE)
     shares = {s.miner_hotkey: s.lane_share for s in sb.standings}
-    assert shares["5a"] == Decimal("0.822785")   # 0.65 / 0.79
-    assert shares["5b"] == Decimal("0.177215")   # 0.14 / 0.79
+    assert shares["5a"] == Decimal("0.96")   # rank 1 = 1 - S5
+    assert shares["5b"] == Decimal("0.04")   # rank 2 = S5
     assert sum(shares.values()) == Decimal("1")
     assert sb.lane_burn == Decimal("0")
+
+
+def test_award_shares_curve_is_the_fixed_v3_schedule():
+    # Golden values shared VERBATIM with the cathedral-validator copy of _award_shares
+    # (BOUNDARY.md fork hazard): keep this table byte-identical in both repos. Bottom
+    # ranks take fixed level shares S5..S2 from the bottom up; rank 1 takes the remainder.
+    from cathedral_distill.cybergym_tournament import _award_shares
+
+    assert _award_shares(0) == []
+    assert _award_shares(1) == [Decimal("1")]
+    assert _award_shares(2) == [Decimal("0.96"), Decimal("0.04")]
+    assert _award_shares(3) == [Decimal("0.89"), Decimal("0.07"), Decimal("0.04")]
+    assert _award_shares(4) == [
+        Decimal("0.79"), Decimal("0.10"), Decimal("0.07"), Decimal("0.04"),
+    ]
+    assert _award_shares(5) == [
+        Decimal("0.65"), Decimal("0.14"), Decimal("0.10"), Decimal("0.07"), Decimal("0.04"),
+    ]
+    for n in range(1, 6):
+        assert sum(_award_shares(n), Decimal(0)) == Decimal("1")
 
 
 def test_no_qualified_miners_burns_the_whole_lane():

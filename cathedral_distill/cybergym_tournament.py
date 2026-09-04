@@ -237,27 +237,25 @@ def build_scoreboard(
 def _award_shares(n_winners: int) -> list[Decimal]:
     """The lane shares for ``n_winners`` (0..5), in rank order.
 
-    Fewer than five qualified miners renormalize the present ranks' fixed shares to sum
-    to 1, so the whole 0.30 lane pays out to the miners that exist rather than a windfall
-    to burn. An empty field (0 winners) returns no shares — the lane has no contributions
-    and ``compose_vector`` forfeits its whole allocation to burn (an *empty* lane is the
-    one burn case ``compose_vector`` honours today). The mature-field forfeit-to-burn for
-    a **partial** field is intentionally NOT modelled here: it would require
-    ``compose_vector`` to honour an explicit intra-lane burn (today it renormalizes the
-    shortfall away), so announcing a partial ``lane_burn`` would sign a claim the composer
-    does not enforce. That lands with the composer-integration PR; until then shares
-    always sum to 1 for any non-empty field and ``lane_burn`` is 0 (or 1 for an empty
-    field), which is exactly what ``compose_vector`` does.
+    Five or more qualified miners get the fixed ``TOURNAMENT_SHARES``. With fewer than
+    five, the BOTTOM ranks take their fixed level shares from the bottom up (rank n ->
+    S5, rank n-1 -> S4, ...) and rank 1 absorbs the remainder, so the lane still pays
+    its full 1.0 while a thin field concentrates on the leader (winner-take-most) rather
+    than renormalizing every rank up. Example: two winners pay [0.96, 0.04]; three pay
+    [0.89, 0.07, 0.04]. An empty field (0 winners) returns no shares; the composer
+    decides the whole-lane outcome (burn today; the compute lane under the v3 N=0
+    redirect). Shares always sum to 1 for any non-empty field.
     """
     if n_winners <= 0:
         return []
     if n_winners > WINNER_SLOTS:  # pragma: no cover - winners is sliced to WINNER_SLOTS
         raise TournamentError("more winners than tournament slots")
-    fixed = list(TOURNAMENT_SHARES[:n_winners])
     if n_winners == WINNER_SLOTS:
-        return fixed
-    total = sum(fixed, Decimal(0))
-    return [_q(s / total) for s in fixed]
+        return list(TOURNAMENT_SHARES)
+    # Fewer than five: the bottom (n-1) ranks take the bottom (n-1) fixed shares
+    # (rank n -> S5, ...), and rank 1 takes the remainder so the lane sums to 1.
+    bottom = list(TOURNAMENT_SHARES[WINNER_SLOTS - (n_winners - 1):])
+    return [_q(Decimal(1) - sum(bottom, Decimal(0)))] + bottom
 
 
 def lane_contributions(scoreboard: Scoreboard) -> list[dict[str, str]]:
