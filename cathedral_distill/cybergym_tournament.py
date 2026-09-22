@@ -10,8 +10,8 @@ The mechanism (see ``CYBERGYM_DISPATCH_SCORING_DESIGN``):
    epochs count as 0, so a newcomer's only epoch is the latest (weight 0.50) and can
    reach the top-5 in a few epochs.
 3. **Top-5 rank tournament, KING model (v2).** Miners are ranked (ties broken
-   deterministically); ranks 2..5 take fixed shares 0.07, 0.03, 0.03, 0.03 and the KING
-   (rank 1) takes the residual, so a full field is 0.84, 0.07, 0.03, 0.03, 0.03 and a lone
+   deterministically); ranks 2..5 take fixed shares 0.20, 0.10, 0.06, 0.04 and the KING
+   (rank 1) takes the residual, so a full field is 0.60, 0.20, 0.10, 0.06, 0.04 and a lone
    miner takes the whole lane. ``build_round_scoreboard`` scores a SINGLE round (no rolling
    window); ``build_scoreboard`` keeps the legacy rolling total.
 
@@ -41,17 +41,40 @@ WINDOW = len(ROLLING_WEIGHTS)  # 5
 # Fixed lane shares for ranks 2..5 (the "runners-up"); the KING (rank 1) takes the residual
 # ``1 - sum(present runner-up shares)`` so the shares always sum to 1 for any non-empty field.
 # At a full field of 5 that is king 0.84, then 0.07, 0.03, 0.03, 0.03. Winner-take-most on
-# purpose: the lane rewards the single best security agent, with a small tail to keep the next
-# few competing. See ``_award_shares`` for the per-count payout (jared's spec, 2026-09-04).
+# purpose: the lane rewards the single best security agent, with a tail that keeps the next few
+# competing. See ``_award_shares`` for the per-count payout (jared's spec, 2026-09-04).
+#
+# SOFTENED 2026-09-22, from 0.84/0.07/0.03/0.03/0.03, after measuring what a round can actually
+# distinguish. A round draws 25 tasks. Simulating two miners at 44% and 40% true solve rates
+# (400k rounds): the better one fails to strictly outscore the worse in 44.1% of rounds -- 33.2%
+# outright plus a 10.9% exact tie that the round nonce then breaks -- so the worse miner wears
+# the crown about 38.7% of the time. NO curve changes that, because the curve decides what a win
+# is worth, not who wins. Raising the task count barely moves it (35.9% at 40 tasks, 32.9% at 60)
+# and does not fit the box's disk.
+#
+# What the curve CAN set is the price of a coin-flip. In a full field the rank-1-to-rank-2 gap
+# falls from 0.77 to 0.40, so a miner flipping between first and second swings by 0.40 of the
+# lane per round instead of 0.77 (stdev 0.385 -> 0.20 at an even flip).
+#
+# The king premium is kept deliberately -- 3x the first runner-up -- because rewarding the single
+# best agent is the mechanism, not an accident. This softens a coin-flip, it does not flatten the
+# field: where miners ARE clearly separated (60% vs 40%) the worse one takes the king in only
+# 7.8% of rounds and the leader still holds 0.60.
+#
+# KNOWN TRADE-OFF: softening raises what a SECOND identity is worth to one operator. Holding the
+# top two of a field of five pays 0.80 instead of 0.91, but the MARGIN over holding just the top
+# one grows from +0.07 to +0.20. Sybil resistance in this lane does not come from the curve (a
+# full sweep always paid 1.00); it comes from registration cost and from every submission
+# carrying its own attested TEE + model spend. Flagged so the next curve change reconsiders it.
 RUNNER_UP_SHARES: tuple[Decimal, ...] = (
-    Decimal("0.07"), Decimal("0.03"), Decimal("0.03"), Decimal("0.03"),
+    Decimal("0.20"), Decimal("0.10"), Decimal("0.06"), Decimal("0.04"),
 )
 WINNER_SLOTS = len(RUNNER_UP_SHARES) + 1  # 5 (king + four runners-up)
 
 # Back-compat alias: some consumers imported the old name. It now names the full-field payout
 # (king first), which is what those call sites used it for (a rank-ordered share vector).
 TOURNAMENT_SHARES: tuple[Decimal, ...] = (
-    Decimal("0.84"), Decimal("0.07"), Decimal("0.03"), Decimal("0.03"), Decimal("0.03"),
+    Decimal("0.60"), Decimal("0.20"), Decimal("0.10"), Decimal("0.06"), Decimal("0.04"),
 )
 
 BASE = Decimal("100")
@@ -306,10 +329,10 @@ def _award_shares(n_winners: int) -> list[Decimal]:
     only how much the king keeps, and the vector always sums to 1 for any non-empty field:
 
         n=1 → [1.00]                       (a lone miner takes the whole lane)
-        n=2 → [0.93, 0.07]
-        n=3 → [0.90, 0.07, 0.03]
-        n=4 → [0.87, 0.07, 0.03, 0.03]
-        n=5 → [0.84, 0.07, 0.03, 0.03, 0.03]
+        n=2 → [0.80, 0.20]
+        n=3 → [0.70, 0.20, 0.10]
+        n=4 → [0.64, 0.20, 0.10, 0.06]
+        n=5 → [0.60, 0.20, 0.10, 0.06, 0.04]
 
     More than five winners cannot happen (``winners`` is sliced to ``WINNER_SLOTS``); ranks 6+
     earn nothing. n=0 returns no shares — an empty lane forfeits its whole allocation to burn

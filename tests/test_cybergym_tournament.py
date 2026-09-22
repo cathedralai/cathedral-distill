@@ -123,8 +123,8 @@ def test_worked_example_totals_ranking_and_payout():
     assert sb.winners == ("M1", "M3", "M2", "M4", "M5")
     shares = {s.miner_hotkey: s.lane_share for s in sb.standings}
     assert shares == {
-        "M1": Decimal("0.84"), "M3": Decimal("0.07"), "M2": Decimal("0.03"),
-        "M4": Decimal("0.03"), "M5": Decimal("0.03"), "M6": Decimal("0"),
+        "M1": Decimal("0.60"), "M3": Decimal("0.20"), "M2": Decimal("0.10"),
+        "M4": Decimal("0.06"), "M5": Decimal("0.04"), "M6": Decimal("0"),
     }
     assert sb.lane_burn == Decimal("0")  # 5 winners -> full lane pays out (king model)
 
@@ -134,7 +134,7 @@ def test_effective_emission_is_share_times_the_lane():
     sb = build_scoreboard(21, WORKED, nonce=NONCE)
     lane = Decimal("0.30")
     top = next(s for s in sb.standings if s.rank == 1)
-    assert top.lane_share * lane == Decimal("0.2520")  # king 0.84 x 0.30 lane
+    assert top.lane_share * lane == Decimal("0.180000")  # king 0.60 x 0.30 lane
 
 
 # --------------------------------------------------------------------------- #
@@ -230,12 +230,12 @@ def test_zero_score_miners_never_win():
 
 def test_short_field_king_absorbs_the_residual_and_lane_burn_is_zero():
     # <5 winners: the king (rank 1) absorbs the residual so the vector sums to 1 (full lane
-    # pays out, burn 0) — exactly what compose_vector applies. Two miners: 0.07 to the
-    # runner-up, 0.93 to the king (king model, NOT renormalised fixed shares).
+    # pays out, burn 0) — exactly what compose_vector applies. Two miners: 0.20 to the
+    # runner-up, 0.80 to the king (king model, NOT renormalised fixed shares).
     sb = build_scoreboard(1, {"5a": [90], "5b": [80]}, nonce=NONCE)
     shares = {s.miner_hotkey: s.lane_share for s in sb.standings}
-    assert shares["5a"] == Decimal("0.93")   # king
-    assert shares["5b"] == Decimal("0.07")   # runner-up
+    assert shares["5a"] == Decimal("0.80")   # king
+    assert shares["5b"] == Decimal("0.20")   # runner-up
     assert sum(shares.values()) == Decimal("1")
     assert sb.lane_burn == Decimal("0")
 
@@ -252,8 +252,8 @@ def test_lane_contributions_map_shares_to_work_units():
     sb = build_scoreboard(21, WORKED, nonce=NONCE)
     contribs = {c["miner_hotkey"]: Decimal(c["work_units"]) for c in lane_contributions(sb)}
     assert contribs == {
-        "M1": Decimal("0.84"), "M3": Decimal("0.07"), "M2": Decimal("0.03"),
-        "M4": Decimal("0.03"), "M5": Decimal("0.03"),
+        "M1": Decimal("0.60"), "M3": Decimal("0.20"), "M2": Decimal("0.10"),
+        "M4": Decimal("0.06"), "M5": Decimal("0.04"),
     }
     assert "M6" not in contribs  # non-winners carry no contribution
 
@@ -275,27 +275,30 @@ class TestKingModelPerMinerCount:
         assert shares == {"a": Decimal("1")}
         assert sb.lane_burn == Decimal("0")
 
-    def test_two_miners_runner_up_007_king_093(self):
+    def test_two_miners_runner_up_020_king_080(self):
+        """Softened 2026-09-22. A 25-task round cannot tell 40% from 44% (the worse miner takes
+        the king in 44% of rounds, whatever the curve), so the curve should not make one lucky
+        task worth 77% of the lane. At 0.80/0.20 a coin-flip moves 60 points, not 86."""
         shares, _ = _round_shares({"a": 90, "b": 80})
-        assert shares == {"a": Decimal("0.93"), "b": Decimal("0.07")}
+        assert shares == {"a": Decimal("0.80"), "b": Decimal("0.20")}
 
     def test_three_miners(self):
         shares, _ = _round_shares({"a": 90, "b": 80, "c": 70})
-        assert shares == {"a": Decimal("0.90"), "b": Decimal("0.07"), "c": Decimal("0.03")}
+        assert shares == {"a": Decimal("0.70"), "b": Decimal("0.20"), "c": Decimal("0.10")}
 
     def test_four_miners(self):
         shares, _ = _round_shares({"a": 90, "b": 80, "c": 70, "d": 60})
-        assert shares == {"a": Decimal("0.87"), "b": Decimal("0.07"),
-                          "c": Decimal("0.03"), "d": Decimal("0.03")}
+        assert shares == {"a": Decimal("0.64"), "b": Decimal("0.20"),
+                          "c": Decimal("0.10"), "d": Decimal("0.06")}
 
-    def test_five_miners_king_084(self):
+    def test_five_miners_king_060(self):
         shares, _ = _round_shares({"a": 90, "b": 80, "c": 70, "d": 60, "e": 50})
-        assert shares == {"a": Decimal("0.84"), "b": Decimal("0.07"), "c": Decimal("0.03"),
-                          "d": Decimal("0.03"), "e": Decimal("0.03")}
+        assert shares == {"a": Decimal("0.60"), "b": Decimal("0.20"), "c": Decimal("0.10"),
+                          "d": Decimal("0.06"), "e": Decimal("0.04")}
 
-    def test_six_or_more_only_top_five_paid_king_still_084(self):
+    def test_six_or_more_only_top_five_paid_king_still_060(self):
         shares, sb = _round_shares({"a": 90, "b": 80, "c": 70, "d": 60, "e": 50, "f": 40})
-        assert shares["a"] == Decimal("0.84")
+        assert shares["a"] == Decimal("0.60")
         assert shares["f"] == Decimal("0")           # rank 6 earns nothing
         assert sb.winners == ("a", "b", "c", "d", "e")
         assert sum(shares.values()) == Decimal("1")  # king absorbs; lane fully paid
@@ -336,4 +339,22 @@ class TestSingleRoundHasNoRollingMemory:
 
 
 def test_runner_up_shares_constant_matches_spec():
-    assert RUNNER_UP_SHARES == (Decimal("0.07"), Decimal("0.03"), Decimal("0.03"), Decimal("0.03"))
+    assert RUNNER_UP_SHARES == (Decimal("0.20"), Decimal("0.10"), Decimal("0.06"), Decimal("0.04"))
+
+
+def test_the_king_premium_survives_the_softening():
+    """Softening is not flattening: rewarding the single best agent is the mechanism. The king
+    still takes 3x the first runner-up and half the lane on a full field."""
+    from cathedral_distill.cybergym_tournament import _award_shares
+
+    king, first_runner_up = _award_shares(5)[0], _award_shares(5)[1]
+    assert king == Decimal("0.60") and king >= 3 * first_runner_up
+
+
+def test_a_lost_round_costs_less_than_the_whole_lane():
+    """What the softening buys, stated as a property: the gap between winning and placing second
+    is what a single lucky task is worth, and it used to be 0.77 of the lane."""
+    from cathedral_distill.cybergym_tournament import _award_shares
+
+    king, runner_up = _award_shares(5)[0], _award_shares(5)[1]
+    assert king - runner_up == Decimal("0.40")
