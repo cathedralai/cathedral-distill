@@ -110,6 +110,11 @@ class DispatchMessage:
     valid_until_block: int
     tasks: tuple[DispatchedTask, ...]
 
+    def __post_init__(self) -> None:
+        task_ids = tuple(task.task_id for task in self.tasks)
+        if len(task_ids) != len(set(task_ids)):
+            raise ProtocolError("dispatch task ids must be unique")
+
     def task(self, task_id: str) -> DispatchedTask | None:
         for t in self.tasks:
             if t.task_id == task_id:
