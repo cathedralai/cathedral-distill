@@ -111,6 +111,12 @@ def test_dispatch_is_deterministic_and_serialisable():
     assert a.to_dict()["schema"] == cp.DISPATCH_SCHEMA
 
 
+def test_dispatch_rejects_duplicate_task_ids():
+    dispatch_msg = _dispatch()
+    with pytest.raises(cp.ProtocolError, match="dispatch task ids must be unique"):
+        replace(dispatch_msg, tasks=(dispatch_msg.tasks[0], dispatch_msg.tasks[0]))
+
+
 # --------------------------------------------------------------------------- #
 # Full loop — solve → submit → verify → corpus
 # --------------------------------------------------------------------------- #
