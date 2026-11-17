@@ -46,9 +46,12 @@ SUBMISSION_DOMAIN = b"cathedral-cybergym-submission-v1\x00"
 CRASH_CLEAN_CODES = frozenset({0, 300})
 
 _DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
-# arvo:<n> / oss-fuzz:<n> are the public corpus; synthvuln:<nonce8>:<n> is a
-# development-only generated challenge; freshvuln:<nonce8>:<n> is the sealed,
-# validator-held fresh challenge source.  The two generated prefixes remain
+# arvo:<n> / oss-fuzz:<n> are the public corpus; synthvuln:<identity>:<n> is a
+# development-only generated challenge; freshvuln:<identity>:<n> is the sealed,
+# validator-held fresh challenge source. Both generated prefixes carry a 16-hex
+# identity committing to the WHOLE nonce (plus index, plus level for synthvuln),
+# never a truncation of it: one task id names one challenge and only one (#118).
+# The two generated prefixes remain
 # distinct because ``synthvuln`` deliberately renders its answer and therefore
 # must never be rewardable. ``freshvuln`` is likewise non-rewardable while its
 # rendered reversible artifact allows mechanical trigger recovery; it needs a
@@ -92,9 +95,10 @@ _TASK_ID_HELP = (
 def validate_synthetic_nonce(nonce: str) -> str:
     """Return `nonce` if it can appear in a task id, else raise with the fix.
 
-    Checked at the boundary a nonce ENTERS on, rather than where the task id is
-    later parsed: by then the nonce is embedded in a larger string and the error
-    can only report that the task id is malformed, which is true but useless.
+    Checked at the boundary a nonce ENTERS on, rather than where a value derived
+    from it is later parsed: by then the nonce is one input among several and the
+    error can only report that the derived value is malformed, which is true but
+    useless.
 
     The grammar is deliberately not widened to admit hyphens. A task id is a wire
     value -- it appears in submissions, receipts and every corpus row -- so
@@ -108,7 +112,7 @@ def validate_synthetic_nonce(nonce: str) -> str:
     hint = f" Try {suggestion!r}." if suggestion else ""
     raise CyberGymError(
         f"synthetic nonce {nonce!r} may only contain lowercase letters and digits, "
-        f"because it is embedded in the task id as synthvuln:<nonce>:<n>.{hint}")
+        f"because it is the seed every synthetic wire value is derived from.{hint}")
 
 
 class CyberGymError(ValueError):

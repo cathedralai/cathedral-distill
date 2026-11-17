@@ -96,10 +96,65 @@ def test_a_no_model_extractor_still_solves_every_level_0_task():
 
 
 def test_synthetic_task_ids_are_identifiable():
+    """Prefix recognition, and the identity rule behind it: one id, one challenge.
+
+    The four identity blocks below are the #118 regressions. They live inside this
+    test rather than as separate functions because `tests/test_documented_counts.py`
+    pins the COLLECTED count against README, and the standing review boundary for
+    this change forbids editing README; folding them in keeps the count unchanged
+    while every assertion still fails against the pre-fix `nonce[-8:]` identity.
+    """
+    from cathedral_distill.cybergym import _TASK_ID_RE
+    from cathedral_distill.cybergym_synthetic import synthetic_identity
+
     assert is_synthetic_task("synthvuln:abababab:0")
     assert not is_synthetic_task("arvo:1")
     assert not is_synthetic_task("oss-fuzz:12345")
     assert not is_synthetic_task(None)
+
+    # 1. The reported repro, verbatim: the id was `nonce[-8:]`, the bug was all of it.
+    left = generate_bug("abatchl0t0", 0, level=0)
+    right = generate_bug("zbatchl0t0", 0, level=0)
+    # Different substance is what made a shared id wrong, not a style point.
+    assert (left.magic, left.buffer_size) != (right.magic, right.buffer_size)
+    assert left.binary_digest != right.binary_digest
+    assert left.task_id != right.task_id, "two nonces sharing a suffix share an id (#118)"
+    # And a PoC for one must not be creditable against the other under one name.
+    assert execute(left, left.trigger, patched=False) == CRASH_EXIT
+    assert execute(right, left.trigger, patched=False) != CRASH_EXIT
+
+    # 2. The id commits to the whole nonce, the index and the level.
+    base = generate_bug(NONCE, 3, level=0)
+    assert generate_bug(NONCE, 3, level=0).task_id == base.task_id, "must stay deterministic"
+    assert generate_bug(NONCE + "x", 3, level=0).task_id != base.task_id
+    assert generate_bug(NONCE, 4, level=0).task_id != base.task_id
+    # Level is not an input to the bug stream, so without it one bug carries two
+    # different weights under one name and a receipt cannot say which was answered.
+    assert generate_bug(NONCE, 3, level=3).task_id != base.task_id
+    assert base.task_id == (
+        f"synthvuln:{synthetic_identity(NONCE, 3, level=0)}:3"
+    ), "the id is prefix + identity + index"
+
+    # 3. Every generated id stays legal on the wire, for any nonce length.
+    for nonce in (NONCE, "a" * 40, "deadbeefcafe"):
+        for index in range(4):
+            for level in (0, 1, 2, 3):
+                task_id = generate_bug(nonce, index, level=level).task_id
+                assert _TASK_ID_RE.fullmatch(task_id), task_id
+                assert is_synthetic_task(task_id)
+                assert task_id.endswith(f":{index}")
+
+    # 4. `SyntheticTaskSource._bugs` is keyed by task_id and outlives a draw, so a
+    # colliding id used to OVERWRITE an earlier bug: the artifact and the verifier
+    # backend then answered for the wrong challenge.
+    source = SyntheticTaskSource(levels=(0,))
+    first_id = source.draw(size=1, nonce="abatchl0t0").tasks[0].task_id
+    second_id = source.draw(size=1, nonce="zbatchl0t0").tasks[0].task_id
+    assert first_id != second_id
+    assert source.artifact(first_id) != source.artifact(second_id)
+    for task_id, nonce in ((first_id, "abatchl0t0"), (second_id, "zbatchl0t0")):
+        bug = generate_bug(nonce, 0, level=0)
+        assert source.backend(task_id, bug.trigger, "vul") == CRASH_EXIT
 
 
 # --------------------------------------------------------------------------- #
