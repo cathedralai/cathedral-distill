@@ -274,6 +274,18 @@ def build_execution_log(
     return json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
+#: Which grader produced a `HarnessScore`. The consensus model (#137) is: the harness runs
+#: ONCE, its per-task output is committed by digest, and every validator grades those
+#: committed bytes. A score from `evaluate_harness` is a RE-EXECUTION -- the harness is a
+#: reasoning agent reaching a model, so its output is not bit-identical across independent
+#: runs and two honest validators can legitimately rank it differently. Such a score is the
+#: producer's own authoritative run: correct to COMMIT from (`execution_from_score`), never
+#: correct to PAY from. A score from `grade_committed_execution` re-derives the rank from
+#: bytes that are fixed by digest, so every validator gets the same answer.
+GRADED_FROM_RE_EXECUTION = "re_execution"
+GRADED_FROM_COMMITTED_EXECUTION = "committed_execution"
+
+
 @dataclass(frozen=True)
 class HarnessScore:
     """A harness's capability on one fresh batch: solve count over what was dispatched."""
@@ -295,6 +307,21 @@ class HarnessScore:
     #: height than the submission actually had, and a re-grader would then "verify" a
     #: commitment that never happened.
     commitment_block: int | None = None
+    #: Which grader produced this score (`GRADED_FROM_*`). Defaults to re-execution so an
+    #: unlabelled or hand-built score is never PRESUMED reproducible, the same discipline
+    #: `commitment_verified` uses. It is deliberately NOT in `consensus_digest` (see there:
+    #: the producer re-grades its own committed run and that verdict must match across the
+    #: two labels); it is enforced in `cybergym_incentive.credited_rate`, which pays a score
+    #: that is not consensus-graded zero. Without this field a consumer could not tell the
+    #: two apart: both
+    #: graders returned the identical shape, so the only thing standing between a
+    #: non-reproducible score and the weight vector was a docstring (#137).
+    graded_from: str = GRADED_FROM_RE_EXECUTION
+
+    @property
+    def is_consensus_graded(self) -> bool:
+        """Whether this score is reproducible by another validator from committed bytes."""
+        return self.graded_from == GRADED_FROM_COMMITTED_EXECUTION
 
     @property
     def solved(self) -> int:
@@ -428,6 +455,7 @@ def evaluate_harness(
         results=tuple(results),
         commitment_verified=verified,
         commitment_block=submission.commitment_block,
+        graded_from=GRADED_FROM_RE_EXECUTION,
     )
 
 
@@ -682,6 +710,7 @@ def grade_committed_execution(
         results=tuple(results),
         commitment_verified=verified,
         commitment_block=execution.commitment_block,
+        graded_from=GRADED_FROM_COMMITTED_EXECUTION,
     )
 
 
@@ -690,7 +719,15 @@ def consensus_digest(score: HarnessScore) -> str:
 
     Covers only the fields that MUST agree between validators: the identity being ranked, the
     batch size, and per task the solve bit, the committed exploit digest, and the differential
-    outcome. Deliberately EXCLUDES ``duration_ms``, ``log_sha256`` and ``exit_reason`` — wall
+    outcome.
+
+    Deliberately EXCLUDES ``graded_from``. This digest answers "did we reach the same
+    verdict", and the producer legitimately compares its own ``evaluate_harness`` score
+    against the ``grade_committed_execution`` re-grade of the record it committed from it
+    (`execution_from_score`) — that comparison MUST be equal, and it spans the two grader
+    labels. Provenance governs how a score may be USED, not what it scored, so it is
+    enforced where it bites: `cybergym_incentive.credited_rate` pays a non-consensus score
+    zero (#137). Deliberately EXCLUDES ``duration_ms``, ``log_sha256`` and ``exit_reason`` — wall
     time is validator-local, and the other two describe how the run went rather than what it
     scored, so folding them in would report divergence where the rank does not actually differ.
 
@@ -813,6 +850,11 @@ __all__ = [
     "build_execution_log",
     "task_family",
     "evaluate_harness",
+    "grade_committed_execution",
+    "consensus_digest",
+    "execution_from_score",
+    "GRADED_FROM_RE_EXECUTION",
+    "GRADED_FROM_COMMITTED_EXECUTION",
     "rank_harnesses",
     "local_harness_runner",
 ]

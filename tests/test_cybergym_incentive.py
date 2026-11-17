@@ -48,7 +48,7 @@ def _obs(n, solved_fraction=0.5, age_days=1):
 
 def _rate(n, solved_fraction=0.5, **kw):
     return credited_rate(weigh(_obs(n, solved_fraction), as_of=NOW),
-                         commitment_verified=True, **kw)
+                         commitment_verified=True, consensus_graded=True, **kw)
 
 
 class TestItNeverPaysForNothing:
@@ -64,16 +64,50 @@ class TestItNeverPaysForNothing:
 
     def test_an_unverified_commitment_is_paid_zero(self):
         """`cybergym_stage1` records whether commit-then-draw was actually proven and says a
-        consumer moving weight must refuse an unverified score. This is that consumer."""
+        consumer moving weight must refuse an unverified score. This is that consumer.
+
+        The second block is the same rule for consensus provenance (#137): a score from
+        `evaluate_harness` is a re-execution of a reasoning harness, so it is not
+        reproducible across validators and must be paid nothing however strong it looks.
+        Folded in here rather than added as its own test because
+        `tests/test_documented_counts.py` pins the collected count against README and the
+        standing boundary for this change forbids editing README.
+        """
+        from cathedral_distill import cybergym_stage1 as s1
+
         strong = weigh(_obs(91, 1.0), as_of=NOW)
-        assert credited_rate(strong, commitment_verified=True) > Decimal("0.9")
-        assert credited_rate(strong, commitment_verified=False) == Decimal(0)
+        assert credited_rate(
+            strong, commitment_verified=True, consensus_graded=True) > Decimal("0.9")
+        assert credited_rate(
+            strong, commitment_verified=False, consensus_graded=True) == Decimal(0)
+
+        # Perfect evidence, proven freshness, but graded by re-execution: pays nothing.
+        assert credited_rate(
+            strong, commitment_verified=True, consensus_graded=False) == Decimal(0)
+        # And the flag a caller is meant to pass is the score's own property, so the two
+        # cannot drift apart.
+        re_exec = s1.HarnessScore("5Miner", "sha256:" + "ab" * 32, 1)
+        committed = s1.HarnessScore(
+            "5Miner", "sha256:" + "ab" * 32, 1,
+            graded_from=s1.GRADED_FROM_COMMITTED_EXECUTION)
+        assert re_exec.graded_from == s1.GRADED_FROM_RE_EXECUTION, "default is never safe"
+        assert not re_exec.is_consensus_graded and committed.is_consensus_graded
+        assert credited_rate(
+            strong, commitment_verified=True,
+            consensus_graded=re_exec.is_consensus_graded) == Decimal(0)
+        assert credited_rate(
+            strong, commitment_verified=True,
+            consensus_graded=committed.is_consensus_graded) > Decimal("0.9")
 
     def test_the_verification_flag_cannot_be_forgotten(self):
-        """It is a REQUIRED keyword — a caller who never thought about freshness cannot
-        accidentally get paid behaviour."""
+        """Both are REQUIRED keywords — a caller who never thought about freshness or about
+        cross-validator reproducibility cannot accidentally get paid behaviour."""
         with pytest.raises(TypeError):
             credited_rate(weigh(_obs(10), as_of=NOW))
+        with pytest.raises(TypeError):
+            credited_rate(weigh(_obs(10), as_of=NOW), commitment_verified=True)
+        with pytest.raises(TypeError):
+            credited_rate(weigh(_obs(10), as_of=NOW), consensus_graded=True)
 
 
 class TestItNeverOverpaysOnLuck:
@@ -184,9 +218,12 @@ class TestDeterminismBecauseThisFeedsWeights:
 
     def test_repeated_evaluation_is_identical(self):
         rows = _obs(40, 0.5)
-        first = credited_rate(weigh(rows, as_of=NOW), commitment_verified=True)
+        first = credited_rate(
+            weigh(rows, as_of=NOW), commitment_verified=True, consensus_graded=True)
         for _ in range(5):
-            assert credited_rate(weigh(rows, as_of=NOW), commitment_verified=True) == first
+            assert credited_rate(
+                weigh(rows, as_of=NOW), commitment_verified=True,
+                consensus_graded=True) == first
 
     def test_the_result_is_decimal_not_float(self):
         """Floats would make cross-validator agreement libm-dependent."""
