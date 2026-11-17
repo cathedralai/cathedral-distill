@@ -189,6 +189,7 @@ def credited_rate(
     evidence: Evidence,
     *,
     commitment_verified: bool,
+    consensus_graded: bool,
     carried: tuple[Decimal, Decimal] | None = None,
     z: Decimal = Z,
 ) -> Decimal:
@@ -200,14 +201,29 @@ def credited_rate(
     score is paid **zero**. Making it a required keyword means the check cannot be
     forgotten by a caller who simply did not think about it.
 
+    ``consensus_graded`` is required on the same terms, and is the other half of the same
+    rule (#137). Pass ``score.is_consensus_graded``. A score from `evaluate_harness` is a
+    re-execution of a reasoning harness, so it is not bit-identical across validators: two
+    honest validators would derive different numbers and write different weight vectors.
+    Only a score re-derived from committed bytes (`grade_committed_execution`) is
+    reproducible, so a re-executed score is paid **zero** here. Before this, the only thing
+    separating the two was `rank_harnesses`' docstring, and both graders returned the
+    identical type — an advisory contract on the exact path that moves emission.
+
     The bound is floored at zero: a posterior whose mean sits inside its own uncertainty
     band describes a harness we cannot distinguish from one that solves nothing, and the
     honest payment for that is nothing.
     """
     if not isinstance(commitment_verified, bool):
         raise IncentiveError("commitment_verified must be a bool")
+    if not isinstance(consensus_graded, bool):
+        raise IncentiveError("consensus_graded must be a bool")
     if not commitment_verified:
         # Not a low rate — no rate. The freshness the score depends on was never proven.
+        return _ZERO
+    if not consensus_graded:
+        # Not a low rate — no rate. A re-executed score cannot be re-derived by another
+        # validator, so paying it puts a number on chain that nobody else can reproduce.
         return _ZERO
     if z < 0:
         raise IncentiveError("z cannot be negative")

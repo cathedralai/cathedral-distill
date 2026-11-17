@@ -99,6 +99,10 @@ class TestTheProblemIsReal:
         backend = _solving_backend({_exploit(t) for t, _ in TASKS})
         first = s1.evaluate_harness(_submission(), _dispatch(), runner=runner, backend=backend)
         second = s1.evaluate_harness(_submission(), _dispatch(), runner=runner, backend=backend)
+        # ...and it is now LABELLED non-reproducible, so the payment path refuses it rather
+        # than relying on a consumer having read `rank_harnesses`' docstring (#137).
+        assert first.graded_from == s1.GRADED_FROM_RE_EXECUTION
+        assert not first.is_consensus_graded
         assert (first.solved, second.solved) == (2, 0)
         assert s1.consensus_digest(first) != s1.consensus_digest(second)
 
@@ -116,6 +120,9 @@ class TestGradingCommittedBytesCannotDiverge:
         assert a == b
         assert s1.consensus_digest(a) == s1.consensus_digest(b)
         assert a.solved == 2
+        # The score says WHICH grader produced it, so a consumer can refuse the other one.
+        assert a.graded_from == s1.GRADED_FROM_COMMITTED_EXECUTION
+        assert a.is_consensus_graded
 
     def test_it_takes_no_runner_at_all(self):
         """The structural guarantee: there is no seam for the harness to run again on."""
@@ -253,6 +260,14 @@ class TestTheConsensusDigestReportsOnlyRealDisagreement:
         mine = s1.HarnessScore("5Miner", HARNESS, 1, ())
         theirs = s1.HarnessScore("5Other", HARNESS, 1, ())
         assert s1.consensus_digest(mine) != s1.consensus_digest(theirs)
+
+        # The grader label is deliberately NOT covered: the producer compares its own
+        # re-executed score against the re-grade of the record it committed from it, and
+        # that comparison must be equal across the two labels. Provenance is enforced at
+        # the payment seam instead (`cybergym_incentive.credited_rate`), not here (#137).
+        from dataclasses import replace
+        committed = replace(mine, graded_from=s1.GRADED_FROM_COMMITTED_EXECUTION)
+        assert s1.consensus_digest(mine) == s1.consensus_digest(committed)
 
 
 class TestTheProducerRecord:
